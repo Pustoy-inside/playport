@@ -3,8 +3,10 @@
 
 Approve each entire executable workflow, not an upload-command/suffix denylist.
 New jobs/actions/scripts/permissions must be reviewed here as well as in YAML.
-checks.yml tests the source; pages.yml publishes site/ (the landing page) and
-nothing else.
+checks.yml tests the source; pages.yml publishes site/. In nVoxel's personal fork,
+personal-ipa.yml additionally builds an unsigned IPA at the owner's request.
+Its reviewed workflow is deliberately duplicated in fixtures/; unrelated workflow
+additions remain rejected. The upstream repository's source-only policy is unchanged.
 This cannot defend against changes to this test or uploads hidden in tested code.
 """
 
@@ -76,7 +78,9 @@ jobs:
       - id: deploy
         uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
 """
-APPROVED = {"checks.yml": APPROVED_CHECKS, "pages.yml": APPROVED_PAGES}
+APPROVED_PERSONAL = (Path(__file__).parent / "fixtures" / "personal-ipa-workflow.yml").read_text()
+APPROVED = {"checks.yml": APPROVED_CHECKS, "pages.yml": APPROVED_PAGES,
+            "personal-ipa.yml": APPROVED_PERSONAL}
 
 
 def executable_lines(text):
@@ -91,7 +95,7 @@ def workflow_problems(directory):
         return ["workflow directory must be a regular directory"]
     entries = sorted(directory.iterdir())
     if [entry.name for entry in entries] != sorted(APPROVED):
-        return ["only the reviewed checks.yml and pages.yml workflows are allowed"]
+        return ["only the reviewed checks.yml, pages.yml and personal-ipa.yml workflows are allowed"]
     for workflow in entries:
         name = workflow.name
         if workflow.is_symlink() or not workflow.is_file():
@@ -106,7 +110,7 @@ def workflow_problems(directory):
 
 
 class PublicCI(unittest.TestCase):
-    def test_repository_workflows_are_source_only(self):
+    def test_repository_workflows_match_reviewed_policy(self):
         self.assertEqual(workflow_problems(REPO / ".github/workflows"), [])
 
 
@@ -122,6 +126,7 @@ class PolicyRegressions(unittest.TestCase):
         self.workflow.write_text(APPROVED_CHECKS, encoding="utf-8")
         self.pages = self.directory / "pages.yml"
         self.pages.write_text(APPROVED_PAGES, encoding="utf-8")
+        (self.directory / "personal-ipa.yml").write_text(APPROVED_PERSONAL, encoding="utf-8")
 
     def reject(self, text):
         self.workflow.write_text(text, encoding="utf-8")

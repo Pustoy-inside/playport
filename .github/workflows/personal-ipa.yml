@@ -9,7 +9,7 @@ permissions:
   contents: read
 concurrency:
   group: personal-ipa
-  cancel-in-progress: false
+  cancel-in-progress: true
 env:
   TRANSFER_TAG: ci-sdk-${{ github.run_id }}-${{ github.run_attempt }}
 jobs:

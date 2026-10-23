@@ -54,8 +54,26 @@ cmake -S "$translator" -B "$translator/build" -G Ninja \
 cmake --build "$translator/build" --parallel "$JOBS"
 cmake --install "$translator/build"
 ln -s "$translator_prefix/bin/llvm-spirv" "$host_bin/llvm-spirv"
-echo "PKG_CONFIG_PATH=$translator_prefix/lib/pkgconfig" >> "$GITHUB_ENV"
-echo "LD_LIBRARY_PATH=$translator_prefix/lib:/usr/lib/llvm-22/lib" >> "$GITHUB_ENV"
+
+# xtool's Linux system-library targets need newer mobile-device libraries
+# than Ubuntu 24.04 supplies. These are the release versions in xtool's
+# own Docker recipe, with libimobiledevice pinned to its 1.4.0 release.
+mobile_prefix="$PLAYPORT_BUILD/inputs/mobiledevice"
+export PKG_CONFIG_PATH="$mobile_prefix/lib/pkgconfig:$translator_prefix/lib/pkgconfig"
+export LD_LIBRARY_PATH="$mobile_prefix/lib:$translator_prefix/lib:/usr/lib/llvm-22/lib"
+for spec in libplist:2.6.0 libimobiledevice-glue:1.3.1 libusbmuxd:2.1.0 libtatsu:1.0.4 libimobiledevice:1.4.0; do
+    name=${spec%%:*}; version=${spec#*:}
+    tree="$PLAYPORT_BUILD/inputs/$name"
+    git clone --depth 1 --branch "$version" "https://github.com/libimobiledevice/$name.git" "$tree"
+    (
+        cd "$tree"
+        ./autogen.sh --prefix="$mobile_prefix" --without-cython
+        make -j"$JOBS"
+        make install
+    )
+done
+echo "PKG_CONFIG_PATH=$PKG_CONFIG_PATH" >> "$GITHUB_ENV"
+echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH" >> "$GITHUB_ENV"
 
 swift_root="$PLAYPORT_BUILD/inputs/swift"
 mkdir -p "$swift_root"

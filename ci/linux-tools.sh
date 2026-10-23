@@ -27,7 +27,7 @@ sudo apt-get install -y --no-install-recommends llvm-22-dev clang-tools-22 libcl
     libclc-22 libclc-22-dev
 host_bin="$PLAYPORT_BUILD/inputs/host-bin"
 mkdir -p "$host_bin"
-for name in clang clang++ ld64.lld llvm-ar llvm-nm llvm-objdump llvm-objcopy llvm-lipo llvm-config llvm-strip llvm-readobj llvm-ranlib; do
+for name in clang clang++ ld64.lld llvm-ar llvm-nm llvm-objdump llvm-objcopy llvm-lipo llvm-config llvm-strip llvm-readobj llvm-ranlib llvm-libtool-darwin llvm-install-name-tool; do
     source_bin="/usr/lib/llvm-22/bin/$name"
     test -x "$source_bin"
     sudo ln -sf "$source_bin" "/usr/bin/$name"

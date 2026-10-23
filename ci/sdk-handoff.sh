@@ -60,7 +60,7 @@ receive)
     echo "$(cat "$handoff/sdk.ready")  $handoff/sdk.tar.gz.age" | sha256sum -c -
     mkdir -p "$handoff/extracted"
     age -d -i "$handoff/identity.age" "$handoff/sdk.tar.gz.age" | \
-        tar -xzf - -C "$handoff/extracted"
+        tar --warning=no-unknown-keyword -xzf - -C "$handoff/extracted"
     # xtool copies its prebuilt SDK and adds this Linux host's clang resources.
     "$PLAYPORT_BUILD/inputs/xtool-src/.build/release/xtool" sdk install \
         "$handoff/extracted/darwin.xtoolsdk"

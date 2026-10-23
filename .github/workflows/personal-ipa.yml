@@ -36,8 +36,23 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: bash ci/sdk-handoff.sh receive
+      - name: Restore private incremental build state
+        continue-on-error: true
+        timeout-minutes: 20
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash ci/build-cache.sh restore
+      - name: Build Mesa first to check shader dependencies
+        run: bash build/stages/mesa.sh "$PLAYPORT_BUILD/run/mesa" src host ios check framework
       - name: Build and verify unsigned release with the complete runtime
         run: ./pp build --variant release --unsigned
+      - name: Save private incremental build state
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 25
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash ci/build-cache.sh save
       - name: Record generated build manifests
         env:
           GH_TOKEN: ${{ github.token }}

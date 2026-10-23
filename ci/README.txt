@@ -21,6 +21,14 @@ The same source and notice exporters used by the project produce matching files.
 The resulting IPA, source, notices, checksums and AltStore installation instructions
 are saved as a draft release, visible to this repository's owner/collaborators.
 Nothing is automatically published. GitHub Actions artifacts and caches are unused.
+An incremental build cache is kept in private draft release assets instead.
+It preserves build trees, compiler caches, the private linker/Rust toolchains,
+frameworks and generated manifests. It excludes the Apple SDK and handoff keys.
+Archives are validated before extraction; fresh app resource staging is forced.
+Compiler/SDK signatures select compatible caches; the build's own input stamps
+still invalidate changed source or patches. A completed new cache replaces older
+caches with the same signature. Cache failures fall back to a cold build.
+Mesa is built first so shader dependencies are checked before the long engine build.
 Standard runner compute for a public repository is free; larger runners are never
 selected. A cold build may encounter GitHub's disk or six-hour job limit; a failure
 is not a successful build and no playable-game claim is made.

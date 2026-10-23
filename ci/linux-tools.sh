@@ -20,7 +20,8 @@ sudo apt-get install -y --no-install-recommends \
     python3 python3-venv python3-pip python3-dev pkg-config curl ca-certificates gnupg \
     xz-utils unzip zip p7zip-full rsync xxd patch git zstd age jq \
     libssl-dev libcurl4-openssl-dev libxml2-dev liblzma-dev zlib1g-dev \
-    libffi-dev libncurses-dev libedit-dev libsqlite3-dev libzstd-dev libdrm-dev libexpat1-dev
+    libffi-dev libncurses-dev libedit-dev libsqlite3-dev libzstd-dev libdrm-dev libexpat1-dev \
+    glslang-tools
 curl --fail --location --retry 3 -o "$PLAYPORT_BUILD/inputs/llvm.sh" https://apt.llvm.org/llvm.sh
 sudo bash "$PLAYPORT_BUILD/inputs/llvm.sh" 22
 sudo apt-get install -y --no-install-recommends llvm-22-dev clang-tools-22 libclang-22-dev \
@@ -54,6 +55,29 @@ cmake -S "$translator" -B "$translator/build" -G Ninja \
 cmake --build "$translator/build" --parallel "$JOBS"
 cmake --install "$translator/build"
 ln -s "$translator_prefix/bin/llvm-spirv" "$host_bin/llvm-spirv"
+
+# Mesa requires SPIRV-Tools >= 2024.1; Noble's 2023 package is too old.
+# v2026.4 and the exact SPIRV-Headers revision its DEPS file records.
+spirv="$PLAYPORT_BUILD/inputs/spirv-native"
+headers="$PLAYPORT_BUILD/inputs/spirv-headers"
+git init -q "$spirv"
+git -C "$spirv" fetch --depth 1 https://github.com/KhronosGroup/SPIRV-Tools.git \
+    ef96ed763b43b59b33b31b362f09a02b729fa1c9
+git -C "$spirv" checkout -q FETCH_HEAD
+git init -q "$headers"
+git -C "$headers" fetch --depth 1 https://github.com/KhronosGroup/SPIRV-Headers.git \
+    496543121ce6419f23d6fa5d7194ba66c36212d2
+git -C "$headers" checkout -q FETCH_HEAD
+cmake -S "$spirv" -B "$spirv/build" -G Ninja \
+    -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=/usr/bin/clang -DCMAKE_CXX_COMPILER=/usr/bin/clang++ \
+    -DCMAKE_INSTALL_PREFIX="$translator_prefix" -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+    -DSPIRV-Headers_SOURCE_DIR="$headers" -DSPIRV_SKIP_TESTS=ON -DSPIRV_WERROR=OFF \
+    -DSPIRV_TOOLS_USE_MIMALLOC=OFF -DBUILD_SHARED_LIBS=OFF
+cmake --build "$spirv/build" --parallel "$JOBS"
+cmake --install "$spirv/build"
+for name in spirv-as spirv-dis spirv-opt spirv-val; do
+    ln -s "$translator_prefix/bin/$name" "$host_bin/$name"
+done
 
 # xtool's Linux system-library targets need newer mobile-device libraries
 # than Ubuntu 24.04 supplies. These are the release versions in xtool's

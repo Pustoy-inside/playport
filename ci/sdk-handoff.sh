@@ -36,7 +36,7 @@ send)
     echo "39123efc283528b119fa3567dc1123059d6690aab76c80e6003470d17c333ca2  $handoff/xtool.zip" | shasum -a 256 -c -
     ditto -xk "$handoff/xtool.zip" "$handoff"
     test -d /Applications/Xcode_26.6.app
-    "$handoff/xtool.app/Contents/MacOS/xtool" sdk build \
+    XTL_CLI=1 "$handoff/xtool.app/Contents/MacOS/xtool" sdk build \
         /Applications/Xcode_26.6.app "$handoff/output" --arch x86_64
     tar -C "$handoff/output" -czf - darwin.xtoolsdk | \
         age -r "$(cat "$handoff/recipient.txt")" -o "$handoff/sdk.tar.gz.age"

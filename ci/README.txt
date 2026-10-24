@@ -29,8 +29,9 @@ Compiler/SDK signatures select compatible caches; the build's own input stamps
 still invalidate changed source or patches. A completed new cache replaces older
 caches with the same signature. Cache failures fall back to a cold build.
 Mesa is built first so shader dependencies are checked before the long engine build.
-App compiler failures are also printed in the job log. An optional diagnose_failure
-run ID in ci/build-request.json exposes an older private app log in a short job.
+App compiler failures are classified into fixed categories in the public job log;
+private log content is never copied by the diagnostic helper. An optional
+diagnose_failure run ID classifies an older private app log in a short job.
 Standard runner compute for a public repository is free; larger runners are never
 selected. A cold build may encounter GitHub's disk or six-hour job limit; a failure
 is not a successful build and no playable-game claim is made.

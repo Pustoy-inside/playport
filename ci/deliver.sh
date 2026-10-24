@@ -6,16 +6,14 @@ cd "$GITHUB_WORKSPACE"
 case ${1:-} in
 previous-failure)
     # The connector reads job logs but cannot download private binary assets.
-    # Print only the app compiler log from the explicitly requested prior run.
+    # Classify the app log internally. No private log content is printed.
     previous=$(python3 -c 'import json; v=json.load(open("ci/build-request.json")).get("diagnose_failure", 0); assert type(v) is int and v >= 0; print(v)')
     [[ $previous != 0 ]] || exit 0
     diagnostics="$GITHUB_WORKSPACE/.work/previous-failure"
     mkdir -p "$diagnostics"
     gh release download "personal-failure-$previous-1" --repo "$GITHUB_REPOSITORY" \
         --pattern ci-failure-logs.tar.gz --dir "$diagnostics" --clobber
-    echo '::group::Previous app build diagnostics'
-    tar -xOzf "$diagnostics/ci-failure-logs.tar.gz" .work/run/logs/app.log | tail -150
-    echo '::endgroup::'
+    python3 ci/classify-app-log.py "$diagnostics/ci-failure-logs.tar.gz"
     ;;
 records)
     git diff --quiet -- . ':!app/artifacts.tsv' ':!build/generated' || {
@@ -63,9 +61,7 @@ failure)
     logs="$PLAYPORT_BUILD/ci-failure-logs.tar.gz"
     test -d .work/run/logs || exit 0
     if [[ -f .work/run/logs/app.log ]]; then
-        echo '::group::App build diagnostics'
-        tail -150 .work/run/logs/app.log
-        echo '::endgroup::'
+        python3 ci/classify-app-log.py .work/run/logs/app.log
     fi
     tar -czf "$logs" .work/run/logs
     tag="personal-failure-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"

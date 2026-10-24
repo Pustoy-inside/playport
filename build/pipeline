@@ -372,9 +372,9 @@ stage_app() {
         say "  $(tail -1 "$RUN/logs/app.log")"
     fi
     rm -f "$IPA"
-    (cd "$PKG" && PLAYPORT_VARIANT=$VARIANT SWIFTPM_CUSTOM_BIN_DIR=$HERE/ld64 "$XTOOL" dev build $SIGN --ipa) >> "$RUN/logs/app.log" 2>&1 ||
+    (cd "$PKG" && PATH="$DARWIN_SDK/toolset/bin:$PATH" PLAYPORT_VARIANT=$VARIANT SWIFTPM_CUSTOM_BIN_DIR=$HERE/ld64 "$XTOOL" dev build $SIGN --ipa) >> "$RUN/logs/app.log" 2>&1 ||
         { say "FAILED: xtool dev build (log: $RUN/logs/app.log)"
-          grep -E '(error|fatal error):' "$RUN/logs/app.log" | sed 's/\x1b\[[0-9;]*m//g' | sort -u | head -20 >&2
+          grep -E '(error|fatal error):' "$RUN/logs/app.log" | sed 's/\x1b\[[0-9;]*m//g' | sort -u | head -20 >&2 || true
           echo "--- last lines of $RUN/logs/app.log:" >&2; tail -25 "$RUN/logs/app.log" >&2; exit 1; }
     [ -f "$IPA" ] || { say "xtool produced no $IPA"; exit 1; }
     # xtool's zip is stored; deflated, the download is a fifth the size (PLA-146).

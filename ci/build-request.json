@@ -1,1 +1,1 @@
-{"purpose":"Personal AltStore build with the complete Wine runtime","request":8,"diagnose_failure":40042047949}
+{"purpose":"Private cache handoff for local AltStore build","request":9,"local_handoff":true}

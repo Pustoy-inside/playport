@@ -29,7 +29,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: bash ci/deliver.sh previous-failure
   build:
-    if: github.repository == 'nVoxel/playport' && github.event.repository.visibility == 'public'
+    if: github.repository == 'nVoxel/playport' && github.event.repository.visibility == 'public' && !contains(github.event.head_commit.message, '[local-handoff]')
     runs-on: ubuntu-24.04
     timeout-minutes: 360
     permissions:
@@ -84,7 +84,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: bash ci/deliver.sh failure
   sdk:
-    if: github.repository == 'nVoxel/playport' && github.event.repository.visibility == 'public'
+    if: github.repository == 'nVoxel/playport' && github.event.repository.visibility == 'public' && !contains(github.event.head_commit.message, '[local-handoff]')
     runs-on: macos-26
     timeout-minutes: 60
     permissions:
@@ -98,7 +98,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: bash ci/sdk-handoff.sh send
   cleanup:
-    if: always() && github.repository == 'nVoxel/playport'
+    if: always() && github.repository == 'nVoxel/playport' && !contains(github.event.head_commit.message, '[local-handoff]')
     needs: [build, sdk]
     runs-on: ubuntu-24.04
     timeout-minutes: 5

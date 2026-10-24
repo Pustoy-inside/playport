@@ -33,6 +33,10 @@ Mesa is built first so shader dependencies are checked before the long engine bu
 App compiler failures are classified into fixed categories in the public job log;
 private log content is never copied by the diagnostic helper. An optional
 diagnose_failure run ID classifies an older private app log in a short job.
+For a local build, a [local-handoff] commit with local_handoff=true runs only the
+short handoff job. Scoped cache download links and the app compiler log are saved
+in an existing owner-only draft release body. No log or link is printed publicly;
+the SDK, app build, and cleanup jobs are skipped. This does not publish a release.
 Standard runner compute for a public repository is free; larger runners are never
 selected. A cold build may encounter GitHub's disk or six-hour job limit; a failure
 is not a successful build and no playable-game claim is made.

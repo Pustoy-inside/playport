@@ -5,6 +5,10 @@ set -euo pipefail
 cd "$GITHUB_WORKSPACE"
 case ${1:-} in
 previous-failure)
+    if python3 -c 'import json; raise SystemExit(0 if json.load(open("ci/build-request.json")).get("local_handoff") is True else 1)'; then
+        python3 ci/private-handoff.py
+        exit 0
+    fi
     # The connector reads job logs but cannot download private binary assets.
     # Classify the app log internally. No private log content is printed.
     previous=$(python3 -c 'import json; v=json.load(open("ci/build-request.json")).get("diagnose_failure", 0); assert type(v) is int and v >= 0; print(v)')

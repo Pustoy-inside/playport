@@ -127,7 +127,7 @@ final class WindowInsets: ObservableObject {
         observer = NotificationCenter.default.addObserver(forName: UIDevice.orientationDidChangeNotification,
                                                           object: nil, queue: .main) { _ in
             // The window's insets follow the rotation a moment later.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { MainActor.assumeIsolated { WindowInsets.shared.read() } }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { MainActor.assumeIsolated { _ = WindowInsets.shared.read() } }
         }
     }
 

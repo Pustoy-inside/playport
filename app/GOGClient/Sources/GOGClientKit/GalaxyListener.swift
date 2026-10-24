@@ -86,7 +86,7 @@ public final class GalaxyListener: @unchecked Sendable {
         let fds: [Int32] = lock.withLock {
             guard !stopped else { return [] }
             stopped = true
-            let fds = [listenFD] + Array(connections)
+            let fds = [listenFD] + Array(self.connections)
             for fd in fds where fd >= 0 { shutdown(fd, Int32(SHUT_RDWR)) }
             return fds
         }

@@ -13,6 +13,18 @@ concurrency:
 env:
   TRANSFER_TAG: ci-sdk-${{ github.run_id }}-${{ github.run_attempt }}
 jobs:
+  diagnostics:
+    if: github.repository == 'nVoxel/playport' && github.event.repository.visibility == 'public'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Read requested previous app build error
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash ci/deliver.sh previous-failure
   build:
     if: github.repository == 'nVoxel/playport' && github.event.repository.visibility == 'public'
     runs-on: ubuntu-24.04

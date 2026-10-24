@@ -98,6 +98,28 @@ public struct InstalledTitle: Codable, Equatable, Identifiable, Sendable {
     /// The name the player gave the game (display only: the ID does not change).
     public var displayName: String? = nil
 
+    public init(id: String, appID: UInt32? = nil, name: String, developer: String? = nil,
+                installDir: String, executable: String? = nil, buildID: UInt32? = nil,
+                depots: [CohortTitle.Depot] = [], sizeBytes: UInt64? = nil, source: Source,
+                checksums: String? = nil, note: String? = nil, addedAt: Date,
+                lastPlayed: Date? = nil, lastVerification: Verification? = nil) {
+        self.id = id
+        self.appID = appID
+        self.name = name
+        self.developer = developer
+        self.installDir = installDir
+        self.executable = executable
+        self.buildID = buildID
+        self.depots = depots
+        self.sizeBytes = sizeBytes
+        self.source = source
+        self.checksums = checksums
+        self.note = note
+        self.addedAt = addedAt
+        self.lastPlayed = lastPlayed
+        self.lastVerification = lastVerification
+    }
+
     public var key: StoreGameKey {
         StoreGameKey(store: store, id: storeID ?? appID.map(String.init) ?? installDir.lowercased())
     }

@@ -98,8 +98,9 @@ else
     gh release upload "$tag" "$scratch"/cache.part.* --repo "$GITHUB_REPOSITORY"
     gh release upload "$tag" "$scratch/cache.ready" --repo "$GITHUB_REPOSITORY"
     # Only superseded caches created by this script, after the new one is ready.
+    # Draft creation does not create a Git tag; deleting a tag ref would fail.
     while IFS= read -r old; do
-        [ "$old" = "$tag" ] || gh release delete "$old" --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes
+        [ "$old" = "$tag" ] || gh release delete "$old" --repo "$GITHUB_REPOSITORY" --yes
     done < <(available)
     rm -f "$scratch"/cache.part.* "$scratch/cache.tar.zst" "$scratch/cache.ready"
     echo "Saved private incremental build state to $tag."

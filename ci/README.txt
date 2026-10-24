@@ -27,7 +27,8 @@ frameworks and generated manifests. It excludes the Apple SDK and handoff keys.
 Archives are validated before extraction; fresh app resource staging is forced.
 Compiler/SDK signatures select compatible caches; the build's own input stamps
 still invalidate changed source or patches. A completed new cache replaces older
-caches with the same signature. Cache failures fall back to a cold build.
+caches with the same signature. Cleanup removes the superseded draft release;
+drafts have no Git tag ref to delete. Cache failures fall back to a cold build.
 Mesa is built first so shader dependencies are checked before the long engine build.
 App compiler failures are classified into fixed categories in the public job log;
 private log content is never copied by the diagnostic helper. An optional

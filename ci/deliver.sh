@@ -36,30 +36,38 @@ package)
     test -n "$out"
     delivery="$PLAYPORT_BUILD/delivery"
     mkdir -p "$delivery"
-    ./pp source "$delivery/source" --build "$out"
-    ./pp source "$delivery/source" --check
-    ./pp notices "$delivery/notices"
-    tar -C "$delivery" -cf "$delivery/Playport-source.tar" source
-    tar -C "$delivery" -czf "$delivery/Playport-notices.tar.gz" notices
     cp "$out"/*.ipa "$delivery/"
-    cp "$out/provenance.txt" "$delivery/"
-    cat > "$delivery/INSTALL.txt" <<'EOF'
-Personal unsigned Playport build. Compiled from the source in Playport-source.tar.
-Install the IPA through iloader (or AltStore) with the same Apple account as the existing app.
-Keep the JIT helper extension and Increased Memory Limit entitlement.
-Upgrade in place: uninstalling Playport deletes its installed games and saves.
-After installation, check Settings > Setup check > Increased Memory Limit: On.
-The IPA passed host packaging checks; this build has not been tested on an iPhone.
-The source bundle includes rebuild instructions, dependency source and licence notices.
-EOF
-    (cd "$delivery" && sha256sum *.ipa *.tar *.tar.gz provenance.txt INSTALL.txt > SHA256SUMS)
+    cp "$out/provenance.txt" "$delivery/" 2>/dev/null || git rev-parse HEAD > "$delivery/provenance.txt"
+    {
+        echo "Personal unsigned Playport build, from this fork's source at the commit this release targets."
+        echo "Install the IPA through iloader (or AltStore) with the same Apple account as the existing app."
+        echo "Keep the JIT helper extension and Increased Memory Limit entitlement."
+        echo "Upgrade in place: uninstalling Playport deletes its installed games and saves."
+        echo "After installation, check Settings > Setup check > Increased Memory Limit: On."
+        echo "The IPA passed host packaging checks (verify-ipa); this build has not been tested on an iPhone."
+    } > "$delivery/INSTALL.txt"
+    (cd "$delivery" && sha256sum ./*.ipa provenance.txt INSTALL.txt > SHA256SUMS)
     tag="personal-ipa-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+    # The IPA first: it is what the run is for.
     gh release create "$tag" --repo "$GITHUB_REPOSITORY" --target "$(git rev-parse HEAD)" \
         --draft --title "Personal unsigned Playport $GITHUB_RUN_ID" \
         --notes-file "$delivery/INSTALL.txt"
-    gh release upload "$tag" "$delivery"/*.ipa "$delivery"/*.tar "$delivery"/*.tar.gz \
-        "$delivery/provenance.txt" "$delivery/INSTALL.txt" "$delivery/SHA256SUMS" --repo "$GITHUB_REPOSITORY"
-    echo "Unsigned IPA, matching source and notices saved to a private draft release." >> "$GITHUB_STEP_SUMMARY"
+    gh release upload "$tag" "$delivery"/*.ipa "$delivery/provenance.txt" "$delivery/INSTALL.txt" \
+        "$delivery/SHA256SUMS" --repo "$GITHUB_REPOSITORY"
+    echo "Unsigned IPA saved to a private draft release." >> "$GITHUB_STEP_SUMMARY"
+    # Then the matching source bundle and notices, best effort (the fork is public
+    # source too); their log goes to the release either way.
+    if { ./pp source "$delivery/source" --build "$out" &&
+         ./pp source "$delivery/source" --check &&
+         ./pp notices "$delivery/notices"; } > "$delivery/package.log" 2>&1; then
+        tar -C "$delivery" -cf "$delivery/Playport-source.tar" source
+        tar -C "$delivery" -czf "$delivery/Playport-notices.tar.gz" notices
+        gh release upload "$tag" "$delivery/Playport-source.tar" "$delivery/Playport-notices.tar.gz" \
+            --repo "$GITHUB_REPOSITORY"
+    else
+        echo "The source bundle or notices did not complete (package.log in the release)." >> "$GITHUB_STEP_SUMMARY"
+    fi
+    gh release upload "$tag" "$delivery/package.log" --repo "$GITHUB_REPOSITORY" --clobber
     ;;
 failure)
     logs="$PLAYPORT_BUILD/ci-failure-logs.tar.gz"

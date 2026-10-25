@@ -73,8 +73,12 @@ jobs:
         run: bash ci/build-cache.sh restore
       - name: Build Mesa first to check shader dependencies
         run: bash build/stages/mesa.sh "$PLAYPORT_BUILD/run/mesa" src host ios check framework
+      # Within the job's six hours, so the build state is still saved for the next run.
       - name: Build and verify unsigned release with the complete runtime
-        run: ./pp build --variant release --unsigned
+        timeout-minutes: 285
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash ci/progress.sh ./pp build --variant release --unsigned
       - name: Save private incremental build state
         if: always()
         continue-on-error: true

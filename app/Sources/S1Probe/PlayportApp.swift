@@ -5,6 +5,7 @@
 
 import Foundation
 import SwiftUI
+import TouchPad
 import UIKit
 
 @main
@@ -31,6 +32,8 @@ struct PlayportApp: App {
         RuntimeCounters.loadAtStart()
         #endif
         MemoryLimit.logAtStart()
+        // The on-screen controller sets itself up from its constructor (Sources/TouchPad).
+        playport_touchpad_linked()
     }
 
     var body: some Scene {

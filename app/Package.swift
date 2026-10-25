@@ -127,6 +127,20 @@ let package = Package(
         // and the declarations of the runtime extensions HostIO.swift calls
         // (docs/ARCHITECTURE.md, HostIO).
         .target(name: "HostIO", dependencies: ["WinIOS"]),
+        // The on-screen controller (Pavel Demyanov's touch pad prototype, issue #5):
+        // the system's GCVirtualController handed to the game as a pad, with Home,
+        // Back, Start, a D-pad and an opacity button of its own (Sources/TouchPad).
+        .target(
+            name: "TouchPad",
+            dependencies: ["HostIO"],
+            cSettings: [.unsafeFlags(["-fobjc-arc"])],
+            linkerSettings: [
+                .linkedFramework("GameController"),
+                .linkedFramework("UIKit"),
+                .linkedFramework("QuartzCore"),
+                .linkedFramework("CoreGraphics"),
+            ]
+        ),
         // Only the dev app depends on this synthetic native-authentication probe.
         .target(name: "AuthProbe", linkerSettings: [.linkedFramework("GSS")]),
         // The JIT helper extension: StikJIT's prebuilt framework (MPL-2.0,
@@ -157,7 +171,7 @@ let package = Package(
         ),
         .target(
             name: app,
-            dependencies: ["WineHost", "WinIOS", "HostIO", "JITHelperXPC", "KosmicKrisp", "MesaEGL", "MesaGallium",
+            dependencies: ["WineHost", "WinIOS", "HostIO", "TouchPad", "JITHelperXPC", "KosmicKrisp", "MesaEGL", "MesaGallium",
                            .product(name: "HostIOKit", package: "HostIOKit"),
                            .product(name: "SteamClientKit", package: "SteamClient"),
                            .product(name: "GOGClientKit", package: "GOGClient"),

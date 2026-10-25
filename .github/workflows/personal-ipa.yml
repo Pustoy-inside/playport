@@ -49,7 +49,7 @@ jobs:
     permissions:
       contents: write
     env:
-      JOBS: '3'
+      JOBS: '4'
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -73,12 +73,13 @@ jobs:
         run: bash ci/build-cache.sh restore
       - name: Build Mesa first to check shader dependencies
         run: bash build/stages/mesa.sh "$PLAYPORT_BUILD/run/mesa" src host ios check framework
-      # Within the job's six hours, so the build state is still saved for the next run.
-      - name: Build and verify unsigned release with the complete runtime
-        timeout-minutes: 285
+      # Every stage before the app, within the job's six hours, so its state is
+      # saved for the next run even if the app does not finish in this one.
+      - name: Build the runtime (every stage up to the notices)
+        timeout-minutes: 250
         env:
           GH_TOKEN: ${{ github.token }}
-        run: bash ci/progress.sh ./pp build --variant release --unsigned
+        run: bash ci/progress.sh ./pp build --variant release --unsigned --to notices
       - name: Save private incremental build state
         if: always()
         continue-on-error: true
@@ -86,12 +87,16 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: bash ci/build-cache.sh save
+      # Before the app, so the IPA is built from the revision that records them
+      # and the app (which always builds) is built once.
       - name: Record generated build manifests
         env:
           GH_TOKEN: ${{ github.token }}
         run: bash ci/deliver.sh records
-      - name: Verify final source revision
-        run: ./pp build --variant release --unsigned
+      - name: Build and verify the unsigned release on the recorded runtime
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash ci/progress.sh ./pp build --variant release --unsigned
       - name: Package matching source and notices; save private draft
         env:
           GH_TOKEN: ${{ github.token }}

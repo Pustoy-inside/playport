@@ -15,8 +15,9 @@ The private key exists only on the Linux runner. No plaintext Apple SDK is uploa
 
 Linux builds the pinned compiler/runtime dependencies and runs:
   ./pp build --variant release --unsigned
-Generated manifests are committed to this fork when needed; the final packaging
-pass is repeated so the exact source revision matches the delivered build.
+The runtime (every stage before the app) is built first and its state saved;
+generated manifests are then committed to this fork when needed, before the app
+is built, so the delivered build comes from the exact revision that records them.
 The same source and notice exporters used by the project produce matching files.
 
 The resulting IPA, source, notices, checksums and AltStore installation instructions

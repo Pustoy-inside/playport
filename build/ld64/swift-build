@@ -5,7 +5,11 @@
 # linker, so the app link goes through Apple ld64 (cctools-port, built by
 # build/toolchain/ld64.sh). ld64 merges duplicate strong definitions from archive
 # members under -dead_strip as the reference's Xcode link does
-# (docs/BUILDING.md, "Linking"). Every other tool stays xtool's.
+# (docs/BUILDING.md, "Linking"). SwiftPM passes -dead_strip only to a release
+# configuration, and xtool dev build is a debug one, so the final links get it
+# here, with -export_dynamic: every global stays (dlsym finds them, as before),
+# and only the shadowed duplicate definitions are dropped. Every other tool
+# stays xtool's.
 #
 # The repository's path is mapped out of what the build writes into the
 # binaries: Swift's and C's debug info and #file/__FILE__ (-file-prefix-map),
@@ -49,7 +53,7 @@ while [ "\$n" -gt 0 ]; do
     *) set -- "\$@" "\$a" ;;
     esac
 done
-exec "$ld64" -oso_prefix "$repo/" "\$@"
+exec "$ld64" -dead_strip -export_dynamic -oso_prefix "$repo/" "\$@"
 EOF
 chmod +x "$out/ld"
 printf '{ "schemaVersion": "1.0", "rootPath": ".", "linker": { "path": "ld" } }\n' > "$out/toolset.json"

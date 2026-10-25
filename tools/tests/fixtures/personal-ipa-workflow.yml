@@ -14,7 +14,7 @@ env:
   TRANSFER_TAG: ci-sdk-${{ github.run_id }}-${{ github.run_attempt }}
 jobs:
   diagnostics:
-    if: github.repository == 'nVoxel/playport' && github.event.repository.visibility == 'public'
+    if: github.repository == 'Pustoy-inside/playport' && github.event.repository.visibility == 'public'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     # GitHub requires push access to read private draft releases.
@@ -28,8 +28,22 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: bash ci/deliver.sh previous-failure
+  precheck:
+    if: github.repository == 'Pustoy-inside/playport' && github.event.repository.visibility == 'public' && !contains(github.event.head_commit.message, '[local-handoff]')
+    runs-on: macos-26
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Compile the on-screen controller for iOS before the long build
+        run: |
+          sudo xcode-select -s /Applications/Xcode_26.6.app
+          xcrun -sdk iphoneos clang -arch arm64 -mios-version-min=26.0 -fobjc-arc -fsyntax-only -Wall \
+              -I app/Sources/HostIO/include -I app/Sources/TouchPad/include app/Sources/TouchPad/touchpad.m
   build:
-    if: github.repository == 'nVoxel/playport' && github.event.repository.visibility == 'public' && !contains(github.event.head_commit.message, '[local-handoff]')
+    if: github.repository == 'Pustoy-inside/playport' && github.event.repository.visibility == 'public' && !contains(github.event.head_commit.message, '[local-handoff]')
+    needs: [precheck]
     runs-on: ubuntu-24.04
     timeout-minutes: 360
     permissions:
@@ -84,7 +98,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: bash ci/deliver.sh failure
   sdk:
-    if: github.repository == 'nVoxel/playport' && github.event.repository.visibility == 'public' && !contains(github.event.head_commit.message, '[local-handoff]')
+    if: github.repository == 'Pustoy-inside/playport' && github.event.repository.visibility == 'public' && !contains(github.event.head_commit.message, '[local-handoff]')
+    needs: [precheck]
     runs-on: macos-26
     timeout-minutes: 60
     permissions:
@@ -98,7 +113,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: bash ci/sdk-handoff.sh send
   cleanup:
-    if: always() && github.repository == 'nVoxel/playport' && !contains(github.event.head_commit.message, '[local-handoff]')
+    if: always() && github.repository == 'Pustoy-inside/playport' && !contains(github.event.head_commit.message, '[local-handoff]')
     needs: [build, sdk]
     runs-on: ubuntu-24.04
     timeout-minutes: 5

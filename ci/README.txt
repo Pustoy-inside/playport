@@ -1,4 +1,5 @@
-Personal Playport build for nVoxel/playport
+Personal Playport build for Pustoy-inside/playport
+(the workflow and these scripts are nVoxel/playport's, adapted to this fork)
 
 The upstream project runs source-only CI. This fork adds an explicitly reviewed,
 owner-requested build workflow, restricted to this public fork and standard
@@ -42,4 +43,4 @@ selected. A cold build may encounter GitHub's disk or six-hour job limit; a fail
 is not a successful build and no playable-game claim is made.
 
 Signing and device testing happen after downloading the IPA. Use the existing
-AltStore account and upgrade in place to preserve the installed game and saves.
+re-signing tool (iloader) and Apple account and upgrade in place to preserve the installed game and saves.

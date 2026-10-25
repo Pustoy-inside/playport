@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Private release assets, never Actions artifact/cache storage. No SDK or keys.
 set -euo pipefail
-[[ $GITHUB_ACTIONS == true && $RUNNER_OS == Linux && $GITHUB_REPOSITORY == nVoxel/playport ]] || exit 1
+[[ $GITHUB_ACTIONS == true && $RUNNER_OS == Linux && $GITHUB_REPOSITORY == Pustoy-inside/playport ]] || exit 1
 cd "$GITHUB_WORKSPACE"
 script="$GITHUB_WORKSPACE/ci/validate-cache-tar.py"
 

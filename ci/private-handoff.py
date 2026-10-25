@@ -9,7 +9,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-REPO = 'nVoxel/playport'
+REPO = 'Pustoy-inside/playport'
 PREFIX = 'LOCAL_HANDOFF_JSON\n'
 
 

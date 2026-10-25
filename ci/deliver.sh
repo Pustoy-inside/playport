@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-3.0-or-later
 set -euo pipefail
-[[ ${GITHUB_ACTIONS:-} == true && ${RUNNER_OS:-} == Linux && ${GITHUB_REPOSITORY:-} == nVoxel/playport ]] || exit 1
+[[ ${GITHUB_ACTIONS:-} == true && ${RUNNER_OS:-} == Linux && ${GITHUB_REPOSITORY:-} == Pustoy-inside/playport ]] || exit 1
 cd "$GITHUB_WORKSPACE"
 case ${1:-} in
 previous-failure)
@@ -45,7 +45,7 @@ package)
     cp "$out/provenance.txt" "$delivery/"
     cat > "$delivery/INSTALL.txt" <<'EOF'
 Personal unsigned Playport build. Compiled from the source in Playport-source.tar.
-Install the IPA through AltStore using the same Apple account as the existing app.
+Install the IPA through iloader (or AltStore) with the same Apple account as the existing app.
 Keep the JIT helper extension and Increased Memory Limit entitlement.
 Upgrade in place: uninstalling Playport deletes its installed games and saves.
 After installation, check Settings > Setup check > Increased Memory Limit: On.

@@ -3,7 +3,7 @@
 # Apple SDK bytes cross runners encrypted to a private key that stays on Linux.
 # Temporary draft release assets avoid metered Actions artifacts/caches.
 set -euo pipefail
-[[ ${GITHUB_ACTIONS:-} == true && ${GITHUB_REPOSITORY:-} == nVoxel/playport ]] || {
+[[ ${GITHUB_ACTIONS:-} == true && ${GITHUB_REPOSITORY:-} == Pustoy-inside/playport ]] || {
     echo 'This helper runs only inside the personal fork workflow.' >&2; exit 1;
 }
 cd "$GITHUB_WORKSPACE"

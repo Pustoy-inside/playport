@@ -22,7 +22,7 @@ class PersonalCacheTests(unittest.TestCase):
         (self.root / "ci").mkdir()
         shutil.copy(REPO / "ci/validate-cache-tar.py", self.root / "ci")
         self.env = dict(os.environ, GITHUB_ACTIONS="true", RUNNER_OS="Linux",
-                        GITHUB_REPOSITORY="nVoxel/playport", GITHUB_WORKSPACE=str(self.root))
+                        GITHUB_REPOSITORY="Pustoy-inside/playport", GITHUB_WORKSPACE=str(self.root))
 
     def write(self, name, text):
         p = self.root / name

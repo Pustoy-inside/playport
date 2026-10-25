@@ -3,7 +3,7 @@
 
 Approve each entire executable workflow, not an upload-command/suffix denylist.
 New jobs/actions/scripts/permissions must be reviewed here as well as in YAML.
-checks.yml tests the source; pages.yml publishes site/. In nVoxel's personal fork,
+checks.yml tests the source; pages.yml publishes site/. In this personal fork (from nVoxel/playport's),
 personal-ipa.yml additionally builds an unsigned IPA at the owner's request.
 Its reviewed workflow is deliberately duplicated in fixtures/; unrelated workflow
 additions remain rejected. The upstream repository's source-only policy is unchanged.

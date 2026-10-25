@@ -61,10 +61,19 @@ receive)
     mkdir -p "$handoff/extracted"
     age -d -i "$handoff/identity.age" "$handoff/sdk.tar.gz.age" | \
         tar --warning=no-unknown-keyword -xzf - -C "$handoff/extracted"
-    # xtool copies its prebuilt SDK and adds this Linux host's clang resources.
-    "$PLAYPORT_BUILD/inputs/xtool-src/.build/release/xtool" sdk install \
+    # xtool copies its prebuilt SDK and adds the resource headers of the first
+    # clang on PATH (DarwinSDK addHostClangResourceDir). They must be the Swift
+    # toolchain's clang's: with the host LLVM 22 first, the Swift frontend's
+    # older clang fails in arm_neon.h (__builtin_bit_cast) building simd, and
+    # with it Spatial, SwiftUICore and SwiftUI (tgdebas/playport 4031d29).
+    swift_bin="$PLAYPORT_BUILD/inputs/swift/bin"
+    test -x "$swift_bin/clang"
+    PATH="$swift_bin:$PATH" "$PLAYPORT_BUILD/inputs/xtool-src/.build/release/xtool" sdk install \
         "$handoff/extracted/darwin.xtoolsdk"
     sdk="$XDG_CONFIG_HOME/swiftpm/swift-sdks/darwin.artifactbundle"
+    swift_inc="$("$swift_bin/clang" -print-resource-dir)/include"
+    cmp "$swift_inc/arm_neon.h" "$sdk/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/clang/include/arm_neon.h"
+    echo "SDK clang resource headers: $swift_inc"
     test -d "$sdk/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS26.5.sdk"
     test -d "$sdk/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.5.sdk"
     echo "DARWIN_SDK=$sdk" >> "$GITHUB_ENV"

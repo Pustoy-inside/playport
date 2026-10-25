@@ -1,0 +1,73 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Pavel Demyanov <greypax@cybergusli.ai>
+Date: Fri, 23 Oct 2026 11:50:13 +0300
+Subject: [PATCH] dsound: Keep six device periods queued, not three.
+
+The iOS audio timer drifts (it sleeps 10 ms at a time), and with three
+10 ms periods queued the device ran dry now and then: Half-Life 2's sound
+crackled at a steady rate. Six periods (60 ms) keep it fed.
+
+Six in i386 programs only, the scope tested in Half-Life 2; 64-bit
+programs keep Wine's three.
+
+Class: ios-port
+Evidence: docs/evidence/2026-10-25-touchpad-build.md
+Offered-upstream: no; the iOS audio timer's drift
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ dlls/dsound/dsound_private.h | 8 ++++++++
+ dlls/dsound/mixer.c          | 4 ++--
+ dlls/dsound/primary.c        | 6 +++++-
+ 3 files changed, 15 insertions(+), 3 deletions(-)
+
+diff --git a/dlls/dsound/dsound_private.h b/dlls/dsound/dsound_private.h
+index a913d70..512202b 100644
+--- a/dlls/dsound/dsound_private.h
++++ b/dlls/dsound/dsound_private.h
+@@ -36,6 +36,14 @@
+ 
+ extern int ds_hel_buflen;
+ 
++/* Playport: device periods the mixer keeps queued (Wine's own is 3); primary.c.
++ * Six in i386 programs, the scope tested in Half-Life 2. */
++#ifdef __i386__
++#define DSOUND_AHEAD_PERIODS 6
++#else
++#define DSOUND_AHEAD_PERIODS 3
++#endif
++
+ /*****************************************************************************
+  * Predeclare the interface implementation structures
+  */
+diff --git a/dlls/dsound/mixer.c b/dlls/dsound/mixer.c
+index 3b9f7c4..40ab5c0 100644
+--- a/dlls/dsound/mixer.c
++++ b/dlls/dsound/mixer.c
+@@ -1109,8 +1109,8 @@ static void DSOUND_PerformMix(DirectSoundDevice *device)
+ 		LeaveCriticalSection(&device->mixlock);
+ 		return;
+ 	}
+-	if (frames > device->frag_frames * 3)
+-		frames = device->frag_frames * 3;
++	if (frames > device->frag_frames * DSOUND_AHEAD_PERIODS)
++		frames = device->frag_frames * DSOUND_AHEAD_PERIODS;
+ 
+ 	if (device->priolevel != DSSCL_WRITEPRIMARY) {
+ 		int nfiller;
+diff --git a/dlls/dsound/primary.c b/dlls/dsound/primary.c
+index 3331b31..59f56b8 100644
+--- a/dlls/dsound/primary.c
++++ b/dlls/dsound/primary.c
+@@ -368,7 +368,11 @@ HRESULT DSOUND_ReopenDevice(DirectSoundDevice *device, BOOL forcewave)
+     period_ms = (period + 9999) / 10000;
+     frag_frames = MulDiv(wfx->nSamplesPerSec, period, 10000000);
+ 
+-    aclen_frames = min(acbuf_frames, 3 * frag_frames);
++    /* Playport: six periods ahead, not three. The iOS driver wakes the mixer
++     * from a timer that drifts around its 10 ms period, and RemoteIO takes
++     * the ring in its own slices; with 30 ms queued a slice often found the
++     * ring short, which Half-Life 2 played as a crackle at a steady rate. */
++    aclen_frames = min(acbuf_frames, DSOUND_AHEAD_PERIODS * frag_frames);
+ 
+     TRACE("period %lu ms frag_frames %lu buf_frames %u\n", period_ms, frag_frames, aclen_frames);
+ 

@@ -44,3 +44,8 @@
 0045-user32-list-a-virtual-XInput-pad-in-the-raw-input-de.patch
 0046-kernelbase-serve-the-virtual-pads-as-HID-devices.patch
 0047-windows.gaming.input-a-Gamepad-provider-for-each-hos.patch
+0048-ntdll-msvcrt-Stop-a-target-unwind-at-any-scope-recor.patch
+0049-user32-windows.gaming.input-Announce-host-pads-conne.patch
+0050-kernelbase-Wait-for-a-new-thread-to-start-before-ret.patch
+0051-kernelbase-Turn-SDL-s-RawInput-joystick-driver-off-b.patch
+0052-dsound-Keep-six-device-periods-queued-not-three.patch

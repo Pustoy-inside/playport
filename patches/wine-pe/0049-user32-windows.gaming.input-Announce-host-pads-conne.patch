@@ -1,0 +1,287 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Pavel Demyanov <greypax@cybergusli.ai>
+Date: Fri, 23 Oct 2026 11:45:08 +0300
+Subject: [PATCH] user32, windows.gaming.input: Announce host pads connected
+ while a game runs.
+
+Playport has no plugplay service, so RegisterDeviceNotification never
+delivers WM_DEVICECHANGE and games that rescan only on it (InControl,
+SDL) miss a host pad connected after they start (Disco Elysium). user32
+watches the host pad slots while a window is registered for HID or all
+interface classes and sends DBT_DEVICEARRIVAL / DBT_DEVICEREMOVECOMPLETE
+with the slot's raw input device path; windows.gaming.input creates or
+removes the slot's Gamepad provider on the same notification.
+
+Class: feature
+Evidence: docs/evidence/2026-10-25-touchpad-build.md
+Offered-upstream: no; the host pad exists only on the iOS port
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ dlls/user32/input.c                  | 146 ++++++++++++++++++++++++++-
+ dlls/windows.gaming.input/main.c     |   4 +-
+ dlls/windows.gaming.input/private.h  |   1 +
+ dlls/windows.gaming.input/provider.c |  26 +++++
+ 4 files changed, 172 insertions(+), 5 deletions(-)
+
+diff --git a/dlls/user32/input.c b/dlls/user32/input.c
+index 7639083..22488f2 100644
+--- a/dlls/user32/input.c
++++ b/dlls/user32/input.c
+@@ -27,6 +27,7 @@
+ #include "user_private.h"
+ #include "dbt.h"
+ #include "wine/debug.h"
++#include "wine/list.h"
+ #include "wine/plugplay.h"
+ 
+ WINE_DEFAULT_DEBUG_CHANNEL(win);
+@@ -523,6 +524,12 @@ static DWORD CALLBACK devnotify_service_callback(HANDLE handle, DWORD flags, DEV
+     return 0;
+ }
+ 
++/* Playport: GUID_DEVINTERFACE_HID, the class of the host pads' devices (below). */
++static const GUID hostpad_hid_guid = {0x4d1e55b2, 0xf16f, 0x11cf, {0x88, 0xcb, 0x00, 0x11, 0x11, 0x00, 0x00, 0x30}};
++
++static void hostpad_notify_add( HDEVNOTIFY notify, HWND hwnd, device_notify_callback callback );
++static void hostpad_notify_remove( HDEVNOTIFY notify );
++
+ /***********************************************************************
+  *		RegisterDeviceNotificationA (USER32.@)
+  *
+@@ -570,13 +577,18 @@ HDEVNOTIFY WINAPI RegisterDeviceNotificationW( HANDLE handle, void *filter, DWOR
+     if (header->dbch_devicetype == DBT_DEVTYP_DEVICEINTERFACE)
+     {
+         DEV_BROADCAST_DEVICEINTERFACE_W iface = *(DEV_BROADCAST_DEVICEINTERFACE_W *)header;
++        HDEVNOTIFY notify;
+ 
+         if (flags & DEVICE_NOTIFY_ALL_INTERFACE_CLASSES)
+             iface.dbcc_size = offsetof( DEV_BROADCAST_DEVICEINTERFACE_W, dbcc_classguid );
+         else
+             iface.dbcc_size = offsetof( DEV_BROADCAST_DEVICEINTERFACE_W, dbcc_name );
+ 
+-        return I_ScRegisterDeviceNotification( handle, (DEV_BROADCAST_HDR *)&iface, callback );
++        notify = I_ScRegisterDeviceNotification( handle, (DEV_BROADCAST_HDR *)&iface, callback );
++        if (notify && !(flags & DEVICE_NOTIFY_SERVICE_HANDLE) &&
++            ((flags & DEVICE_NOTIFY_ALL_INTERFACE_CLASSES) || IsEqualGUID( &iface.dbcc_classguid, &hostpad_hid_guid )))
++            hostpad_notify_add( notify, handle, callback );
++        return notify;
+     }
+     if (header->dbch_devicetype == DBT_DEVTYP_HANDLE)
+         return I_ScRegisterDeviceNotification( handle, header, callback );
+@@ -593,6 +605,7 @@ BOOL WINAPI UnregisterDeviceNotification( HDEVNOTIFY handle )
+ {
+     TRACE("%p\n", handle);
+ 
++    hostpad_notify_remove( handle );
+     return I_ScUnregisterDeviceNotification( handle );
+ }
+ 
+@@ -643,6 +656,134 @@ static UINT hostpad_list( RAWINPUTDEVICELIST *pads )
+     return count;
+ }
+ 
++/* The slot's device path into name; its length with the terminator. */
++static UINT hostpad_device_name( UINT slot, WCHAR *name )
++{
++    return wsprintfW( name, L"\\\\?\\HID#VID_045E&PID_02FF&IG_%02X#3&5ead%04X&0&0000"
++                      L"#{4d1e55b2-f16f-11cf-88cb-001111000030}", slot, slot ) + 1;
++}
++
++/* Device notifications for the host pads. Wine sends WM_DEVICECHANGE for the
++ * events of the plugplay service, which does not run here, so a window that
++ * registered for HID interfaces never hears of a pad connected after it
++ * looked. Input libraries that look for new pads only then (InControl, in
++ * Disco Elysium, rescans XInput on DBT_DEVICEARRIVAL of a HID interface) miss
++ * every pad connected after the game started. A thread started by the first
++ * such registration watches the slots and sends DBT_DEVICEARRIVAL and
++ * DBT_DEVICEREMOVECOMPLETE with the slot's raw input device path. */
++struct hostpad_notify
++{
++    struct list entry;
++    HDEVNOTIFY handle;
++    HWND hwnd;
++    device_notify_callback callback;
++};
++
++static struct list hostpad_notify_list = LIST_INIT( hostpad_notify_list );
++static UINT hostpad_notify_slots; /* the connected slots as last announced */
++static HANDLE hostpad_notify_thread;
++static CRITICAL_SECTION hostpad_notify_cs;
++static CRITICAL_SECTION_DEBUG hostpad_notify_cs_debug =
++{
++    0, 0, &hostpad_notify_cs,
++    { &hostpad_notify_cs_debug.ProcessLocksList, &hostpad_notify_cs_debug.ProcessLocksList },
++      0, 0, { (DWORD_PTR)(__FILE__ ": hostpad_notify_cs") }
++};
++static CRITICAL_SECTION hostpad_notify_cs = { &hostpad_notify_cs_debug, -1, 0, 0, 0, 0 };
++
++static UINT hostpad_connected_slots(void)
++{
++    UINT slot, slots = 0;
++
++    for (slot = 0; slot < HOSTPAD_SLOTS; slot++)
++        if (hostpad_connected( slot )) slots |= 1u << slot;
++    return slots;
++}
++
++static void hostpad_announce( UINT slot, DWORD event )
++{
++    char buffer[offsetof( DEV_BROADCAST_DEVICEINTERFACE_W, dbcc_name[128] )];
++    DEV_BROADCAST_DEVICEINTERFACE_W *iface = (DEV_BROADCAST_DEVICEINTERFACE_W *)buffer;
++    struct hostpad_notify *notify, *targets = NULL;
++    UINT i, count = 0;
++
++    memset( iface, 0, offsetof( DEV_BROADCAST_DEVICEINTERFACE_W, dbcc_name ) );
++    iface->dbcc_devicetype = DBT_DEVTYP_DEVICEINTERFACE;
++    iface->dbcc_classguid = hostpad_hid_guid;
++    iface->dbcc_size = offsetof( DEV_BROADCAST_DEVICEINTERFACE_W, dbcc_name[hostpad_device_name( slot, iface->dbcc_name )] );
++
++    /* The windows are sent to without the lock: their threads may register or unregister. */
++    EnterCriticalSection( &hostpad_notify_cs );
++    if (!list_empty( &hostpad_notify_list ) &&
++        (targets = malloc( list_count( &hostpad_notify_list ) * sizeof(*targets) )))
++        LIST_FOR_EACH_ENTRY( notify, &hostpad_notify_list, struct hostpad_notify, entry )
++            targets[count++] = *notify;
++    LeaveCriticalSection( &hostpad_notify_cs );
++
++    for (i = 0; i < count; i++)
++        if (IsWindow( targets[i].hwnd )) targets[i].callback( targets[i].hwnd, event, (DEV_BROADCAST_HDR *)iface );
++    free( targets );
++}
++
++static DWORD WINAPI hostpad_notify_proc( void *arg )
++{
++    UINT slots, changed, slot;
++
++    SetThreadDescription( GetCurrentThread(), L"playport_hostpad_notify" );
++
++    for (;;)
++    {
++        Sleep( 250 );
++        slots = hostpad_connected_slots();
++        EnterCriticalSection( &hostpad_notify_cs );
++        changed = slots ^ hostpad_notify_slots;
++        hostpad_notify_slots = slots;
++        LeaveCriticalSection( &hostpad_notify_cs );
++
++        for (slot = 0; slot < HOSTPAD_SLOTS; slot++)
++        {
++            if (!(changed & (1u << slot))) continue;
++            hostpad_announce( slot, (slots & (1u << slot)) ? DBT_DEVICEARRIVAL : DBT_DEVICEREMOVECOMPLETE );
++        }
++    }
++    return 0;
++}
++
++static void hostpad_notify_add( HDEVNOTIFY handle, HWND hwnd, device_notify_callback callback )
++{
++    struct hostpad_notify *notify;
++
++    if (!(notify = calloc( 1, sizeof(*notify) ))) return;
++    notify->handle = handle;
++    notify->hwnd = hwnd;
++    notify->callback = callback;
++
++    EnterCriticalSection( &hostpad_notify_cs );
++    list_add_tail( &hostpad_notify_list, &notify->entry );
++    if (!hostpad_notify_thread)
++    {
++        /* Changes from now on: the caller looks at the devices there are. */
++        hostpad_notify_slots = hostpad_connected_slots();
++        hostpad_notify_thread = CreateThread( NULL, 0, hostpad_notify_proc, NULL, 0, NULL );
++    }
++    LeaveCriticalSection( &hostpad_notify_cs );
++}
++
++static void hostpad_notify_remove( HDEVNOTIFY handle )
++{
++    struct hostpad_notify *notify;
++
++    EnterCriticalSection( &hostpad_notify_cs );
++    LIST_FOR_EACH_ENTRY( notify, &hostpad_notify_list, struct hostpad_notify, entry )
++    {
++        if (notify->handle != handle) continue;
++        list_remove( &notify->entry );
++        free( notify );
++        break;
++    }
++    LeaveCriticalSection( &hostpad_notify_cs );
++}
++
+ /***********************************************************************
+  *              GetRawInputDeviceList   (USER32.@)
+  */
+@@ -702,8 +843,7 @@ UINT WINAPI GetRawInputDeviceInfoW( HANDLE device, UINT command, void *data, UIN
+     switch (command)
+     {
+     case RIDI_DEVICENAME:
+-        len = wsprintfW( name, L"\\\\?\\HID#VID_045E&PID_02FF&IG_%02X#3&5ead%04X&0&0000"
+-                         L"#{4d1e55b2-f16f-11cf-88cb-001111000030}", slot, slot ) + 1;
++        len = hostpad_device_name( slot, name );
+         if (len <= data_len && data) memcpy( data, name, len * sizeof(WCHAR) );
+         break;
+ 
+diff --git a/dlls/windows.gaming.input/main.c b/dlls/windows.gaming.input/main.c
+index 9996d50..5df4943 100644
+--- a/dlls/windows.gaming.input/main.c
++++ b/dlls/windows.gaming.input/main.c
+@@ -54,11 +54,11 @@ static LRESULT CALLBACK devnotify_wndproc( HWND hwnd, UINT msg, WPARAM wparam, L
+         {
+         case DBT_DEVICEARRIVAL:
+             iface = (DEV_BROADCAST_DEVICEINTERFACE_W *)lparam;
+-            provider_create( iface->dbcc_name );
++            if (!hostpad_device_change( iface->dbcc_name, TRUE )) provider_create( iface->dbcc_name );
+             break;
+         case DBT_DEVICEREMOVECOMPLETE:
+             iface = (DEV_BROADCAST_DEVICEINTERFACE_W *)lparam;
+-            provider_remove( iface->dbcc_name );
++            if (!hostpad_device_change( iface->dbcc_name, FALSE )) provider_remove( iface->dbcc_name );
+             break;
+         default: break;
+         }
+diff --git a/dlls/windows.gaming.input/private.h b/dlls/windows.gaming.input/private.h
+index 3e10328..7bfa5af 100644
+--- a/dlls/windows.gaming.input/private.h
++++ b/dlls/windows.gaming.input/private.h
+@@ -67,6 +67,7 @@ extern HRESULT vector_create( const struct vector_iids *iids, void **out );
+ extern void provider_create( const WCHAR *device_path );
+ extern void provider_remove( const WCHAR *device_path );
+ extern void hostpad_providers_create(void);
++extern BOOL hostpad_device_change( const WCHAR *device_path, BOOL arrival );
+ 
+ extern void manager_on_provider_created( IGameControllerProvider *provider );
+ extern void manager_on_provider_removed( IGameControllerProvider *provider );
+diff --git a/dlls/windows.gaming.input/provider.c b/dlls/windows.gaming.input/provider.c
+index 38c84df..137f63b 100644
+--- a/dlls/windows.gaming.input/provider.c
++++ b/dlls/windows.gaming.input/provider.c
+@@ -971,3 +971,29 @@ void provider_remove( const WCHAR *device_path )
+         IGameControllerProvider_Release( provider );
+     }
+ }
++
++/* user32 announces a host pad that connects or goes with the slot's raw input
++ * device path, \\?\HID#VID_045E&PID_02FF&IG_<slot>#3&5ead<slot>&0&0000#...
++ * (input.c, hostpad_notify_proc): the slot's provider is made or removed. FALSE
++ * for any other path. */
++BOOL hostpad_device_change( const WCHAR *device_path, BOOL arrival )
++{
++    static const WCHAR prefix[] = L"\\\\?\\HID#VID_045E&PID_02FF&IG_";
++    WCHAR path[32];
++    const WCHAR *tmp;
++    UINT slot;
++
++    if (wcsnicmp( device_path, prefix, ARRAY_SIZE(prefix) - 1 )) return FALSE;
++    if (!(tmp = wcschr( device_path + 8, '#' )) || wcsnicmp( tmp, L"#3&5ead", 7 )) return FALSE;
++    if ((slot = wcstoul( device_path + ARRAY_SIZE(prefix) - 1, NULL, 16 )) >= XUSER_MAX_COUNT) return FALSE;
++
++    TRACE( "device_path %s, arrival %d\n", debugstr_w( device_path ), arrival );
++
++    if (arrival) hostpad_providers_create();
++    else
++    {
++        swprintf( path, ARRAY_SIZE(path), L"playport-hostpad-%u", slot );
++        provider_remove( path );
++    }
++    return TRUE;
++}

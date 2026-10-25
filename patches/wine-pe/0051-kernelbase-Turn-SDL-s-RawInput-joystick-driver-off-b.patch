@@ -1,0 +1,55 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Pavel Demyanov <greypax@cybergusli.ai>
+Date: Fri, 23 Oct 2026 11:50:13 +0300
+Subject: [PATCH] kernelbase: Turn SDL's RawInput joystick driver off by
+ default.
+
+With the host pad in the raw input list (playportdev/playport#53), SDL
+2.0.14 and later gives XInput pads to its RawInput driver and turns its
+XInput driver off, but the pad sends no WM_INPUT, so the game sees no pad
+(Half-Life 2). Set SDL_JOYSTICK_RAWINPUT=0 at process attach unless it is
+already set.
+
+Class: feature
+Evidence: docs/evidence/2026-10-25-touchpad-build.md
+Offered-upstream: no; the host pad exists only on the iOS port
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ dlls/kernelbase/main.c | 17 +++++++++++++++++
+ 1 file changed, 17 insertions(+)
+
+diff --git a/dlls/kernelbase/main.c b/dlls/kernelbase/main.c
+index 8c37e5d..e97b396 100644
+--- a/dlls/kernelbase/main.c
++++ b/dlls/kernelbase/main.c
+@@ -36,6 +36,22 @@ WINE_DEFAULT_DEBUG_CHANNEL(kernelbase);
+ 
+ BOOL is_wow64 = FALSE;
+ 
++/* Playport: SDL's RawInput joystick driver off unless the program or the
++ * player sets SDL_JOYSTICK_RAWINPUT. There are no HID game controllers here
++ * (no winebus): the app's pads reach Windows only through XInput. SDL 2.0.14
++ * to 2.0.16 hands every XInput pad to the RawInput driver while that driver
++ * is on, and it finds none, so a game built on one of them saw no controller
++ * at all (Half-Life 2's inputsystem, SDL 2.0.16). With the driver off, SDL's
++ * XInput driver takes the pads; later SDLs fall back to it by themselves. */
++static void sdl_rawinput_default(void)
++{
++    WCHAR value[8];
++
++    if (!GetEnvironmentVariableW( L"SDL_JOYSTICK_RAWINPUT", value, ARRAY_SIZE(value) ) &&
++        GetLastError() == ERROR_ENVVAR_NOT_FOUND)
++        SetEnvironmentVariableW( L"SDL_JOYSTICK_RAWINPUT", L"0" );
++}
++
+ /***********************************************************************
+  *           DllMain
+  */
+@@ -49,6 +65,7 @@ BOOL WINAPI DllMain( HINSTANCE hinst, DWORD reason, LPVOID reserved )
+         init_locale( hinst );
+         init_startup_info( NtCurrentTeb()->Peb->ProcessParameters );
+         init_console();
++        sdl_rawinput_default();
+     }
+     return TRUE;
+ }

@@ -450,8 +450,11 @@ def workstation_path_checks(app):
     """This machine's home and repository, which the build maps out of every binary
     (build/ld64/swift-build, build/stages/unix.sh, wine-pe.sh, fex.sh, dxmt-*.sh).
     Prebuilt parts carry their own CI runners' home paths (StikJIT, llvm-mingw's
-    libc++abi): not ours, not checked."""
-    paths = [os.fsencode(str(p)) + b"/" for p in (Path.home(), REPO) if str(p) not in ("/", "")]
+    libc++abi): not ours, not checked. On a hosted CI runner they share its home
+    (/home/runner), so PLAYPORT_VERIFY_HOME names the home to look for instead, and
+    empty leaves only the repository (the personal fork's workflow sets it)."""
+    home = os.environ.get("PLAYPORT_VERIFY_HOME", str(Path.home()))
+    paths = [os.fsencode(str(p)) + b"/" for p in (home, REPO) if str(p) not in ("/", "")]
     paths = [w for w in paths if not any(w != v and w.startswith(v) for v in paths)]   # the repo is usually in $HOME
     found = {}
     for p in sorted(app.rglob("*")):

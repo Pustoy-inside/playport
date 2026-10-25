@@ -50,6 +50,9 @@ jobs:
       contents: write
     env:
       JOBS: '4'
+      # Prebuilt parts (wine-mono, llvm-mingw's runtime) carry their own GitHub
+      # runners' /home/runner paths; verify-ipa then checks only the repository's.
+      PLAYPORT_VERIFY_HOME: ''
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:

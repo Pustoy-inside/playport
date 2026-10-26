@@ -177,12 +177,13 @@ final class CloudServiceTests: XCTestCase {
         XCTAssertEqual(first.downloaded, [saveName])
         XCTAssertEqual(text(save), "from the PC")
 
-        // A play changes the save: it goes up, once.
+        // A play changes the save: it goes up, once, and Steam's copy it replaces is backed up.
         try Data("played on the phone".utf8).write(to: save)
         let second = try await s.syncCloud(appID: 367520, roots: roots, backups: backups)
         XCTAssertEqual(second.uploaded, [saveName])
         let onSteam = await b.cloudFile(saveName)
         XCTAssertEqual(onSteam, Array("played on the phone".utf8))
+        XCTAssertEqual(TitleInstaller.regularFiles(under: backups).map { text(backups.appendingPathComponent($0)) }, ["from the PC"])
         let third = try await s.syncCloud(appID: 367520, roots: roots, backups: backups)
         XCTAssertEqual(third.uploaded + third.downloaded, [])
 
@@ -191,9 +192,33 @@ final class CloudServiceTests: XCTestCase {
         let fourth = try await s.syncCloud(appID: 367520, roots: roots, backups: backups)
         XCTAssertEqual(fourth.downloaded, [saveName])
         XCTAssertEqual(text(save), "the PC again")
-        let kept = TitleInstaller.regularFiles(under: backups)
-        XCTAssertEqual(kept.count, 1)
-        XCTAssertEqual(text(backups.appendingPathComponent(kept[0])), "played on the phone")
+        let kept = Set(TitleInstaller.regularFiles(under: backups).compactMap { text(backups.appendingPathComponent($0)) })
+        XCTAssertTrue(kept.contains("played on the phone"))
+    }
+
+    /// Deep Rock Galactic after an update: Steam had its saves, the last sync had put them on
+    /// the phone, and the phone then held none of them. Not a deletion: they come down again
+    /// before the game starts, so no fresh save replaces them. One file the game removed
+    /// while others stay is still a deletion, and is not fetched again.
+    func testAPhoneWithNoneOfTheSyncedSavesGetsSteamsAgain() async throws {
+        let other = "%WinAppDataLocalLow%Team Cherry/Hollow Knight/user2.dat"
+        let b = FakeBackend()
+        await b.set(cloud: [saveName: Array("progress".utf8), other: Array("settings".utf8)])
+        let s = try await service(b)
+        let first = try await s.syncCloud(appID: 367520, roots: roots, backups: backups)
+        XCTAssertEqual(first.downloaded.sorted(), [saveName, other].sorted())
+
+        try FileManager.default.removeItem(at: roots.file(other)!)
+        let one = try await s.syncCloud(appID: 367520, roots: roots, backups: backups)
+        XCTAssertEqual(one.downloaded + one.uploaded, [], "a file the phone deleted is not fetched again")
+
+        try FileManager.default.removeItem(at: save)
+        let none = try await s.syncCloud(appID: 367520, roots: roots, backups: backups)
+        XCTAssertEqual(none.downloaded.sorted(), [saveName, other].sorted())
+        XCTAssertEqual(none.uploaded, [])
+        XCTAssertEqual(text(save), "progress")
+        let onSteam = await b.cloudFile(saveName)
+        XCTAssertEqual(onSteam, Array("progress".utf8))
     }
 
     /// Portal 2: its rule spells the root `gameinstall`, Steam lists `%GameInstall%`. Each save

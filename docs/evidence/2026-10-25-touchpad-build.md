@@ -65,3 +65,14 @@ Fix: `Adoption.pick` passes over an installer, redistributable or tool at the to
 when the game is below it, and the game page's Executable picker now also shows
 for Steam games (a chosen executable other than Steam's launch one drops the
 launch entry's arguments).
+
+Deep Rock Galactic (548430) now starts and plays (two sessions, 121 s and 397 s,
+exit 0; DXMT), where 0.4.0 showed a black screen. Its Steam Cloud saves did not
+come down: 0.4.0 had synced them (22 down, 2026-10-24), the phone then held none
+of them, and the sync took that for deletions, which are not carried (44 on
+Steam, 0 on the phone, 0 down). The game started without saves, and the next
+sync sent its fresh `76561199019898212_Player.sav` up over Steam's copy, since
+Steam's had not changed since the last sync; nothing kept Steam's copy. Fix:
+when the phone holds none of the files the last sync left, Steam's copies come
+down as on a first sync; and every upload that replaces a Steam file backs that
+file up first (`backups/<appid>/<time>/`), not only a conflict the player settles.

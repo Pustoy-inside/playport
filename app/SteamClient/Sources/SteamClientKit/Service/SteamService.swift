@@ -826,6 +826,13 @@ public actor SteamService {
         var local: [String: String] = [:]
         for (name, url) in files { if let d = try? Data(contentsOf: url) { local[name] = SHA1.hash([UInt8](d)).hex } }
         var plan = Cloud.plan(remote: remote, local: local, baseline: baseline)
+        // The phone holds none of the files the last sync left (the game reinstalled, or its
+        // save folder emptied): that is no deletion to keep. Steam's copies come down as on a
+        // first sync, before the game starts with no saves and a fresh one goes up over them.
+        let synced = Set(baseline.map { Array($0.files.keys) } ?? [])
+        if !synced.isEmpty, synced.allSatisfy({ local[$0] == nil }) {
+            for name in remote.keys where local[name] == nil && plan[name] == nil { plan[name] = .download }
+        }
         // A game's first sync does not upload a file Steam lacks: the player says.
         if baseline == nil { for name in local.keys where remote[name] == nil { plan[name] = .conflict } }
         // A conflict stays one until the player settles it, even once a baseline exists.
@@ -862,8 +869,8 @@ public actor SteamService {
         var uploads: [(name: String, data: [UInt8], time: UInt64)] = []
         for name in plan.filter({ $0.value == .upload }).keys.sorted() {
             guard let url = files[name], let d = try? Data(contentsOf: url) else { failed[name] = "unreadable"; continue }
-            if remote[name] != nil, resolve[name] == .phone {
-                // Steam's copy loses to the phone's: keep it.
+            if remote[name] != nil {
+                // Steam's copy is replaced (the phone's changed, or won a conflict): keep it.
                 do { try backup(name, Data(try await backend.cloudDownload(appID: appID, name: name))) }
                 catch { failed[name] = "Steam's copy could not be backed up: \(error)"; continue }
             }

@@ -197,7 +197,7 @@ public struct TitleInstaller: Sendable {
             let licenses = try await session.awaitLicenses(timeout: 20)
             guard !licenses.isEmpty else { return nil }
             let packages: [(id: UInt32, token: UInt64)] = licenses.map { ($0.packageID, $0.accessToken) }
-            let library = Library(session: session)
+            let library = await Library(session: session)
             let depots = try await library.ownedDepotIDs(packages: packages)
             guard !depots.isEmpty else { return nil }
             let apps = Set(try await library.ownedAppIDs(packages: packages).keys)

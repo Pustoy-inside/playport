@@ -49,3 +49,19 @@ and wine-pe (checked on a wine-mirror checkout of 455e3509).
 Whether the app builds with the touch pad target, whether the touch pad, Home and
 the menu work on `main`'s UI, and whether any game behaves differently. Each of
 those needs the phone.
+
+## 2026-10-26: first install on the phone (run 40240512146)
+
+The IPA (`Playport-26.5-release-unsigned-428b0c51.ipa`, sha256 `428b0c51…ef15`)
+installed over 0.4.0 with iloader; Increased Memory Limit on. The on-screen
+controller connects (`hostio: controller connected "Apple Touch Controller"`,
+XInput slot 0).
+
+The Witcher 3 (292030) no longer starts: Steam names `REDprelauncher.exe`, which
+adoption skips, and its fallback took the first executable at the folder's top,
+`setup_redlauncher.exe`, which quits with exit code 1 after about 0.5 s (six tries,
+Vulkan and DXMT, with and without `-dx11`). 0.4.0 started `bin\x64\witcher3.exe`.
+Fix: `Adoption.pick` passes over an installer, redistributable or tool at the top
+when the game is below it, and the game page's Executable picker now also shows
+for Steam games (a chosen executable other than Steam's launch one drops the
+launch entry's arguments).

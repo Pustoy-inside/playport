@@ -317,7 +317,11 @@ public enum Adoption {
                     if t.source == .found, old.source == .found { t.sizeBytes = old.sizeBytes }
                     if old.storeVersion != t.storeVersion { t.lastVerification = nil }
                     t.chosenExecutable = old.chosenExecutable
-                    if let chosen = old.chosenExecutable, let there = locate(chosen, in: dir) { t.executable = there }
+                    if let chosen = old.chosenExecutable, let there = locate(chosen, in: dir) {
+                        // Steam's launch arguments belong to its launch executable only.
+                        if t.appID != nil, there != t.executable { t.storeArguments = nil }
+                        t.executable = there
+                    }
                     t.displayName = old.displayName
                     if let name = old.displayName, !name.isEmpty { t.name = name }
                 }
@@ -388,9 +392,17 @@ public enum Adoption {
     /// `<Project>\Binaries\Win64\<Project>-Win64-Shipping.exe` as a second
     /// process. Prefer the shipping executable when present, avoiding an extra
     /// unvalidated bootstrap and its JIT cost; the runtime does support children.
+    /// When every executable at the top is an installer, redistributable or tool
+    /// (The Witcher 3's `setup_redlauncher.exe` beside its prelauncher), the game
+    /// one below it comes first; the top one only when nothing is found below.
     static func pick(_ exes: [String], folder: String, in dir: URL? = nil) -> String? {
         let key = { (s: String) in s.lowercased().filter { $0.isLetter || $0.isNumber } }
-        guard let exe = exes.first(where: { key(String($0.dropLast(4))) == key(folder) }) ?? exes.first else {
+        let named = exes.first(where: { key(String($0.dropLast(4))) == key(folder) })
+        let game = exes.first(where: { e in !notTheGame.contains { e.lowercased().contains($0) } })
+        if named == nil, game == nil, !exes.isEmpty, let dir, let below = nested(in: dir, folder: folder) {
+            return below
+        }
+        guard let exe = named ?? game ?? exes.first else {
             return dir.flatMap { nested(in: $0, folder: folder) }
         }
         if let dir, let shipping = unrealShipping(for: exe, in: dir) { return shipping }

@@ -775,7 +775,13 @@ private struct GameDetailPage: View {
                 }
             }
         }
-        if t.store != .steam, t.source != .cohort { localRows(t) }
+        if t.store != .steam, t.source != .cohort {
+            localRows(t)
+        } else if t.store == .steam {
+            // Steam's launch executable, or adoption's pick when that is a launcher Playport
+            // skips; the player can choose another (The Witcher 3's bin\x64\witcher3.exe).
+            executableRow(t)
+        }
         filesRows(t)
         if let s = stats, !s.schema.achievements.isEmpty {
             PadRow(id: "opt:achievements", title: "Achievements", value: "\(s.unlockedCount) of \(s.schema.achievements.count)",
@@ -790,6 +796,16 @@ private struct GameDetailPage: View {
     /// store's copy): which executable Play starts, and the name it shows.
     @ViewBuilder
     private func localRows(_ t: InstalledTitle) -> some View {
+        executableRow(t)
+        PadRow(id: "opt:name", title: "Name", value: t.name, accessory: .chevron, changed: t.displayName != nil, style: .plain,
+               hint: "Edit", reset: t.displayName == nil ? nil : { library.rename(t.id, nil) }) {
+            PadModal.shared.keyboard(title: "Name", text: t.name, placeholder: t.installDir, maxLength: 80) { library.rename(t.id, $0) }
+        }
+    }
+
+    /// Which executable Play starts: adoption's pick, or the one the player chose.
+    @ViewBuilder
+    private func executableRow(_ t: InstalledTitle) -> some View {
         let machine = t.executableMachine.map(Self.machineName)
         PadRow(id: "opt:executable", title: "Executable",
                subtitle: [machine, t.direct3D.flatMap { $0.apis.isEmpty ? nil : $0.summary }].compactMap { $0 }.joined(separator: " · "),
@@ -804,10 +820,6 @@ private struct GameDetailPage: View {
                 options: [PadOption(id: "", label: "Default", detail: found.first.map { "\($0), Playport's pick" })]
                     + found.map { PadOption(id: $0, label: $0) },
                 selected: t.chosenExecutable ?? "") { library.setExecutable(t.id, $0.isEmpty ? nil : $0) }
-        }
-        PadRow(id: "opt:name", title: "Name", value: t.name, accessory: .chevron, changed: t.displayName != nil, style: .plain,
-               hint: "Edit", reset: t.displayName == nil ? nil : { library.rename(t.id, nil) }) {
-            PadModal.shared.keyboard(title: "Name", text: t.name, placeholder: t.installDir, maxLength: 80) { library.rename(t.id, $0) }
         }
     }
 

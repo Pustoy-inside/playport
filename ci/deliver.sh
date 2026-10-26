@@ -36,10 +36,14 @@ package)
     test -n "$out"
     delivery="$PLAYPORT_BUILD/delivery"
     mkdir -p "$delivery"
-    cp "$out"/*.ipa "$delivery/"
+    # The owner's name for a build: Playport Dishnur <n>, n from ci/build-request.json
+    # ("build", else "request").
+    number=$(jq -r '.build // .request' ci/build-request.json)
+    title="Playport Dishnur $number"
+    cp "$out"/*.ipa "$delivery/Playport-Dishnur-$number.ipa"
     cp "$out/provenance.txt" "$delivery/" 2>/dev/null || git rev-parse HEAD > "$delivery/provenance.txt"
     {
-        echo "Personal unsigned Playport build, from this fork's source at the commit this release targets."
+        echo "$title: a personal unsigned Playport build, from this fork's source at the commit this release targets."
         echo "Install the IPA through iloader (or AltStore) with the same Apple account as the existing app."
         echo "Keep the JIT helper extension and Increased Memory Limit entitlement."
         echo "Upgrade in place: uninstalling Playport deletes its installed games and saves."
@@ -50,7 +54,7 @@ package)
     tag="personal-ipa-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
     # The IPA first: it is what the run is for.
     gh release create "$tag" --repo "$GITHUB_REPOSITORY" --target "$(git rev-parse HEAD)" \
-        --draft --title "Personal unsigned Playport $GITHUB_RUN_ID" \
+        --draft --title "$title" \
         --notes-file "$delivery/INSTALL.txt"
     gh release upload "$tag" "$delivery"/*.ipa "$delivery/provenance.txt" "$delivery/INSTALL.txt" \
         "$delivery/SHA256SUMS" --repo "$GITHUB_REPOSITORY"

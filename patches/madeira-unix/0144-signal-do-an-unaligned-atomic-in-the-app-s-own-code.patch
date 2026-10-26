@@ -1,0 +1,252 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: The Playport authors <dev@playport.dev>
+Date: Mon, 26 Oct 2026 17:46:59 +0300
+Subject: [PATCH] signal: do an unaligned atomic in the app's own code in place
+
+Wine's unix side and the libraries linked into the app (GStreamer, GLib,
+FFmpeg) are host ARM64 code in the app executable's __TEXT. When one of
+them runs an acquire/release, exclusive or LSE atomic on a guest address
+that is not aligned (an 8-byte STLR that crosses 16 bytes faults even
+with LSE2), bus_handler dispatched 80000002 and FEX's unaligned-atomic
+handler completed the access, then resumed with NtContinueNative at the
+next host instruction. signal_set_full_context found that pc in no PE
+image's EcCodeBitMap and outside the JIT pool, and bounced it through
+KiUserEmulationDispatcher as the guest's RIP:
+
+  [exc-disp] raise tid=008c code=80000002 addr=0x10172d10c pc=10172d10c
+  D 8C Handled unaligned atomic #1 ...: new pc: 10172D110
+  [set-ctx] ml946 ... frame pc=0x10172d110 ... is_ec(frame.pc)=0 ec_cur=1
+  E 8C NoExec instruction in entry block: 10172D110
+  D 8C Exception: Code: C0000005 Address: 10172D110 AV EXEC of 10172D110
+
+Deep Rock Galactic ended that way on every launch, 25 to 80 s in, on the
+thread that handles its HTTPS replies.
+
+bus_handler now does such an access itself when the pc is in the app's
+__TEXT (found at signal_init_process): the load, store, exclusive (whose
+store always succeeds), CAS, SWP or LSE operation, under one lock every
+emulated host atomic takes, between full barriers, with
+mach_vm_read_overwrite/mach_vm_write so that an unreadable or unwritable
+page declines instead of faulting in the handler. Pair forms decline to
+the old path. And signal_set_full_context keeps a resume into the app's
+__TEXT native, as it does for the JIT pool.
+
+Class: upstream-bug
+Evidence: docs/evidence/2026-10-25-touchpad-build.md
+Offered-upstream: no; the iOS SIGBUS path is Madeira's own code
+---
+ build/ntdll-unix/signal_arm64_ios.c | 163 +++++++++++++++++++++++++++-
+ 1 file changed, 162 insertions(+), 1 deletion(-)
+
+diff --git a/build/ntdll-unix/signal_arm64_ios.c b/build/ntdll-unix/signal_arm64_ios.c
+index 9546afb..3e58af3 100644
+--- a/build/ntdll-unix/signal_arm64_ios.c
++++ b/build/ntdll-unix/signal_arm64_ios.c
+@@ -39,6 +39,8 @@
+ #ifdef WINE_IOS
+ #include <dlfcn.h>
+ #include <mach/mach.h>
++#include <mach-o/loader.h>
++#include <string.h>
+ 
+ /* iOS-Madeira ml674: XZR/WZR AS A STORE SOURCE MUST READ ZERO.
+  *
+@@ -115,6 +117,15 @@ WINE_DEFAULT_DEBUG_CHANNEL(seh);
+ #define NTDLL_DWARF_H_NO_UNWINDER
+ #include "dwarf.h"
+ 
++/* Playport: the app executable's __TEXT (ios_host_text_init, at
++ * signal_init_process): host ARM64 code, never the guest's
++ * (ios_emulate_host_unaligned_atomic). */
++static uintptr_t ios_host_text_lo, ios_host_text_hi;
++static inline int ios_pc_in_host_text( uintptr_t pc )
++{
++    return pc >= ios_host_text_lo && pc < ios_host_text_hi;
++}
++
+ /* ml649: runtime diagnostic switch, defined in virtual_ios.c. Default OFF.
+  * Gate the WORK, not the print — several probes do expensive reads first. */
+ extern volatile int madeira_diag_enabled;
+@@ -6630,7 +6641,10 @@ NTSTATUS signal_set_full_context( CONTEXT *context )
+         uintptr_t rx = (uintptr_t)ios_jit_rx_base_global;
+         size_t psz = ios_jit_pool_size_global;
+ 
+-        if (rx && psz && frame->pc >= rx && frame->pc < rx + psz)
++        /* Playport: the app's own code is ARM64 too, never the guest's RIP
++         * (a host-side fault FEX completed, as ios_emulate_host_unaligned_atomic
++         * describes). */
++        if ((rx && psz && frame->pc >= rx && frame->pc < rx + psz) || ios_pc_in_host_text( frame->pc ))
+         {
+             static int bounce_saved;
+             if (bounce_saved < 16 && ++bounce_saved <= 16)
+@@ -11111,6 +11125,138 @@ static int ios_emulate_store(ucontext_t *ctx, uint32_t insn, uintptr_t rw_addr)
+     return 0;  /* unhandled instruction */
+ }
+ 
++/**********************************************************************
++ *		ios_emulate_host_unaligned_atomic
++ *
++ * Playport: an unaligned atomic in the app's own code. Wine's unix side and
++ * the libraries linked into the app (GStreamer, GLib, FFmpeg) are host ARM64
++ * code in the app executable's __TEXT; they can run an acquire/release,
++ * exclusive or LSE atomic on a guest address that is not aligned (an 8-byte
++ * STLR that crosses 16 bytes faults even with LSE2). That fault reached
++ * FEX's unaligned-atomic handler, which completed it and resumed with
++ * NtContinueNative at the next host instruction; signal_set_full_context
++ * found that pc in no PE image's EcCodeBitMap and outside the JIT pool, so it
++ * bounced it through KiUserEmulationDispatcher as the guest's RIP: "NoExec
++ * instruction in entry block", c0000005. Deep Rock Galactic died that way on
++ * every launch, on the thread that handles its HTTPS replies.
++ *
++ * Here, for a pc in the app's __TEXT, the access is done in the handler: the
++ * load, store, exclusive (whose store always succeeds), CAS, SWP or LSE
++ * operation, under one lock that every emulated host atomic takes, between
++ * full barriers. Memory moves with mach_vm_read_overwrite/mach_vm_write, so a
++ * page that is not readable or writable declines (0) instead of faulting in
++ * the handler. Pair forms decline.
++ */
++static char ios_host_atomic_lock;
++
++static void ios_host_text_init(void)
++{
++    Dl_info info;
++    const struct mach_header_64 *mh;
++    const struct load_command *lc;
++    uint32_t i;
++
++    if (!dladdr( (void *)ios_host_text_init, &info ) || !info.dli_fbase) return;
++    mh = info.dli_fbase;
++    if (mh->magic != MH_MAGIC_64) return;
++    lc = (const struct load_command *)(mh + 1);
++    for (i = 0; i < mh->ncmds; i++)
++    {
++        if (lc->cmd == LC_SEGMENT_64 &&
++            !strncmp( ((const struct segment_command_64 *)lc)->segname, "__TEXT", 16 ))
++        {
++            ios_host_text_lo = (uintptr_t)mh;
++            ios_host_text_hi = (uintptr_t)mh + ((const struct segment_command_64 *)lc)->vmsize;
++            dprintf( 2, "[host-text] %p-%p: the app's code (unaligned atomics there are emulated in place)\n",
++                     (void *)ios_host_text_lo, (void *)ios_host_text_hi );
++            return;
++        }
++        lc = (const struct load_command *)((const char *)lc + lc->cmdsize);
++    }
++}
++
++static int ios_emulate_host_unaligned_atomic( ucontext_t *ctx, uint32_t insn, uintptr_t addr )
++{
++    enum { H_LOAD, H_STORE, H_STXR, H_CAS, H_LSE, H_SWP } kind;
++    const int size = insn >> 30, rt = insn & 31, rs = (insn >> 16) & 31;
++    const unsigned n = 1u << size;
++    const int shift = 64 - 8 * (int)n;
++    const uint64_t mask = size == 3 ? ~0ull : (1ull << (8 * n)) - 1;
++    uint64_t old = 0, val = 0, arg;
++    mach_vm_size_t got = 0;
++    int op = 0, ok = 0;
++
++    if ((insn & 0x3F000000) == 0x08000000)          /* exclusive, ordered, CAS */
++    {
++        const int o2 = (insn >> 23) & 1, L = (insn >> 22) & 1, o1 = (insn >> 21) & 1;
++        if (!o1) kind = L ? H_LOAD : (o2 ? H_STORE : H_STXR);
++        else if (o2 && ((insn >> 10) & 31) == 31) kind = H_CAS;
++        else return 0;                              /* LDXP/STXP/CASP */
++    }
++    else if ((insn & 0x3F200C00) == 0x38200000)     /* LSE atomic memory operations */
++    {
++        const int o3 = (insn >> 15) & 1, opc = (insn >> 12) & 7;
++        if (!o3) { kind = H_LSE; op = opc; }
++        else if (opc == 0) kind = H_SWP;
++        else if (opc == 4 && rs == 31) kind = H_LOAD;   /* LDAPR */
++        else return 0;
++    }
++    else if ((insn & 0x3F200C00) == 0x19000000)     /* STLUR / LDAPUR, unscaled */
++    {
++        const int opc = (insn >> 22) & 3;
++        if (opc == 0) kind = H_STORE;
++        else if (opc == 1) kind = H_LOAD;
++        else return 0;                              /* the sign-extending loads */
++    }
++    else return 0;
++
++    while (__atomic_test_and_set( &ios_host_atomic_lock, __ATOMIC_ACQUIRE )) ;
++    __atomic_thread_fence( __ATOMIC_SEQ_CST );
++    if (kind != H_STORE && kind != H_STXR &&
++        (mach_vm_read_overwrite( mach_task_self(), addr, n, (mach_vm_address_t)(uintptr_t)&old, &got ) != KERN_SUCCESS ||
++         got != n))
++        goto done;
++    switch (kind)
++    {
++    case H_LOAD:  val = old; break;
++    case H_STORE:
++    case H_STXR:  val = ios_get_reg( ctx, rt ) & mask; break;
++    case H_SWP:   val = ios_get_reg( ctx, rs ) & mask; break;
++    case H_CAS:   val = old == (ios_get_reg( ctx, rs ) & mask) ? ios_get_reg( ctx, rt ) & mask : old; break;
++    case H_LSE:
++        arg = ios_get_reg( ctx, rs ) & mask;
++        switch (op)
++        {
++        case 0: val = (old + arg) & mask; break;                    /* LDADD */
++        case 1: val = old & ~arg; break;                            /* LDCLR */
++        case 2: val = old ^ arg; break;                             /* LDEOR */
++        case 3: val = old | arg; break;                             /* LDSET */
++        case 4: val = (int64_t)(old << shift) >> shift > (int64_t)(arg << shift) >> shift ? old : arg; break; /* LDSMAX */
++        case 5: val = (int64_t)(old << shift) >> shift < (int64_t)(arg << shift) >> shift ? old : arg; break; /* LDSMIN */
++        case 6: val = old > arg ? old : arg; break;                 /* LDUMAX */
++        default: val = old < arg ? old : arg; break;                /* LDUMIN */
++        }
++        break;
++    }
++    if (kind != H_LOAD && !(kind == H_CAS && val == old) &&
++        mach_vm_write( mach_task_self(), addr, (vm_offset_t)(uintptr_t)&val, n ) != KERN_SUCCESS)
++        goto done;
++    switch (kind)
++    {
++    case H_LOAD:  if (rt != 31) REGn_sig( rt, ctx ) = old; break;
++    case H_STXR:  if (rs != 31) REGn_sig( rs, ctx ) = 0; break;      /* the exclusive store succeeded */
++    case H_CAS:   if (rs != 31) REGn_sig( rs, ctx ) = old; break;
++    case H_LSE:
++    case H_SWP:   if (rt != 31) REGn_sig( rt, ctx ) = old; break;
++    default: break;
++    }
++    ok = 1;
++done:
++    __atomic_thread_fence( __ATOMIC_SEQ_CST );
++    __atomic_clear( &ios_host_atomic_lock, __ATOMIC_RELEASE );
++    return ok;
++}
++
+ /**********************************************************************
+  *		ios_emulate_unaligned_guest_access
+  *
+@@ -13074,6 +13220,20 @@ static void bus_handler( int signal, siginfo_t *siginfo, void *sigcontext )
+                  * only the log lines are rate-limited, and every line carries
+                  * the totals so silence can never be mistaken for zero. */
+                 static unsigned long ua_emu_n, ua_simd_n, ua_other_n;
++                /* Playport: an unaligned atomic in the app's own code is done
++                 * here, not dispatched (ios_emulate_host_unaligned_atomic). */
++                if (ios_pc_in_host_text( (uintptr_t)pc ) &&
++                    ios_emulate_host_unaligned_atomic( bus_ctx, a_insn, (uintptr_t)siginfo->si_addr ))
++                {
++                    static unsigned long host_n;
++                    unsigned long k = __sync_add_and_fetch( &host_n, 1 );
++                    if (k <= 8 || !(k % 4096))
++                        dprintf( 2, "[host-unaligned] #%lu emulated insn=0x%08x addr=%p pc=%p (the app's code)\n",
++                                 k, a_insn, siginfo->si_addr, pc );
++                    PC_sig(bus_ctx) += 4;
++                    ios_fixup_x18_for_return( bus_ctx );
++                    return;
++                }
+                 if (ios_emulate_unaligned_guest_access(bus_ctx, a_insn, (uintptr_t)siginfo->si_addr))
+                 {
+                     if (++ua_emu_n <= 16 || (ua_emu_n % 4096) == 0)
+@@ -13777,6 +13937,7 @@ void signal_init_process( TEB *teb )
+     signal_alloc_thread( teb );
+ 
+ #ifdef WINE_IOS
++    ios_host_text_init();
+     /* Create TLS key for TEB storage (used by x18 binary patcher trampolines) */
+     if (!ios_teb_tls_key_created)
+     {
+-- 
+2.55.0
+

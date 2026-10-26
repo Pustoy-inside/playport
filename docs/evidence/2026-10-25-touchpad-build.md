@@ -97,3 +97,27 @@ saves. Fix: an update in place keeps each file whose path, size and SHA-1 the
 installed build's retained manifests already have (hard links into the stage),
 downloads only the rest, and hard-links every file in neither build's manifests
 (saves, settings) into the new tree before the swap.
+
+## 2026-10-26: Deep Rock Galactic ends 25 to 80 s in (madeira-unix 0144)
+
+Once the phone held the player's own save from Steam (442 KB), every launch
+of Deep Rock Galactic, on DXMT and on Vulkan, ended the same way, on the
+thread that handles its HTTPS replies (a 129 KB POST just before):
+
+    [exc-disp] raise tid=008c code=80000002 addr=0x10172d10c pc=10172d10c
+    D 8C Handled unaligned atomic #1 ...: new pc: 10172D110
+    [set-ctx] ml946 ... frame pc=0x10172d110 ... is_ec(frame.pc)=0 ec_cur=1
+    E 8C NoExec instruction in entry block: 10172D110
+    D 8C Exception: Code: C0000005 Address: 10172D110 AV EXEC of 10172D110
+
+The pc is in the app executable's own code (image base 0x100c18000): host
+code ran an unaligned atomic on a guest address, FEX completed it and resumed
+at the next host instruction, and signal_set_full_context, which keeps only
+JIT-pool resumes native (ml420), sent it to the emulator as the guest's RIP.
+madeira-unix 0144 does such an access in bus_handler when the pc is in the
+app's `__TEXT` (loads, stores, exclusives, CAS, SWP, the LSE operations, under
+one lock, through mach_vm_read_overwrite/mach_vm_write), logged as
+`[host-unaligned]`, and keeps a resume into the app's `__TEXT` native. The
+emulation was checked on the workstation against every form it takes (a host
+test of the decode and the read-modify-write, with stubbed memory calls); the
+runtime change itself needs the phone.

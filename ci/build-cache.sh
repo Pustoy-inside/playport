@@ -97,11 +97,15 @@ else
         --notes 'Hosted-runner build state only. Excludes the Apple SDK, handoff keys and signing credentials. Not an installable IPA.'
     gh release upload "$tag" "$scratch"/cache.part.* --repo "$GITHUB_REPOSITORY"
     gh release upload "$tag" "$scratch/cache.ready" --repo "$GITHUB_REPOSITORY"
-    # Only superseded caches created by this script, after the new one is ready.
+    # Only superseded caches created by this script, after the new one is ready,
+    # and none less than six hours old: a run on another branch may be restoring it.
     # Draft creation does not create a Git tag; deleting a tag ref would fail.
+    cutoff=$(date -u -d '-6 hours' +%FT%TZ)
     while IFS= read -r old; do
         [ "$old" = "$tag" ] || gh release delete "$old" --repo "$GITHUB_REPOSITORY" --yes
-    done < <(available)
+    done < <(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" |
+        jq -r --arg p "$prefix-" --arg cut "$cutoff" '.[] | select(.draft and (.tag_name | startswith($p))) |
+            select(any(.assets[]; .name == "cache.ready")) | select(.created_at < $cut) | .tag_name')
     rm -f "$scratch"/cache.part.* "$scratch/cache.tar.zst" "$scratch/cache.ready"
     echo "Saved private incremental build state to $tag."
 fi

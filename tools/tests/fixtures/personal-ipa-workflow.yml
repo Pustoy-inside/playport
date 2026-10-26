@@ -3,12 +3,13 @@ name: Personal unsigned IPA
 on:
   workflow_dispatch:
   push:
-    branches: [main]
+    # main, and runtime-* branches built beside it (one run per branch at a time).
+    branches: [main, 'runtime-*']
     paths: [ci/build-request.json]
 permissions:
   contents: read
 concurrency:
-  group: personal-ipa
+  group: personal-ipa-${{ github.ref_name }}
   cancel-in-progress: true
 env:
   TRANSFER_TAG: ci-sdk-${{ github.run_id }}-${{ github.run_attempt }}

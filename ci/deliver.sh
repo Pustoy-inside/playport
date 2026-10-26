@@ -28,7 +28,7 @@ records)
         git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
             commit -m 'Record manifests from personal unsigned build'
         gh auth setup-git
-        git push "https://github.com/$GITHUB_REPOSITORY.git" HEAD:main
+        git push "https://github.com/$GITHUB_REPOSITORY.git" "HEAD:$GITHUB_REF_NAME"
     fi
     ;;
 package)

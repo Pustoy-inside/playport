@@ -30,6 +30,15 @@ struct SteamInstallStatus: View {
         guard t.source == .installed, let now = info.depots.buildID(branch: t.branch ?? Branch.publicName) else { return false }
         return t.buildID != now
     }
+
+    /// Owned DLC (the emulator's profile) whose depots the install lacks: an install made
+    /// while Playport left every DLC depot out (The Witcher 3's expansions). Downloading them
+    /// is an update of the same build that keeps the files the install has.
+    static func missingDLC(_ t: InstalledTitle, _ info: SteamAppInfo, _ profile: SteamGameProfile?) -> [UInt32] {
+        guard t.source == .installed, t.store == .steam, let profile, !profile.dlc.isEmpty,
+              let depots = try? info.depots.onBranch(t.branch ?? Branch.publicName) else { return [] }
+        return DepotSelection.missingDLC(depots, installed: Set(t.depots.map(\.depotID)), ownedDLC: Set(profile.dlc.map(\.appID)))
+    }
 }
 
 /// A branch as the version picker names it: public is the default, a beta

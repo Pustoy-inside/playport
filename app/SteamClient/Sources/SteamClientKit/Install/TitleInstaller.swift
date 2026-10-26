@@ -136,12 +136,24 @@ public struct TitleInstaller: Sendable {
             + (plan.skippedSymlinks.isEmpty ? "" : ", \(plan.skippedSymlinks.count) symlink entries not installed"))
         var stagePlan = plan
         var others: SharedInstallDir.Others?
+        var reused: [InstallPlan.File] = []
+        let previous = replacing && sharing.isEmpty
+            ? loadReceipt(r.appID).flatMap { $0.installDir.lowercased() == name.lowercased() ? $0 : nil } : nil
         if !sharing.isEmpty {
             let o = try SharedInstallDir.Others(sharing.map { try retainedPlan($0) })
             stagePlan = plan.restricted(to: try SharedInstallDir.pathsToStage(plan, others: o, folder: name))
             others = o
             say("shared folder: Games/\(name) also holds app(s) \(o.appIDs.map(String.init).joined(separator: ", ")); "
                 + "\(plan.files.count - stagePlan.files.count) of \(plan.files.count) files are theirs too, \(stagePlan.files.count) to download")
+        } else if let previous {
+            // An update in place (a new build, or owned DLC depots joining the same build):
+            // the files the install already has are kept, not downloaded again.
+            reused = unchangedFiles(plan, previous: previous, in: final)
+            if !reused.isEmpty {
+                stagePlan = plan.restricted(to: Set(plan.files.map(\.path)).subtracting(reused.map(\.path)))
+                say("update: \(reused.count) of \(plan.files.count) files are unchanged in Games/\(name) and kept; "
+                    + "\(stagePlan.files.count) to download")
+            }
         }
 
         let tree = layout.stagingTree(appID: r.appID, buildID: app.publicBuildID)
@@ -166,6 +178,7 @@ public struct TitleInstaller: Sendable {
         if let others {
             try commitShared(tree, plan: plan, staged: stagePlan, to: final, others: others, receipt: receipt)
         } else {
+            if replacing { try keepInPlace(tree, plan: plan, reused: reused, previous: previous, from: final, say: say) }
             try commit(tree, to: final, replacing: replacing, receipt: receipt)
         }
         try? FileManager.default.removeItem(at: engine.journalURL)
@@ -441,6 +454,48 @@ public struct TitleInstaller: Sendable {
             _ = rmdir(url.path)    // fails, and keeps it, when anything is left in it
         }
         return removed
+    }
+
+    /// The new plan's files the installed build already has: the same path, size and SHA-1
+    /// in its retained manifests, and the same size on disk (a swapped steam_api DLL as its
+    /// kept original). Without the retained manifests, none.
+    func unchangedFiles(_ plan: InstallPlan, previous: InstallReceipt, in final: URL) -> [InstallPlan.File] {
+        guard let old = try? retainedPlan(previous) else { return [] }
+        var before: [String: InstallPlan.File] = [:]
+        for f in old.files where before[f.path.lowercased()] == nil { before[f.path.lowercased()] = f }
+        return plan.files.filter { f in
+            guard let o = before[f.path.lowercased()], o.size == f.size, o.sha == f.sha, f.sha != nil || f.size == 0,
+                  let url = try? InstallFS.resolveInside(final, SteamAPISwap.manifestFile(final, f.path), createParents: false),
+                  let size = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? NSNumber
+            else { return false }
+            return size.uint64Value == f.size
+        }
+    }
+
+    /// Before an update's commit swaps the trees: hard links, in the staged tree, of the
+    /// files kept from the install (`reused`) and of every file the game made in its own
+    /// folder, in neither build's manifests (Deep Rock Galactic's `FSD/Saved/SaveGames`,
+    /// settings). The swap used to delete those with the old tree. Links, not moves: if the
+    /// commit fails, the install it puts back is whole.
+    func keepInPlace(_ tree: URL, plan: InstallPlan, reused: [InstallPlan.File], previous: InstallReceipt?, from final: URL,
+                     say: (String) -> Void) throws {
+        try InstallFS.makeDirectory(tree)
+        for d in plan.directories { try InstallFS.makeDirectory(try InstallFS.resolveInside(tree, d, createParents: true)) }
+        for f in reused {
+            let src = try InstallFS.resolveInside(final, SteamAPISwap.manifestFile(final, f.path), createParents: false)
+            let dst = try InstallFS.resolveInside(tree, f.path, createParents: true)
+            _ = unlink(dst.path)
+            guard link(src.path, dst.path) == 0 else { throw SteamError.transport("cannot keep \(f.path) for the update (errno \(errno))") }
+        }
+        var known = Set(plan.files.map { $0.path.lowercased() })
+        if let previous, let old = try? retainedPlan(previous) { known.formUnion(old.files.map { $0.path.lowercased() }) }
+        var kept = 0
+        for p in Self.regularFiles(under: final) where !known.contains(p.lowercased()) && !SteamAPISwap.isSwapFile(final, p) {
+            guard let src = try? InstallFS.resolveInside(final, p, createParents: false),
+                  let dst = try? InstallFS.resolveInside(tree, p, createParents: true) else { continue }
+            if link(src.path, dst.path) == 0 { kept += 1 } else { log.warn("install", "\(p) is not kept across the update (errno \(errno))") }
+        }
+        if kept > 0 { say("update: \(kept) file(s) the game made in its folder kept (saves, settings)") }
     }
 
     /// Renames the stage into place and records it before the previous

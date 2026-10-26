@@ -45,8 +45,10 @@ jobs:
         run: |
           swift test --package-path app/PlayportKit --filter \
               'PlayportKitTests\.(PlayportKitTests/test(AnInstaller|ASteamReceipts|SteamReceiptOverrides|AdoptionFinds|SteamAppsSharing)|GameImportTests/testTheExecutablePicker)'
-      - name: Steam Cloud sync tests
-        run: swift test --package-path app/SteamClient --filter 'SteamClientKitTests\.(CloudServiceTests|CloudTests)'
+      - name: Steam Cloud sync, depot selection and install tests
+        run: |
+          swift test --package-path app/SteamClient --filter \
+              'SteamClientKitTests\.(CloudServiceTests|CloudTests|DepotSelectionTests|VerifyRepairTests)'
   build:
     if: github.repository == 'Pustoy-inside/playport' && github.event.repository.visibility == 'public' && !contains(github.event.head_commit.message, '[local-handoff]')
     needs: [precheck]

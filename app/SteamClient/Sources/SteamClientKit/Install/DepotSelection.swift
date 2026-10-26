@@ -71,6 +71,14 @@ public struct DepotSelection: Sendable, Equatable {
         return DepotSelection(depots: chosen, skipped: skipped)
     }
 
+    /// The depots of owned DLC (`ownedDLC`, the emulator's profile) that an install of `app`
+    /// lacks (`installed`): an install made while every DLC depot was left out. Downloading
+    /// them is an update of the same build (TitleInstaller keeps the files it already has).
+    public static func missingDLC(_ app: AppDepots, installed: Set<UInt32>, ownedDLC: Set<UInt32>) -> [UInt32] {
+        let o = Options(ownedDLC: ownedDLC)
+        return app.depots.filter { d in d.dlcAppID != nil && !installed.contains(d.depotID) && exclusion(d, o) == nil }.map(\.depotID)
+    }
+
     /// The reason a receipt keeps for a redistributable depot (`skippedDepots`, "<depot>: <reason>").
     static func sharedInstallReason(_ app: UInt32) -> String { "shared install from app \(app) (redistributable, not installed)" }
 
@@ -91,7 +99,12 @@ public struct DepotSelection: Sendable, Equatable {
         if let owned = o.ownedDepots, !owned.contains(d.depotID) {
             return d.dlcAppID.map { "DLC app \($0) not owned" } ?? "not in an owned package"
         }
-        if let dlc = d.dlcAppID, !o.ownedDLC.contains(dlc) { return "DLC app \(dlc) not owned" }
+        // Owned DLC: named in `ownedDLC`, or its depot is one the account's packages list (the
+        // app passes no `ownedDLC`; without this every DLC depot was left out, The Witcher 3's
+        // expansions among them, while the emulator told the game it owned them).
+        if let dlc = d.dlcAppID, !o.ownedDLC.contains(dlc), o.ownedDepots?.contains(d.depotID) != true {
+            return "DLC app \(dlc) not owned"
+        }
         if d.lowViolence { return "low-violence variant" }
         if let lang = d.language, lang != o.language { return "language \(lang)" }
         return nil

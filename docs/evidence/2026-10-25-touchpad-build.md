@@ -76,3 +76,24 @@ Steam's had not changed since the last sync; nothing kept Steam's copy. Fix:
 when the phone holds none of the files the last sync left, Steam's copies come
 down as on a first sync; and every upload that replaces a Steam file backs that
 file up first (`backups/<appid>/<time>/`), not only a conflict the player settles.
+
+## 2026-10-26: The Witcher 3's expansions, and what an update deletes
+
+Build 8 starts The Witcher 3 (`bin\x64\witcher3.exe`), and Deep Rock Galactic
+plays with its saves. The Witcher 3's saves from the expansions do not load:
+the app's installs pass `DepotSelection` no `ownedDLC`, so every DLC depot was
+left out ("DLC app … not owned"; Hearts of Stone and Blood and Wine are depots
+378648 and 378649), while the emulator's profile tells the game the account
+owns 19 DLC. Fix: a DLC depot an owned package lists (`ownedDepots`) is owned;
+the game page offers **Download DLC** when the emulator's owned DLC have depots
+the install lacks.
+
+Adding them was a whole reinstall: an update stages the full plan in a new
+tree and swaps it in, so a 60 GB title downloaded 60 GB again, and the swap
+deleted every file the game had written in its folder. Deep Rock Galactic keeps
+its saves in `FSD/Saved/SaveGames`, inside its install, and was updated on
+2026-10-26 09:42 UTC: that is how the phone came to hold none of its synced
+saves. Fix: an update in place keeps each file whose path, size and SHA-1 the
+installed build's retained manifests already have (hard links into the stage),
+downloads only the rest, and hard-links every file in neither build's manifests
+(saves, settings) into the new tree before the swap.

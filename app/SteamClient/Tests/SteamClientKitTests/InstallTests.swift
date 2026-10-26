@@ -127,6 +127,17 @@ final class DepotSelectionTests: XCTestCase {
         XCTAssertEqual(try DepotSelection.select(app, .init(language: "German")).depots.map(\.depotID), [11, 12, 15, 19])
     }
 
+    /// The app passes no `ownedDLC`: a DLC depot an owned package lists is owned DLC, and an
+    /// install made before (without it) is missing it while the emulator says it is owned.
+    func testADLCDepotAnOwnedPackageListsIsSelectedAndAnOlderInstallLacksIt() throws {
+        let s = try DepotSelection.select(app, .init(ownedDepots: [11, 12, 15, 17]))
+        XCTAssertEqual(s.depots.map(\.depotID), [11, 12, 15, 17])
+        XCTAssertEqual(s.skipped.first { $0.depotID == 18 }?.reason, "DLC app 98 not owned")
+        XCTAssertEqual(DepotSelection.missingDLC(app, installed: [11, 12, 15], ownedDLC: [99]), [17])
+        XCTAssertEqual(DepotSelection.missingDLC(app, installed: [11, 12, 15, 17], ownedDLC: [99]), [])
+        XCTAssertEqual(DepotSelection.missingDLC(app, installed: [11, 12, 15], ownedDLC: []), [])
+    }
+
     func testExplicitSelection() throws {
         XCTAssertEqual(try DepotSelection.select(app, .init(explicit: [13, 12])).depots.map(\.depotID), [12, 13])
         XCTAssertThrowsError(try DepotSelection.select(app, .init(explicit: [16])))   // redistributable
@@ -872,6 +883,76 @@ final class VerifyRepairTests: XCTestCase {
             XCTFail("a changed shared file was accepted")
         } catch SteamError.unsafeContent {}
         XCTAssertEqual(s.text("hl.exe"), "ENGINE")
+    }
+
+    /// An update in place: The Witcher 3 gaining its expansions' depots on the same build, then
+    /// a new build. The files the install has are kept, not downloaded again, and what the game
+    /// wrote in its folder (Deep Rock Galactic's `FSD/Saved/SaveGames`) survives the swap.
+    func testAnUpdateKeepsUnchangedFilesAndWhatTheGameWrote() async throws {
+        let dir = try scratchDir("update-in-place")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let fx = Fixture()
+        let layout = InstallLayout.root(dir)
+        let installer = TitleInstaller(layout: layout, session: nil, log: .silent)
+        try FileManager.default.createDirectory(at: layout.manifestsDir, withIntermediateDirectories: true)
+        let final = layout.gamesRoot.appendingPathComponent("Game")
+        func manifest(_ depot: UInt32, _ gid: UInt64, _ files: [DepotManifest.File]) throws -> DepotManifest {
+            let m = try DepotManifest(depotID: depot, gid: gid, files: files)
+            try RetainedManifest.save(m, to: layout.manifestFile(DepotRef(depotID: depot, gid: gid)))
+            return m
+        }
+        /// The installer's own steps for a title in its own folder (TitleInstaller.install).
+        func install(_ build: UInt32, _ manifests: [DepotManifest]) async throws -> Int {
+            let plan = try InstallPlan.make(appID: 5, buildID: build, manifests: manifests)
+            let (dest, replacing, _) = try installer.destination("Game", appID: 5)
+            let previous = replacing ? installer.loadReceipt(5) : nil
+            let reused = previous.map { installer.unchangedFiles(plan, previous: $0, in: dest) } ?? []
+            let staged = plan.restricted(to: Set(plan.files.map(\.path)).subtracting(reused.map(\.path)))
+            let tree = layout.stagingTree(appID: 5, buildID: build)
+            var e = InstallEngine(tree: tree, journal: layout.journal(appID: 5, buildID: build), source: fx.source, log: .silent)
+            e.freeSpace = { _ in 1 << 40 }
+            if !staged.files.isEmpty { _ = try await e.run(staged) }
+            if replacing { try installer.keepInPlace(tree, plan: plan, reused: reused, previous: previous, from: dest, say: { _ in }) }
+            let receipt = InstallReceipt(appID: 5, name: "G", installDir: "Game", buildID: build,
+                                         depots: manifests.map { DepotRef(depotID: $0.depotID, gid: $0.gid) },
+                                         files: plan.files.count, bytes: plan.totalBytes, skippedDepots: [], skippedSymlinks: 0, installedAt: "-")
+            try installer.commit(tree, to: dest, replacing: replacing, receipt: receipt)
+            try? FileManager.default.removeItem(at: e.journalURL)
+            return staged.files.count
+        }
+        func text(_ path: String) -> String? {
+            (try? Data(contentsOf: final.appendingPathComponent(path))).map { String(decoding: $0, as: UTF8.self) }
+        }
+
+        let base1 = try manifest(1, 100, [fx.file("game.exe", bytes("GAME")), fx.file("data/a.pak", bytes("AAAA")),
+                                          fx.file("data/old.pak", bytes("OLD!"))])
+        let first = try await install(1, [base1])
+        XCTAssertEqual(first, 3)
+        try FileManager.default.createDirectory(at: final.appendingPathComponent("Saved/SaveGames"), withIntermediateDirectories: true)
+        try Data(bytes("progress")).write(to: final.appendingPathComponent("Saved/SaveGames/player.sav"))
+
+        // The same build with an expansion's depot: only its file is downloaded.
+        fx.source.reset()
+        let dlc = try manifest(2, 200, [fx.file("dlc/ep1/content.bundle", bytes("EP1!"))])
+        let withDLC = try await install(1, [base1, dlc])
+        XCTAssertEqual(withDLC, 1)
+        XCTAssertEqual(fx.source.fetches, 1)
+        XCTAssertEqual(text("dlc/ep1/content.bundle"), "EP1!")
+        XCTAssertEqual(text("game.exe"), "GAME")
+        XCTAssertEqual(text("Saved/SaveGames/player.sav"), "progress")
+
+        // A new build changes one file and drops another: the save stays, the dropped file goes.
+        fx.source.reset()
+        let base2 = try manifest(1, 101, [fx.file("game.exe", bytes("GAM2")), fx.file("data/a.pak", bytes("AAAA"))])
+        let next = try await install(2, [base2, dlc])
+        XCTAssertEqual(next, 1)
+        XCTAssertEqual(text("game.exe"), "GAM2")
+        XCTAssertEqual(text("data/a.pak"), "AAAA")
+        XCTAssertNil(text("data/old.pak"))
+        XCTAssertEqual(text("Saved/SaveGames/player.sav"), "progress")
+        let check = try await installer.verify(appID: 5)
+        XCTAssertEqual(check.bad, [])
+        XCTAssertEqual(check.unlisted, ["Saved/SaveGames/player.sav"])
     }
 
     func testSharedFolderUninstallWithAMissingManifestKeepsEveryFile() async throws {

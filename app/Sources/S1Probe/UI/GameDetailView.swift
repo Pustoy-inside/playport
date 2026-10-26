@@ -348,6 +348,10 @@ private struct GameDetailPage: View {
         if job == nil, let g, SteamInstallStatus.updateAvailable(t, g.info) {
             SecondaryButton(id: "game:update", systemImage: "arrow.down.circle", title: "Update", enabled: canDownload && !launch.running,
                             hint: "Update") { installs.install(g.id, name: g.info.name) }
+        } else if job == nil, let g, let app = t.appID,
+                  !SteamInstallStatus.missingDLC(t, g.info, model.gameProfiles[app]).isEmpty {
+            SecondaryButton(id: "game:dlc", systemImage: "arrow.down.circle", title: "Download DLC", enabled: canDownload && !launch.running,
+                            hint: "Download") { installs.install(g.id, name: g.info.name) }
         }
     }
 

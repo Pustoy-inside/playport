@@ -42,14 +42,22 @@ jobs:
           sudo xcode-select -s /Applications/Xcode_26.6.app
           xcrun -sdk iphoneos clang -arch arm64 -mios-version-min=26.0 -fobjc-arc -fsyntax-only -Wall \
               -I app/Sources/HostIO/include -I app/Sources/TouchPad/include app/Sources/TouchPad/touchpad.m
+      # A failure's compiler errors and failed assertions become annotations,
+      # which the check-runs API shows (the job log needs the Actions log API).
       - name: Adoption tests (which executable Play starts)
         run: |
+          set -o pipefail
           swift test --package-path app/PlayportKit --filter \
-              'PlayportKitTests\.(PlayportKitTests/test(AnInstaller|ASteamReceipts|SteamReceiptOverrides|AdoptionFinds|SteamAppsSharing)|GameImportTests/testTheExecutablePicker)'
+              'PlayportKitTests\.(PlayportKitTests/test(AnInstaller|ASteamReceipts|SteamReceiptOverrides|AdoptionFinds|SteamAppsSharing)|GameImportTests/testTheExecutablePicker)' \
+              2>&1 | tee "$RUNNER_TEMP/kit.log" || {
+            grep -E 'error:|failed' "$RUNNER_TEMP/kit.log" | head -30 | sed 's/^/::error::/'; exit 1; }
       - name: Steam Cloud sync, depot selection and install tests
         run: |
+          set -o pipefail
           swift test --package-path app/SteamClient --filter \
-              'SteamClientKitTests\.(CloudServiceTests|CloudTests|DepotSelectionTests|VerifyRepairTests)'
+              'SteamClientKitTests\.(CloudServiceTests|CloudTests|DepotSelectionTests|VerifyRepairTests)' \
+              2>&1 | tee "$RUNNER_TEMP/steam.log" || {
+            grep -E 'error:|failed' "$RUNNER_TEMP/steam.log" | head -30 | sed 's/^/::error::/'; exit 1; }
   build:
     if: github.repository == 'Pustoy-inside/playport' && github.event.repository.visibility == 'public' && !contains(github.event.head_commit.message, '[local-handoff]')
     needs: [precheck]

@@ -133,6 +133,10 @@ final class DepotSelectionTests: XCTestCase {
         let s = try DepotSelection.select(app, .init(ownedDepots: [11, 12, 15, 17]))
         XCTAssertEqual(s.depots.map(\.depotID), [11, 12, 15, 17])
         XCTAssertEqual(s.skipped.first { $0.depotID == 18 }?.reason, "DLC app 98 not owned")
+        // The Witcher 3: no package lists a DLC depot; owning the DLC app is what counts.
+        let byApp = try DepotSelection.select(app, .init(ownedDLC: [99], ownedDepots: [11, 12, 15]))
+        XCTAssertEqual(byApp.depots.map(\.depotID), [11, 12, 15, 17])
+        XCTAssertEqual(byApp.skipped.first { $0.depotID == 18 }?.reason, "DLC app 98 not owned")
         XCTAssertEqual(DepotSelection.missingDLC(app, installed: [11, 12, 15], ownedDLC: [99]), [17])
         XCTAssertEqual(DepotSelection.missingDLC(app, installed: [11, 12, 15, 17], ownedDLC: [99]), [])
         XCTAssertEqual(DepotSelection.missingDLC(app, installed: [11, 12, 15], ownedDLC: []), [])

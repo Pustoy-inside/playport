@@ -85,8 +85,9 @@ public struct TitleInstaller: Sendable {
         let branch = r.branch ?? stagedBranch(appID: r.appID) ?? loadReceipt(r.appID)?.branch ?? Branch.publicName
         let app = try await Library(session: session).depots(appID: r.appID).onBranch(branch)
         var options = r.selection
-        if options.ownedDepots == nil, options.explicit == nil {
-            options.ownedDepots = await ownedDepots(session, say: say)
+        if options.ownedDepots == nil, options.explicit == nil, let owned = await ownership(session, say: say) {
+            options.ownedDepots = owned.depots
+            options.ownedDLC.formUnion(owned.apps)
         }
         let selection = try DepotSelection.select(app, options)
         say("app \(r.appID) \(app.name) branch=\(branch) buildid=\(app.publicBuildID.map(String.init) ?? "?") installdir=\(app.installDir ?? "-")")
@@ -188,14 +189,19 @@ public struct TitleInstaller: Sendable {
         return Outcome(receipt: receipt, stage: result, installedTo: final, alreadyInstalled: false)
     }
 
-    /// The depots the account's packages list, or nil (anonymous, or not
-    /// fetched: then every depot is tried, and an unowned one stops the install).
-    func ownedDepots(_ session: SteamSession, say: @Sendable (String) -> Void) async -> Set<UInt32>? {
+    /// The depots and the apps (DLC among them) the account's packages list, or
+    /// nil (anonymous, or not fetched: then every depot but DLC is tried, and an
+    /// unowned one stops the install).
+    func ownership(_ session: SteamSession, say: @Sendable (String) -> Void) async -> (depots: Set<UInt32>, apps: Set<UInt32>)? {
         do {
             let licenses = try await session.awaitLicenses(timeout: 20)
             guard !licenses.isEmpty else { return nil }
-            let owned = try await Library(session: session).ownedDepotIDs(packages: licenses.map { ($0.packageID, $0.accessToken) })
-            return owned.isEmpty ? nil : owned
+            let packages: [(id: UInt32, token: UInt64)] = licenses.map { ($0.packageID, $0.accessToken) }
+            let library = Library(session: session)
+            let depots = try await library.ownedDepotIDs(packages: packages)
+            guard !depots.isEmpty else { return nil }
+            let apps = Set(try await library.ownedAppIDs(packages: packages).keys)
+            return (depots, apps)
         } catch {
             say("owned depots unknown (\(error)); every selected depot is tried")
             return nil

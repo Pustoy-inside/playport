@@ -96,14 +96,14 @@ public struct DepotSelection: Sendable, Equatable {
         if d.publicManifestGID == nil { return d.encryptedManifestsOnly ? "encrypted manifests only" : "no public manifest" }
         if !d.isWindows { return "os \(d.osList.joined(separator: ","))" }
         if let arch = d.osArch, !arch.isEmpty, arch != "64" { return "osarch \(arch)" }
-        if let owned = o.ownedDepots, !owned.contains(d.depotID) {
-            return d.dlcAppID.map { "DLC app \($0) not owned" } ?? "not in an owned package"
-        }
-        // Owned DLC: named in `ownedDLC`, or its depot is one the account's packages list (the
-        // app passes no `ownedDLC`; without this every DLC depot was left out, The Witcher 3's
-        // expansions among them, while the emulator told the game it owned them).
-        if let dlc = d.dlcAppID, !o.ownedDLC.contains(dlc), o.ownedDepots?.contains(d.depotID) != true {
-            return "DLC app \(dlc) not owned"
+        // A DLC depot is the DLC app's: owned when the account owns that app (`ownedDLC`), as
+        // Steam grants its key, or when a package lists the depot itself. The Witcher 3's
+        // packages list none of its 18 DLC depots, so asking the packages alone left every one
+        // out while the emulator told the game it owned them.
+        if let dlc = d.dlcAppID {
+            if !o.ownedDLC.contains(dlc), o.ownedDepots?.contains(d.depotID) != true { return "DLC app \(dlc) not owned" }
+        } else if let owned = o.ownedDepots, !owned.contains(d.depotID) {
+            return "not in an owned package"
         }
         if d.lowViolence { return "low-violence variant" }
         if let lang = d.language, lang != o.language { return "language \(lang)" }

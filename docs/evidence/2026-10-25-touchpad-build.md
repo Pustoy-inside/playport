@@ -121,3 +121,14 @@ one lock, through mach_vm_read_overwrite/mach_vm_write), logged as
 emulation was checked on the workstation against every form it takes (a host
 test of the decode and the read-modify-write, with stubbed memory calls); the
 runtime change itself needs the phone.
+
+## 2026-10-27: Dishnur 10 on the phone; The Witcher 3's DLC still left out
+
+Deep Rock Galactic runs on Dishnur 10 (the player's report; `[host-text]` in
+its log shows 0144's range). Its **Download DLC** on The Witcher 3 ended with
+`install: already installed`: every DLC depot was still "DLC app … not owned".
+The account's packages list none of The Witcher 3's DLC depots (370000–378649),
+so the `ownedDepots` rule of 2026-10-26 found none, and the app's install
+passed no `ownedDLC`. A DLC depot is now owned when the account owns its DLC
+app (`Library.ownedAppIDs`, as the emulator's profile already asks), and the
+package check applies only to depots that are not DLC.

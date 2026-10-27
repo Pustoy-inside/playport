@@ -685,6 +685,11 @@ private struct GameDetailPage: View {
                                     inherited: inherited.screen, name: screenName)
         let limit = OptionValue.of(own: own.frameLimit, compat: cs?.frameLimit, inherited: inherited.frameLimit,
                                    name: LaunchSettingsText.frameLimit)
+        let upscaler = OptionValue.of(own: own.upscaler, compat: cs?.upscaler, inherited: inherited.upscaler,
+                                      name: LaunchSettingsText.upscaler)
+        let sharpness = OptionValue.of(own: own.sharpness, compat: cs?.sharpness, inherited: inherited.sharpness,
+                                       name: LaunchSettingsText.sharpness)
+        let scaler = own.upscaler ?? cs?.upscaler ?? inherited.upscaler
         let inheritedGraphics = launchSettings.effective(for: t, inheritingGraphics: true).graphics
         let d3d = OptionValue.of(own: own.graphics, compat: cs?.graphics, inherited: inheritedGraphics, name: LaunchSettingsText.graphics)
         PadSectionHeader(text: "Graphics").id("graphics")
@@ -718,6 +723,32 @@ private struct GameDetailPage: View {
                                       : spec == LaunchSettings.defaultScreen ? "Longest battery" : LaunchSettingsText.pixels(spec, shape))
                     },
                 selected: own.screen ?? "") { settings.wrappedValue.screen = $0.isEmpty ? nil : $0 }
+        }
+        PadRow(id: "opt:upscaler", title: "Upscaler", value: upscaler.text, accessory: .chevron, changed: upscaler.changed,
+               style: .plain, reset: upscaler.changed ? { settings.wrappedValue.upscaler = nil } : nil) {
+            PadModal.shared.picker(
+                title: "Upscaler", context: "\(context) · Graphics",
+                note: LaunchSettingsText.nextStart + " " + LaunchSettingsText.upscalerFooter,
+                options: [PadOption(id: "", label: "Default",
+                                    detail: LaunchSettingsText.upscaler(cs?.upscaler ?? inherited.upscaler) + from(cs?.upscaler != nil))]
+                    + Upscaler.allCases.map { u in
+                        PadOption(id: u.rawValue, label: LaunchSettingsText.upscaler(u), detail: LaunchSettingsText.upscalerDetail(u))
+                    },
+                selected: own.upscaler?.rawValue ?? "") { settings.wrappedValue.upscaler = Upscaler(rawValue: $0) }
+        }
+        if scaler == .fsr1 {
+            PadRow(id: "opt:sharpness", title: "FSR sharpness", value: sharpness.text, accessory: .chevron,
+                   changed: sharpness.changed, style: .plain,
+                   reset: sharpness.changed ? { settings.wrappedValue.sharpness = nil } : nil) {
+                PadModal.shared.picker(
+                    title: "FSR sharpness", context: "\(context) · Graphics",
+                    note: LaunchSettingsText.nextStart + " How much FSR 1 sharpens after it scales.",
+                    options: [PadOption(id: "", label: "Default",
+                                        detail: LaunchSettingsText.sharpness(cs?.sharpness ?? inherited.sharpness)
+                                            + from(cs?.sharpness != nil))]
+                        + LaunchSettings.sharpnessSteps.map { PadOption(id: String($0), label: LaunchSettingsText.sharpness($0)) },
+                    selected: own.sharpness.map(String.init) ?? "") { settings.wrappedValue.sharpness = Int($0) }
+            }
         }
         PadRow(id: "opt:frameLimit", title: "Frame rate limit", value: limit.text, accessory: .chevron, changed: limit.changed,
                style: .plain, reset: limit.changed ? { settings.wrappedValue.frameLimit = nil } : nil) {

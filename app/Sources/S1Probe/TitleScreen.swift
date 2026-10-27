@@ -15,8 +15,10 @@
 import Foundation
 import HostIO
 import HostIOKit
+import PlayportKit
 import QuartzCore
 import UIKit
+import Upscale
 
 enum TitleScreen {
     /// What configure() chose, for the title's log.
@@ -29,9 +31,11 @@ enum TitleScreen {
     /// for each title a process starts, since the environment it sets is only
     /// read when the runtime starts. `title` is the title's screen spec
     /// (LaunchPlan.screen, or the player's choice), nil for the panel's;
-    /// `frameLimit` the player's limit, 0 for none.
+    /// `frameLimit` the player's limit, 0 for none; `upscaler` what scales the
+    /// game's frames up to the screen, with FSR 1's `sharpness` (LaunchSettings).
     @MainActor
-    static func configure(title: String? = nil, frameLimit: Int = 0) {
+    static func configure(title: String? = nil, frameLimit: Int = 0, upscaler: Upscaler = .off,
+                          sharpness: Int = LaunchSettings.defaultSharpness) {
         let px = UIScreen.main.nativeBounds.size
         let screen: String
         if let (w, h) = Display.guestSize(panelLong: Int(px.width), panelShort: Int(px.height), spec: title) {
@@ -50,10 +54,17 @@ enum TitleScreen {
             linked = true
             startDisplayLink()
         }
+        // Before the game takes its first drawable (PacedMetalLayer).
+        var note = [CChar](repeating: 0, count: 256)
+        let stops = upscaler == .fsr1 ? LaunchSettings.rcasStops(sharpness) ?? -1 : -1
+        _ = pp_upscale_configure(upscaler.mode, stops, &note, note.count)
+        let scaled = String(decoding: note.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self)
+        GameSurfaceView.onScreen?.setNeedsLayout()
         summary = "screen \(screen) (panel \(Int(px.width))x\(Int(px.height)) px), landscape, swap chain aspect-fitted, "
             + "presents free-running, display link asks for up to \(hz) Hz"
             + (frameLimit > 0 ? ", frames limited to \(frameLimit) FPS" : ", no frame rate limit")
             + ", guest monitor \(ProcessInfo.processInfo.environment["MADEIRA_SCREEN_HZ"] ?? "60") Hz"
+            + ", upscaler \(scaled)"
     }
 
     /// ProMotion keeps a CAMetalLayer at 60 Hz unless the app asks for more:

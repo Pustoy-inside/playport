@@ -141,6 +141,18 @@ let package = Package(
                 .linkedFramework("CoreGraphics"),
             ]
         ),
+        // The upscaler (Sources/Upscale): MetalFX's spatial scaler or AMD's FSR 1 over
+        // every game's frames as they are presented, whatever draws them.
+        .target(
+            name: "Upscale",
+            exclude: ["LICENSE-FidelityFX-FSR.txt"],
+            cSettings: [.unsafeFlags(["-fobjc-arc"])],
+            linkerSettings: [
+                .linkedFramework("Metal"),
+                .linkedFramework("MetalFX"),
+                .linkedFramework("QuartzCore"),
+            ]
+        ),
         // Only the dev app depends on this synthetic native-authentication probe.
         .target(name: "AuthProbe", linkerSettings: [.linkedFramework("GSS")]),
         // The JIT helper extension: StikJIT's prebuilt framework (MPL-2.0,
@@ -171,7 +183,7 @@ let package = Package(
         ),
         .target(
             name: app,
-            dependencies: ["WineHost", "WinIOS", "HostIO", "TouchPad", "JITHelperXPC", "KosmicKrisp", "MesaEGL", "MesaGallium",
+            dependencies: ["WineHost", "WinIOS", "HostIO", "TouchPad", "Upscale", "JITHelperXPC", "KosmicKrisp", "MesaEGL", "MesaGallium",
                            .product(name: "HostIOKit", package: "HostIOKit"),
                            .product(name: "SteamClientKit", package: "SteamClient"),
                            .product(name: "GOGClientKit", package: "GOGClient"),

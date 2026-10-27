@@ -120,6 +120,8 @@ cp_ Playport-LICENSE.txt "$REPO/LICENSE"
 cp_ Playport-LICENSE-EXCEPTION.md "$REPO/LICENSE-EXCEPTION.md"
 # JavaSteam (MIT): the protocol schema tables in app/SteamClient
 cp_ JavaSteam-LICENSE.txt "$REPO/app/SteamClient/LICENSE-JavaSteam.txt"
+# AMD FidelityFX Super Resolution 1 (MIT): the upscaler's FSR 1 shaders in app/Sources/Upscale
+cp_ FidelityFX-FSR-LICENSE.txt "$REPO/app/Sources/Upscale/LICENSE-FidelityFX-FSR.txt"
 tar_ GPL-2.0.txt gmp-6.3.0.tar.xz gmp-6.3.0/COPYINGv2
 tar_ LGPL-3.0.txt gmp-6.3.0.tar.xz gmp-6.3.0/COPYING.LESSERv3
 cp_ LGPL-2.1.txt "$WINE/COPYING.LIB"

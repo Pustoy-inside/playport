@@ -140,6 +140,30 @@ enum LaunchSettingsText {
         return "Found references to \(detection.summary). This does not identify a dual-renderer game's active API."
     }
 
+    static func upscaler(_ u: Upscaler) -> String {
+        switch u {
+        case .off: "Off"
+        case .metalFX: "MetalFX"
+        case .fsr1: "FSR 1"
+        }
+    }
+
+    /// An upscaler's line in a picker.
+    static func upscalerDetail(_ u: Upscaler) -> String {
+        switch u {
+        case .off: "The screen stretches the picture"
+        case .metalFX: "Apple's spatial upscaler"
+        case .fsr1: "AMD's upscaler, then its sharpening"
+        }
+    }
+
+    static func sharpness(_ percent: Int) -> String { percent > 0 ? "\(percent)%" : "Off" }
+
+    static let upscalerFooter = "An upscaler scales each frame from the game's resolution up to the screen's pixels, "
+        + "sharper than the screen's own stretching, for about a millisecond of GPU time a frame: a lower resolution "
+        + "with an upscaler looks closer to Native for less power. MetalFX and FSR 1 work in every game; FSR 1's "
+        + "sharpness sets how much it sharpens after scaling. At Native there is nothing to scale."
+
     static let graphicsFooter = "DXMT runs Direct3D 10 and 11 on Metal. The default is Vulkan for 32-bit games and detected Direct3D 12 games, DXMT otherwise. "
         + "Vulkan runs Direct3D 8 to 11 through DXVK and Direct3D 12 through vkd3d-proton, on Mesa's "
         + "KosmicKrisp driver; it is experimental."

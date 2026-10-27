@@ -53,6 +53,7 @@ import Metal
 import QuartzCore
 import SwiftUI
 import UIKit
+import Upscale
 import WineHost
 import WinIOS
 
@@ -547,6 +548,8 @@ enum MetalHUD {
     /// for this game only: the setting stays as Settings has it.
     static func set(_ on: Bool, on layer: CAMetalLayer) {
         layer.developerHUDProperties = ["mode": on ? "default" : "off"]
+        // With an upscaler the frames are shown on its layer (PacedMetalLayer).
+        pp_upscale_output_layer()?.developerHUDProperties = ["mode": on ? "default" : "off"]
         HostIO.log("hostio: Metal HUD " + (on ? "on" : "off"))
     }
 }
@@ -563,6 +566,10 @@ enum MetalHUD {
 /// framebuffer-only and blits each frame into the drawable from its own
 /// swapchain image, which it hangs on the drawable's texture
 /// (patches/mesa 0035): that image, which a blit can read, is kept instead.
+/// With an upscaler (Settings › Upscaler; app/Sources/Upscale) the game draws
+/// into a texture of its own size instead of a drawable, and the upscaler
+/// presents the frame scaled up on its own layer, a sublayer of the game's
+/// (GameSurfaceView): what is kept then is that texture.
 final class PacedMetalLayer: CAMetalLayer {
     private static let pacer = OSAllocatedUnfairLock(initialState: FramePacer(fps: 0))
     private static let shown = OSAllocatedUnfairLock<(any MTLTexture)?>(uncheckedState: nil)
@@ -622,7 +629,7 @@ final class PacedMetalLayer: CAMetalLayer {
     override func nextDrawable() -> (any CAMetalDrawable)? {
         let wait = Self.pacer.withLock { $0.delay(now: CACurrentMediaTime()) }
         if wait > 0 { Thread.sleep(forTimeInterval: wait) }
-        let drawable = super.nextDrawable()
+        let drawable = pp_upscale_active() ? pp_upscale_next_drawable(self) : super.nextDrawable()
         #if !PLAYPORT_RELEASE
         if drawable != nil { Self.countDrawable() }
         #endif
@@ -652,6 +659,8 @@ final class GameSurfaceView: UIView {
     /// The view on screen, for the UI driver's tap: action (Dev/UIDriver.swift).
     static weak var current: GameSurfaceView?
     #endif
+    /// The view on screen, laid out again when the upscaler starts (TitleScreen.configure).
+    static weak var onScreen: GameSurfaceView?
 
     init() {
         super.init(frame: .zero)
@@ -676,7 +685,21 @@ final class GameSurfaceView: UIView {
         CATransaction.setDisableActions(true)
         windows.frame = bounds
         windows.setNeedsLayout()
+        placeUpscaled()
         CATransaction.commit()
+    }
+
+    /// The upscaler's layer, while one is on: over the game layer's own (empty)
+    /// content and below the guest's windows, the frames aspect-fitted in it as
+    /// the game layer's would be; the pixels it covers are what a frame is
+    /// scaled up to.
+    private func placeUpscaled() {
+        guard let out = pp_upscale_output_layer() else { return }
+        if out.superlayer !== layer { layer.insertSublayer(out, below: windows) }
+        out.frame = bounds
+        out.contentsScale = contentScaleFactor
+        out.contentsGravity = .resizeAspect
+        pp_upscale_set_panel(Double(bounds.width * contentScaleFactor), Double(bounds.height * contentScaleFactor))
     }
 
     override func didMoveToWindow() {
@@ -687,6 +710,8 @@ final class GameSurfaceView: UIView {
         // leaving it at 1 makes a native-pixel swapchain permanently suboptimal
         // (912x420 points versus 2736x1260 pixels on a 3x screen).
         contentScaleFactor = window.screen.nativeScale
+        Self.onScreen = self
+        setNeedsLayout()
         // Landscape before the runtime starts, so the swap chain is made at the final size.
         window.rootViewController?.setNeedsUpdateOfSupportedInterfaceOrientations()
         window.windowScene?.requestGeometryUpdate(.iOS(interfaceOrientations: .landscape))

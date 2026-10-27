@@ -272,6 +272,14 @@ private struct GraphicsSettings: View {
         let screens = SettingSteps(values: LaunchSettingsText.screens(shape).reversed(), defaultValue: LaunchSettings.defaultScreen)
         valueRow("screen", "Resolution", "Higher is sharper, lower saves battery", screens,
                  name: { LaunchSettingsText.screen($0, pixels: false) }, value: global.screen)
+        let upscalers = SettingSteps(values: Upscaler.allCases, defaultValue: Upscaler.off)
+        valueRow("upscaler", "Upscaler", "Scales the resolution up to the screen", upscalers,
+                 name: LaunchSettingsText.upscaler, value: global.upscaler)
+        if (launchSettings.global.upscaler ?? .off) == .fsr1 {
+            let sharpness = SettingSteps(values: LaunchSettings.sharpnessSteps, defaultValue: LaunchSettings.defaultSharpness)
+            valueRow("sharpness", "FSR sharpness", "Sharpening after FSR 1 scales", sharpness,
+                     name: LaunchSettingsText.sharpness, value: global.sharpness)
+        }
         let limits = SettingSteps(values: LaunchSettingsText.frameLimits + [0], defaultValue: LaunchSettings.defaultFrameLimit)
         valueRow("frameLimit", "Frame rate limit", "Lower saves battery and heat", limits,
                  name: LaunchSettingsText.frameLimit, value: global.frameLimit)
@@ -285,7 +293,7 @@ private struct GraphicsSettings: View {
                      + "frame rate; Native is the screen's full resolution, and Off runs a game as fast as the screen "
                      + "allows. Another aspect ratio than the phone's shows the game with bars at its sides or above and below; "
                      + "16:9 helps a game that shows only black on a screen as wide as the phone's. "
-                     + LaunchSettingsText.graphicsFooter)
+                     + LaunchSettingsText.upscalerFooter + " " + LaunchSettingsText.graphicsFooter)
     }
 
     private func valueRow<T: Equatable & Sendable>(_ id: String, _ title: String, _ subtitle: String, _ steps: SettingSteps<T>,

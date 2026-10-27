@@ -45,6 +45,10 @@ public struct LaunchSettings: Codable, Equatable, Sendable {
     /// FEX's disk cache of translated code (FEX `DiskCache`, per game only); nil
     /// takes the default, off for now (FEXProfile.defaultDiskCache, decision 0056).
     public var diskCache: Bool?
+    /// What scales the game's picture up to the screen (Upscaler); nil inherits.
+    public var upscaler: Upscaler?
+    /// FSR 1's sharpening after its upscale, a percentage in `sharpnessSteps` (0 is none); nil inherits.
+    public var sharpness: Int?
     /// madeira.cfg keys over the game's own (per game only; a dev build's), as typed:
     /// `key=value` items split at spaces (`vram-mb=1024 totalphys=6144 inproc-sync=1`).
     /// LaunchSettings.runtimeKeys parses them; TitleConfig writes them after the title's.
@@ -58,7 +62,8 @@ public struct LaunchSettings: Codable, Equatable, Sendable {
     public init(screen: String? = nil, aspect: String? = nil, frameLimit: Int? = nil, graphics: GraphicsBackend? = nil,
                 arguments: String = "", steamAPI: SteamAPISwap.Mode? = nil,
                 cloudSync: Bool? = nil, ordering: MemoryOrdering = MemoryOrdering(), maxInst: Int? = nil,
-                x87Reduced: Bool? = nil, diskCache: Bool? = nil, runtime: String = "", graphicsOptions: String = "") {
+                x87Reduced: Bool? = nil, diskCache: Bool? = nil, runtime: String = "", graphicsOptions: String = "",
+                upscaler: Upscaler? = nil, sharpness: Int? = nil) {
         self.screen = screen
         self.aspect = aspect
         self.frameLimit = frameLimit
@@ -72,6 +77,8 @@ public struct LaunchSettings: Codable, Equatable, Sendable {
         self.diskCache = diskCache
         self.runtime = runtime
         self.graphicsOptions = graphicsOptions
+        self.upscaler = upscaler
+        self.sharpness = sharpness
     }
 
     public init(from decoder: Decoder) throws {
@@ -91,6 +98,9 @@ public struct LaunchSettings: Codable, Equatable, Sendable {
         diskCache = try c.decodeIfPresent(Bool.self, forKey: .diskCache)
         runtime = try c.decodeIfPresent(String.self, forKey: .runtime) ?? ""
         graphicsOptions = try c.decodeIfPresent(String.self, forKey: .graphicsOptions) ?? ""
+        // As graphics: an upscaler this build does not know inherits.
+        upscaler = try c.decodeIfPresent(String.self, forKey: .upscaler).flatMap(Upscaler.init(rawValue:))
+        sharpness = try c.decodeIfPresent(Int.self, forKey: .sharpness)
     }
 
     public var isEmpty: Bool {
@@ -99,6 +109,7 @@ public struct LaunchSettings: Codable, Equatable, Sendable {
             && ordering.isEmpty && maxInst == nil && x87Reduced == nil && diskCache == nil
             && runtime.trimmingCharacters(in: .whitespaces).isEmpty
             && graphicsOptions.trimmingCharacters(in: .whitespaces).isEmpty
+            && upscaler == nil && sharpness == nil
     }
 
     /// Arguments as a command line splits them: at spaces, except inside
@@ -182,12 +193,16 @@ public struct LaunchSettings: Codable, Equatable, Sendable {
         public var runtime: [String: String]
         /// The Vulkan layers' variables from the game's Graphics options; empty for none.
         public var graphicsEnvironment: [String: String]
+        public var upscaler: Upscaler
+        /// FSR 1's sharpening, a percentage (LaunchSettings.rcasStops).
+        public var sharpness: Int
 
         public init(screen: String?, aspect: ScreenAspect = .phone, frameLimit: Int, graphics: GraphicsBackend = .default,
                     arguments: [String] = [], steamAPI: SteamAPISwap.Mode = .emulated,
                     ordering: MemoryOrdering = MemoryOrdering(), maxInst: Int? = nil,
                     x87Reduced: Bool? = nil, diskCache: Bool? = nil, runtime: [String: String] = [:],
-                    graphicsEnvironment: [String: String] = [:]) {
+                    graphicsEnvironment: [String: String] = [:], upscaler: Upscaler = .off,
+                    sharpness: Int = LaunchSettings.defaultSharpness) {
             self.screen = screen
             self.aspect = aspect
             self.frameLimit = frameLimit
@@ -200,6 +215,8 @@ public struct LaunchSettings: Codable, Equatable, Sendable {
             self.diskCache = diskCache
             self.runtime = runtime
             self.graphicsEnvironment = graphicsEnvironment
+            self.upscaler = upscaler
+            self.sharpness = sharpness
         }
 
         /// The guest screen's spec for HostIOKit Display.guestSize: the resolution in the shape
@@ -234,23 +251,58 @@ public struct LaunchSettings: Codable, Equatable, Sendable {
                                        imported: importsDirect3D12)
         let graphics = game?.graphics ?? global.graphics ?? (dx12 || i386 ? .vulkan : .default)
         let aspect = [game?.aspect, global.aspect].lazy.compactMap { $0.flatMap(ScreenAspect.init(rawValue:)) }.first ?? .phone
+        let sharpness = [game?.sharpness, global.sharpness].lazy.compactMap { $0 }.first { (0...100).contains($0) }
+            ?? defaultSharpness
         return Effective(screen: screen, aspect: aspect, frameLimit: limit, graphics: graphics,
                          arguments: splitArguments(game?.arguments ?? ""), steamAPI: game?.steamAPI ?? .emulated,
                          ordering: game?.ordering ?? MemoryOrdering(),
                          maxInst: game?.maxInst.flatMap { FEXProfile.validBlockSize($0) ? $0 : nil },
                          x87Reduced: game?.x87Reduced, diskCache: game?.diskCache,
                          runtime: runtimeKeys(game?.runtime ?? "") ?? [:],
-                         graphicsEnvironment: graphicsEnvironment(game?.graphicsOptions ?? "") ?? [:])
+                         graphicsEnvironment: graphicsEnvironment(game?.graphicsOptions ?? "") ?? [:],
+                         upscaler: game?.upscaler ?? global.upscaler ?? .off, sharpness: sharpness)
     }
 
     /// The resolutions the pickers offer, the same in every aspect ratio, as screen specs;
     /// the phone keeps those it can show.
     public static let screenPresets = ["native", "1080", "900", "720", "540"]
 
+    /// FSR 1's sharpening the pickers offer, percentages: 0 is none, 100 RCAS's most.
+    public static let sharpnessSteps = [0, 25, 50, 75, 100]
+    public static let defaultSharpness = 75
+
+    /// RCAS's sharpness for a percentage, in its stops (0 is the most, each stop halves
+    /// it; AMD's FsrRcasCon): 100 % is 0 stops, 75 % 0.5, 50 % 1, 25 % 1.5. nil for 0 %, no RCAS.
+    public static func rcasStops(_ percent: Int) -> Float? {
+        guard percent > 0 else { return nil }
+        return Float(2 * (100 - min(percent, 100))) / 100
+    }
+
     /// The limits the pickers offer for a panel refreshing at most `maxRate` times a
     /// second: the rates that divide it evenly, so each frame stays up equally long.
     public static func frameLimits(maxRate: Int) -> [Int] {
         [30, 40, 60].filter { $0 < maxRate && maxRate % $0 == 0 }
+    }
+}
+
+/// What scales a game's picture up to the screen's pixels, as each frame is presented
+/// (app/Sources/Upscale), for every game whatever draws it. Off, Core Animation stretches
+/// the picture with plain filtering. Spatial only: a game gives no motion vectors or depth
+/// to a temporal upscaler.
+public enum Upscaler: String, Codable, CaseIterable, Sendable {
+    case off
+    /// Apple's MetalFX spatial scaler.
+    case metalFX = "metalfx"
+    /// AMD FidelityFX Super Resolution 1: EASU, then RCAS sharpening (LaunchSettings.sharpness).
+    case fsr1
+
+    /// The upscaler's mode (app/Sources/Upscale/include/upscaler.h, PP_UPSCALE_*).
+    public var mode: Int32 {
+        switch self {
+        case .off: 0
+        case .metalFX: 1
+        case .fsr1: 2
+        }
     }
 }
 

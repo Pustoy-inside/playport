@@ -411,6 +411,7 @@ See [the Mesa audit](release-audits/mesa.md) for scope and source-level evidence
 | --- | --- | --- |
 | `Playport-LICENSE.txt`, `Playport-LICENSE-EXCEPTION.md` | this repository | the app's own code |
 | `JavaSteam-LICENSE.txt` | `app/SteamClient/LICENSE-JavaSteam.txt` (JavaSteam's MIT licence) | the Steam protocol schema tables in `app/SteamClient` |
+| `FidelityFX-FSR-LICENSE.txt` | `app/Sources/Upscale/LICENSE-FidelityFX-FSR.txt` (AMD's MIT licence, from GPUOpen-Effects/FidelityFX-FSR at `a21ffb8f`) | the upscaler's FSR 1 shaders (`app/Sources/Upscale/upscaler_shaders.h`), ported from `ffx_fsr1.h` |
 | `GPL-2.0.txt`, `LGPL-3.0.txt` | the GMP tarball | the GPL-2.0-or-later and LGPL-3.0-or-later options of GMP, Nettle and FreeType |
 | `LGPL-2.1.txt` | wine `COPYING.LIB` | Wine, DXMT, the directx headers, `regexp.c` |
 | `wine-LICENSE.txt`, `wine-COPYING.LIB.txt`, `wine-LICENSE-MADEIRA.md`, `wine-NOTICES.md` (plus `wine-LICENSE.OLD.txt` only if present) | wine | both PE DLL sets, `nls/`, the unix side; Wine's current root notices and any historical licence actually present |

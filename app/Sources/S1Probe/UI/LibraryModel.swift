@@ -339,6 +339,7 @@ final class LibraryModel: ObservableObject {
         guard TitleLaunch.shared.start(title: t.name, titleID: t.id, exe: plan.exe, args: plan.args + settings.arguments + epicArgs,
                                        config: settings.config(over: plan.config),
                                        screen: settings.guestScreen, frameLimit: settings.frameLimit,
+                                       upscaler: settings.upscaler, sharpness: settings.sharpness,
                                        graphics: settings.graphics, graphicsEnvironment: settings.graphicsEnvironment,
                                        steamAppID: t.appID, fex: fex, steamAPI: steamAPI,
                                        memory: MemoryNeed.of(t, cohort: Self.cohort), epic: epic, galaxy: galaxy,

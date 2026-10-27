@@ -57,6 +57,16 @@
       ]
     },
     {
+      "name": "AMD FidelityFX Super Resolution 1 (the upscaler's FSR 1 shaders)",
+      "covers": [
+        "app"
+      ],
+      "licence": "MIT",
+      "include": [
+        "FidelityFX-FSR-LICENSE.txt"
+      ]
+    },
+    {
       "name": "Wine",
       "covers": [
         "P2",

@@ -69,7 +69,8 @@ final class TitleLaunch: ObservableObject {
     /// then the launch on its own thread. False when a launch is running or spent.
     @discardableResult
     func start(title: String, titleID: String? = nil, exe: String, args: [String], config: [String: String] = [:],
-               screen: String? = nil, frameLimit: Int = 0, graphics: GraphicsBackend = .default,
+               screen: String? = nil, frameLimit: Int = 0, upscaler: Upscaler = .off,
+               sharpness: Int = LaunchSettings.defaultSharpness, graphics: GraphicsBackend = .default,
                graphicsEnvironment: [String: String] = [:], steamAppID: UInt32? = nil,
                fex: FEXProfile.Launch? = nil, steamAPI: LaunchCoordinator.SteamAPI? = nil,
                memory: MemoryNeed? = nil, epic: LaunchCoordinator.Epic? = nil, galaxy: GalaxyListener? = nil,
@@ -93,7 +94,7 @@ final class TitleLaunch: ObservableObject {
             Task { let img = await steam.image(info, .hero); if self.running, self.appID == app { self.art = img } }
         }
         showsSheet = true
-        begin(screen: screen, frameLimit: frameLimit)
+        begin(screen: screen, frameLimit: frameLimit, upscaler: upscaler, sharpness: sharpness)
         // An Epic game's sign-in arguments stay out of the log (decision 0059).
         TitleMode.log("in-app start \(exe) \(EpicInstaller.redacted(args).joined(separator: " "))")
         // Prerequisites that run and leave the game too little pool end the launch before the
@@ -200,13 +201,14 @@ final class TitleLaunch: ObservableObject {
     /// set from the launch environment and this title's screen and frame rate
     /// limit (TitleScreen.configure) at every start, so a title that follows one
     /// that was refused gets its own; host I/O starts once.
-    private func begin(screen: String? = nil, frameLimit: Int = 0) {
+    private func begin(screen: String? = nil, frameLimit: Int = 0, upscaler: Upscaler = .off,
+                       sharpness: Int = LaunchSettings.defaultSharpness) {
         running = true
         // Steam work stops before the runtime starts (decision 0004); the JIT
         // wait ahead of wine_host_init leaves it ample time to disconnect. A play
         // with armed tickets keeps the CM logged on for them alone (decision 0062).
         if let steam = SteamAccountModel.current { Task { await steam.suspendForLaunch() } }
-        TitleScreen.configure(title: screen, frameLimit: frameLimit)
+        TitleScreen.configure(title: screen, frameLimit: frameLimit, upscaler: upscaler, sharpness: sharpness)
         // The pads are the guest's from here, not the app screens' (UI/Pad/PadRouter.swift).
         PadRouter.shared.handOff()
         if !configured {

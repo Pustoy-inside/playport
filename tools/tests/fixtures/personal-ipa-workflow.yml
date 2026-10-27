@@ -42,13 +42,36 @@ jobs:
           sudo xcode-select -s /Applications/Xcode_26.6.app
           xcrun -sdk iphoneos clang -arch arm64 -mios-version-min=26.0 -fobjc-arc -fsyntax-only -Wall \
               -I app/Sources/HostIO/include -I app/Sources/TouchPad/include app/Sources/TouchPad/touchpad.m
+      # The upscaler (app/Sources/Upscale): compiled for iOS, then for this Mac with its smoke
+      # test, which runs its shaders and its present hooks on the runner's GPU.
+      - name: Upscaler for iOS, its shaders, and its smoke test on the runner's Metal
+        run: |
+          set -o pipefail
+          up=app/Sources/Upscale
+          xcrun -sdk iphoneos clang -arch arm64 -mios-version-min=26.0 -fobjc-arc -fsyntax-only -Wall \
+              -I "$up/include" "$up/upscaler.m" 2>&1 | tee "$RUNNER_TEMP/up-ios.log" || {
+            grep -E 'error' "$RUNNER_TEMP/up-ios.log" | head -20 | sed 's/^/::error::/'; exit 1; }
+          xcrun clang -mmacos-version-min=26.0 -fobjc-arc -Wall -I "$up/include" "$up/upscaler.m" \
+              tools/upscaler-smoke/smoke.m -framework Foundation -framework Metal -framework MetalFX \
+              -framework QuartzCore -o "$RUNNER_TEMP/upscaler-smoke" 2>&1 | tee "$RUNNER_TEMP/up-mac.log" || {
+            grep -E 'error' "$RUNNER_TEMP/up-mac.log" | head -20 | sed 's/^/::error::/'; exit 1; }
+          "$RUNNER_TEMP/upscaler-smoke" --shaders > "$RUNNER_TEMP/upscaler.metal"
+          if xcrun -sdk iphoneos metal -c "$RUNNER_TEMP/upscaler.metal" -o "$RUNNER_TEMP/upscaler.air" \
+              2> "$RUNNER_TEMP/metal.log"; then
+            echo "the shaders compile for iOS"
+          elif grep -qiE 'toolchain|unable to find utility' "$RUNNER_TEMP/metal.log"; then
+            echo "::warning::no Metal toolchain on this runner; the smoke test compiles the shaders"
+          else
+            grep -E 'error' "$RUNNER_TEMP/metal.log" | head -20 | sed 's/^/::error::/'; exit 1
+          fi
+          "$RUNNER_TEMP/upscaler-smoke" | tee "$RUNNER_TEMP/smoke.log"
       # A failure's compiler errors and failed assertions become annotations,
       # which the check-runs API shows (the job log needs the Actions log API).
-      - name: Adoption tests (which executable Play starts)
+      - name: Adoption and launch settings tests (which executable Play starts, its upscaler)
         run: |
           set -o pipefail
           swift test --package-path app/PlayportKit --filter \
-              'PlayportKitTests\.(PlayportKitTests/test(AnInstaller|ASteamReceipts|SteamReceiptOverrides|AdoptionFinds|SteamAppsSharing)|GameImportTests/testTheExecutablePicker)' \
+              'PlayportKitTests\.(PlayportKitTests/test(AnInstaller|ASteamReceipts|SteamReceiptOverrides|AdoptionFinds|SteamAppsSharing)|GameImportTests/testTheExecutablePicker|UpscalerSettingsTests|ScreenAspectTests)' \
               2>&1 | tee "$RUNNER_TEMP/kit.log" || {
             grep -E 'error:|failed' "$RUNNER_TEMP/kit.log" | head -30 | sed 's/^/::error::/'; exit 1; }
       - name: Steam Cloud sync, depot selection and install tests

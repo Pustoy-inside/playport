@@ -59,7 +59,10 @@ static void say(const char *fmt, ...) {
 
 // What PacedMetalLayer reads a framebuffer-only drawable's picture from for a
 // screenshot (KosmicKrisp's patches/mesa 0035 key): the game's own frame.
-static const void *readable_source_key(void) { return (const void *)@selector(playportReadableSource); }
+static const void *readable_source_key(void) {
+    SEL key = @selector(playportReadableSource);
+    return (const void *)key;
+}
 
 static bool is_float_format(MTLPixelFormat f) {
     return f == MTLPixelFormatRGBA16Float || f == MTLPixelFormatRGBA32Float || f == MTLPixelFormatRG11B10Float

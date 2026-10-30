@@ -51,11 +51,19 @@ package)
         echo "The IPA passed host packaging checks (verify-ipa); this build has not been tested on an iPhone."
     } > "$delivery/INSTALL.txt"
     (cd "$delivery" && sha256sum ./*.ipa provenance.txt INSTALL.txt > SHA256SUMS)
+    # The release's text: this build's changes (CHANGELOG-Dishnur.md, its "## Playport Dishnur <n>"
+    # section), then how to install it.
+    awk -v want="## $title" '$0 == want { on = 1; next } on && /^## / { exit } on { print }' \
+        CHANGELOG-Dishnur.md > "$delivery/CHANGES.md" 2>/dev/null || true
+    {
+        if [ -s "$delivery/CHANGES.md" ]; then echo "## What changed"; cat "$delivery/CHANGES.md"; echo; echo "## Install"; fi
+        cat "$delivery/INSTALL.txt"
+    } > "$delivery/NOTES.md"
     tag="personal-ipa-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
     # The IPA first: it is what the run is for.
     gh release create "$tag" --repo "$GITHUB_REPOSITORY" --target "$(git rev-parse HEAD)" \
         --draft --title "$title" \
-        --notes-file "$delivery/INSTALL.txt"
+        --notes-file "$delivery/NOTES.md"
     gh release upload "$tag" "$delivery"/*.ipa "$delivery/provenance.txt" "$delivery/INSTALL.txt" \
         "$delivery/SHA256SUMS" --repo "$GITHUB_REPOSITORY"
     echo "Unsigned IPA saved to a private draft release." >> "$GITHUB_STEP_SUMMARY"

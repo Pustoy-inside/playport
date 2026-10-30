@@ -334,6 +334,7 @@ private struct DownloadSettings: View {
     @AppStorage(DownloadPreferences.autoUpdateKey) private var autoUpdate = true
     @AppStorage(DownloadPreferences.cellularKey) private var cellular = false
     @AppStorage(DownloadPreferences.dimKey) private var dim = true
+    @AppStorage(DownloadPreferences.backgroundKey) private var background = false
     @AppStorage(SteamAccountModel.cloudKey) private var steamCloud = true
     @ObservedObject private var network = NetworkPath.shared
 
@@ -345,9 +346,14 @@ private struct DownloadSettings: View {
                           subtitle: "Wi-Fi only when off · " + network.summary, on: $cellular)
         SettingsSwitchRow(id: "dim", title: "Dim the screen while downloading",
                           subtitle: "After a minute without input", on: $dim)
+        SettingsSwitchRow(id: "background", title: "Download in the background",
+                          subtitle: "Keeps going with Playport closed or the phone locked", on: $background)
         SettingsSwitchRow(id: "steamCloud", title: "Sync saves with Steam Cloud",
                           subtitle: "For every game that supports it", on: $steamCloud)
-        SettingsNote(text: "A game's saves come from Steam Cloud when its page opens, and go back after a play. "
+        SettingsNote(text: "In the background Playport plays silence while a download runs, which keeps iOS from "
+                     + "pausing it; it stops when the downloads are done. iOS can still close Playport when the phone "
+                     + "runs short of memory: the download then goes on when Playport opens again. "
+                     + "A game's saves come from Steam Cloud when its page opens, and go back after a play. "
                      + "A game's options can turn Steam Cloud off for that game alone.")
     }
 }

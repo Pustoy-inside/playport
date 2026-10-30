@@ -71,7 +71,7 @@ jobs:
         run: |
           set -o pipefail
           swift test --package-path app/PlayportKit --filter \
-              'PlayportKitTests\.(PlayportKitTests/test(AnInstaller|ASteamReceipts|SteamReceiptOverrides|AdoptionFinds|SteamAppsSharing)|GameImportTests/testTheExecutablePicker|UpscalerSettingsTests|ScreenAspectTests)' \
+              'PlayportKitTests\.(PlayportKitTests/test(AnInstaller|ASteamReceipts|SteamReceiptOverrides|AdoptionFinds|SteamAppsSharing)|GameImportTests/testTheExecutablePicker|UpscalerSettingsTests|ScreenAspectTests|PerformanceHUDTests|GameModsTests)' \
               2>&1 | tee "$RUNNER_TEMP/kit.log" || {
             grep -E 'error:|failed' "$RUNNER_TEMP/kit.log" | head -30 | sed 's/^/::error::/'; exit 1; }
       - name: Steam Cloud sync, depot selection and install tests

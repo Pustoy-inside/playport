@@ -40,6 +40,12 @@
 	<!-- ProMotion above 60 Hz for a title's presents (TitleScreen.swift). -->
 	<key>CADisableMinimumFrameDurationOnPhone</key>
 	<true/>
+	<!-- The app's Documents (the prefix, and in it C:\Games) in Files › On My iPhone › Playport:
+	     a game's folder for a translation's files (a game page's Add files does the same by picker). -->
+	<key>UIFileSharingEnabled</key>
+	<true/>
+	<key>LSSupportsOpeningDocumentsInPlace</key>
+	<true/>
 	<!-- LocalDevVPN's way back after Playport turns it on (Sources/S1Probe/LocalDevVPN.swift):
 	     localdevvpn://enable?scheme=playport opens playport://, which only brings Playport to the front. -->
 	<key>CFBundleURLTypes</key>

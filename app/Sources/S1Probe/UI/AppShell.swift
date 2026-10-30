@@ -145,6 +145,7 @@ struct AppShell: View {
         .onAppear {
             PadRouter.shared.start()
             DownloadDimmer.shared.start(installs: model.installs)
+            BackgroundDownloads.shared.start(installs: model.installs)
             if scenePhase == .active { model.sceneBecameActive() }
             library.refresh()
             // Until each store has listed its games (today Steam's restore and list) and
@@ -165,6 +166,7 @@ struct AppShell: View {
             #endif
         }
         .onChange(of: scenePhase) { _, phase in
+            BackgroundDownloads.shared.sceneChanged()
             if phase == .active {
                 model.sceneBecameActive()
                 library.refresh()

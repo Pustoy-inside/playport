@@ -72,7 +72,8 @@ final class GameMods: ObservableObject {
     }
 
     private func addFiles(_ url: URL, to id: String) async {
-        guard let (t, dir) = folder(id) else { return }
+        guard let found = folder(id) else { return }
+        let (t, dir) = found
         let isDir = (try? url.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory ?? url.hasDirectoryPath
         let source: ImportSource
         if isDir {
@@ -105,7 +106,8 @@ final class GameMods: ObservableObject {
     }
 
     private func addProgram(_ url: URL, to id: String) async {
-        guard let (t, dir) = folder(id) else { return }
+        guard let found = folder(id) else { return }
+        let (t, dir) = found
         let replacing = record(id)?.programs.contains { $0.caseInsensitiveCompare(url.lastPathComponent) == .orderedSame } ?? false
         copying.insert(id)
         let importer = self.importer

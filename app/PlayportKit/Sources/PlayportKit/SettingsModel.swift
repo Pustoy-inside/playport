@@ -96,15 +96,19 @@ public struct DownloadPreferences: Equatable, Sendable {
     public static let cellularKey = "downloads.cellular"
     /// Download mode: dim the screen after a minute without input while downloading (default on).
     public static let dimKey = "downloads.dim"
+    /// Keep downloading while Playport is in the background (default off): BackgroundDownloads.
+    public static let backgroundKey = "downloads.background"
 
     public var autoUpdate = true
     public var cellular = false
     public var dim = true
+    public var background = false
 
-    public init(autoUpdate: Bool = true, cellular: Bool = false, dim: Bool = true) {
+    public init(autoUpdate: Bool = true, cellular: Bool = false, dim: Bool = true, background: Bool = false) {
         self.autoUpdate = autoUpdate
         self.cellular = cellular
         self.dim = dim
+        self.background = background
     }
 
     /// What `defaults` holds, each key missing read as its default.
@@ -112,6 +116,7 @@ public struct DownloadPreferences: Equatable, Sendable {
         autoUpdate = defaults.object(forKey: Self.autoUpdateKey) as? Bool ?? true
         cellular = defaults.object(forKey: Self.cellularKey) as? Bool ?? false
         dim = defaults.object(forKey: Self.dimKey) as? Bool ?? true
+        background = defaults.object(forKey: Self.backgroundKey) as? Bool ?? false
     }
 
     public static var current: DownloadPreferences { DownloadPreferences(.standard) }

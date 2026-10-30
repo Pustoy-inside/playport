@@ -236,12 +236,13 @@
   "gstreamer_tag_commit": "070125524a8422e29d3b69a372ed4f62fd343ffa",
   "release": "1.28.7",
   "schema": 1,
-  "stage_sha256": "be9b77fd24c0f7948d85c64a864fca9a95eda9590bfedf71bfb4b87fedbc12ef",
+  "stage_sha256": "57de9d266b7708a522bdef1e26887a91a9d6b48098a8e3a709930e07eb5cf77f",
   "status": "preparatory-source-review-not-binary-build-lock",
   "unresolved": [
     "Exact Cerbero build commit/configuration/manifest associated with binary archive",
     "GStreamer Rust demangler/std/crates: recipe Rust 1.96.0 and gst-plugins-rs 0.15.3 are candidates, not embedded provenance",
     "MoltenVK: recipe 1.3.283.0 is Vulkan SDK version, not verified MoltenVK source revision or nested notices",
-    "Per-file/header credits and patch applicability; exact final-IPA linked-member map"
+    "Per-file/header credits and patch applicability; exact final-IPA linked-member map",
+    "gst-plugins-ugly 1.28.7 (the asf plugin, LGPL-2.1-or-later, the licence text the other GStreamer components carry): its release archive is not yet in this lock; recipe recipes/gst-plugins-ugly-1.0.recipe at the Cerbero commit has sha256 5a247497c7a3b05ec76f75680c5aa237f335a171c6e008b92ccd9ec80a577317"
   ]
 }

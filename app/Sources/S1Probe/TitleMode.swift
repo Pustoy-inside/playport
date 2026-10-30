@@ -69,7 +69,7 @@ final class TitleLaunch: ObservableObject {
     /// then the launch on its own thread. False when a launch is running or spent.
     @discardableResult
     func start(title: String, titleID: String? = nil, exe: String, args: [String], config: [String: String] = [:],
-               screen: String? = nil, frameLimit: Int = 0, upscaler: Upscaler = .off,
+               screen: String? = nil, frameLimit: Int = 0, upscaler: Upscaler = .default,
                sharpness: Int = LaunchSettings.defaultSharpness, graphics: GraphicsBackend = .default,
                graphicsEnvironment: [String: String] = [:], steamAppID: UInt32? = nil,
                fex: FEXProfile.Launch? = nil, steamAPI: LaunchCoordinator.SteamAPI? = nil,
@@ -201,7 +201,7 @@ final class TitleLaunch: ObservableObject {
     /// set from the launch environment and this title's screen and frame rate
     /// limit (TitleScreen.configure) at every start, so a title that follows one
     /// that was refused gets its own; host I/O starts once.
-    private func begin(screen: String? = nil, frameLimit: Int = 0, upscaler: Upscaler = .off,
+    private func begin(screen: String? = nil, frameLimit: Int = 0, upscaler: Upscaler = .default,
                        sharpness: Int = LaunchSettings.defaultSharpness) {
         running = true
         // Steam work stops before the runtime starts (decision 0004); the JIT

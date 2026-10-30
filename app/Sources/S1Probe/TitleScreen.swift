@@ -34,7 +34,7 @@ enum TitleScreen {
     /// `frameLimit` the player's limit, 0 for none; `upscaler` what scales the
     /// game's frames up to the screen, with FSR 1's `sharpness` (LaunchSettings).
     @MainActor
-    static func configure(title: String? = nil, frameLimit: Int = 0, upscaler: Upscaler = .off,
+    static func configure(title: String? = nil, frameLimit: Int = 0, upscaler: Upscaler = .default,
                           sharpness: Int = LaunchSettings.defaultSharpness) {
         let px = UIScreen.main.nativeBounds.size
         let screen: String

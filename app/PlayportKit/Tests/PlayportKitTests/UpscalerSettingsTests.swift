@@ -4,10 +4,11 @@ import XCTest
 @testable import PlayportKit
 
 final class UpscalerSettingsTests: XCTestCase {
-    /// Off unless chosen; a game's choice wins over Settings', and an unknown one inherits.
+    /// MetalFX unless chosen; a game's choice wins over Settings', and an unknown one inherits.
     func testAGameUpscalerOverridesTheGlobalOne() throws {
         let none = LaunchSettings.resolve(game: nil, global: LaunchSettings())
-        XCTAssertEqual(none.upscaler, .off)
+        XCTAssertEqual(none.upscaler, .metalFX)
+        XCTAssertEqual(Upscaler.default, .metalFX)
         XCTAssertEqual(none.sharpness, LaunchSettings.defaultSharpness)
         let global = LaunchSettings(upscaler: .fsr1, sharpness: 50)
         XCTAssertEqual(LaunchSettings.resolve(game: nil, global: global).upscaler, .fsr1)

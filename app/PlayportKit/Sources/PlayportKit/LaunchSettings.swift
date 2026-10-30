@@ -201,7 +201,7 @@ public struct LaunchSettings: Codable, Equatable, Sendable {
                     arguments: [String] = [], steamAPI: SteamAPISwap.Mode = .emulated,
                     ordering: MemoryOrdering = MemoryOrdering(), maxInst: Int? = nil,
                     x87Reduced: Bool? = nil, diskCache: Bool? = nil, runtime: [String: String] = [:],
-                    graphicsEnvironment: [String: String] = [:], upscaler: Upscaler = .off,
+                    graphicsEnvironment: [String: String] = [:], upscaler: Upscaler = .default,
                     sharpness: Int = LaunchSettings.defaultSharpness) {
             self.screen = screen
             self.aspect = aspect
@@ -260,7 +260,7 @@ public struct LaunchSettings: Codable, Equatable, Sendable {
                          x87Reduced: game?.x87Reduced, diskCache: game?.diskCache,
                          runtime: runtimeKeys(game?.runtime ?? "") ?? [:],
                          graphicsEnvironment: graphicsEnvironment(game?.graphicsOptions ?? "") ?? [:],
-                         upscaler: game?.upscaler ?? global.upscaler ?? .off, sharpness: sharpness)
+                         upscaler: game?.upscaler ?? global.upscaler ?? .default, sharpness: sharpness)
     }
 
     /// The resolutions the pickers offer, the same in every aspect ratio, as screen specs;
@@ -295,6 +295,9 @@ public enum Upscaler: String, Codable, CaseIterable, Sendable {
     case metalFX = "metalfx"
     /// AMD FidelityFX Super Resolution 1: EASU, then RCAS sharpening (LaunchSettings.sharpness).
     case fsr1
+
+    /// What a game nobody set one for uses: MetalFX, over the default 720 rows.
+    public static let `default`: Upscaler = .metalFX
 
     /// The upscaler's mode (app/Sources/Upscale/include/upscaler.h, PP_UPSCALE_*).
     public var mode: Int32 {

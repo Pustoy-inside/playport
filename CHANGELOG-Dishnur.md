@@ -2,6 +2,10 @@
 
 Личные сборки Playport из этого форка. Раздел сборки попадает в описание её релиза на GitHub (ci/deliver.sh).
 
+## Playport Dishnur 14
+
+- **Видео в формате WMV/ASF.** В Playport добавлен модуль чтения ASF-контейнера (декодеры WMV и WMA уже были). Resident Evil 2 падал примерно через минуту, когда начинал ролик: Media Foundation не мог его открыть. Должно помочь и другим играм на RE Engine (RE3, RE7, Village) и любым играм с роликами .wmv.
+
 ## Playport Dishnur 13
 
 - **HUD производительности Playport.** Настройки › Graphics › Performance HUD:

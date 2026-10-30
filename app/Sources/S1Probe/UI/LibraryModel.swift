@@ -204,11 +204,13 @@ final class LibraryModel: ObservableObject {
     /// (AppRestart.continuePlay, decision 0084): no cloud save check (the Play passed it a few
     /// seconds ago) and no prerequisites, so it cannot restart again.
     @discardableResult
-    func play(_ id: String, epicOffline: Bool = false, continuing: Bool = false) async throws -> Bool {
+    /// `program`: an .exe a page's Run a program copied into the game's folder (GameMods), run in
+    /// its place with the game's settings, without its arguments, prerequisites or sign-ins.
+    func play(_ id: String, epicOffline: Bool = false, continuing: Bool = false, program: String? = nil) async throws -> Bool {
         guard catalog.title(id: id)?.canPlay == true, !TitleLaunch.shared.running, !TitleLaunch.shared.spent else { return false }
         // A game whose saves changed on the phone and on Steam asks which to keep first; the
         // choice starts it, Decide later does not (UI/CloudConflictView.swift).
-        if !continuing, let t = catalog.title(id: id), let app = t.appID, let steam = SteamAccountModel.current {
+        if !continuing, program == nil, let t = catalog.title(id: id), let app = t.appID, let steam = SteamAccountModel.current {
             let conflicts = await steam.openCloudConflicts(app, titleID: id)
             if !conflicts.isEmpty {
                 Self.log("play \(t.name) (\(id)): \(conflicts.count) cloud save conflict(s); asking which saves to keep")
@@ -226,6 +228,9 @@ final class LibraryModel: ObservableObject {
               !TitleLaunch.shared.running, !TitleLaunch.shared.spent,
               SteamAccountModel.current?.installs.jobs[t.key] == nil else { return false }
         var plan = try t.launchPlan(cohort: Self.cohort)
+        if let program { plan = try LaunchPlan.make(installDir: t.installDir, executable: program, arguments: []) }
+        // A program runs as a game continued after its prerequisites does: none run first.
+        let continuing = continuing || program != nil
         // The player's settings over 720p, 60 fps, Vulkan for DX12 and DXMT otherwise.
         #if PLAYPORT_RELEASE
         var settings = LaunchSettingsStore.shared.effective(for: t)
@@ -249,7 +254,7 @@ final class LibraryModel: ObservableObject {
         // The game's auth session and web API tickets, on by default (decision 0062): armed now, and
         // the CM session stays logged on for them alone through the play.
         var tickets: SteamTicketBroker?
-        if let app = t.appID, settings.steamAPI == .emulated, let service {
+        if program == nil, let app = t.appID, settings.steamAPI == .emulated, let service {
             await ticketSweep?.value
             ticket = await service.encryptedAppTicket(appID: app)
             tickets = await service.prepareTicketSession(appID: app, playLog: SteamTicketHost.log)
@@ -264,7 +269,7 @@ final class LibraryModel: ObservableObject {
         // An Epic game's sign-in (decision 0059), fetched now: the code lives five minutes.
         var epicArgs: [String] = []
         var epic: LaunchCoordinator.Epic?
-        if t.store == .epic {
+        if t.store == .epic, program == nil {
             await ownershipSweep?.value
             let root = Self.paths.games.appendingPathComponent(t.installDir, isDirectory: true)
             epic = LaunchCoordinator.Epic(root: root)
@@ -299,7 +304,8 @@ final class LibraryModel: ObservableObject {
         // seed's VC++ runtime key.
         var storePrerequisites: [Prerequisite] = []
         if continuing {
-            Self.log("play \(t.name) (\(t.id)): continued after its prerequisites ran before the restart; none run now")
+            Self.log("play \(t.name) (\(t.id)): " + (program.map { "runs \($0) from its folder; no prerequisites" }
+                     ?? "continued after its prerequisites ran before the restart; none run now"))
         } else if t.store == .epic, let p = EpicAccount.shared.installer.prerequisite(t.key.id) {
             do {
                 if let pre = try Prerequisite.make(ids: p.ids, name: p.name, installDir: t.installDir, path: p.path, arguments: p.args) {
@@ -336,7 +342,8 @@ final class LibraryModel: ObservableObject {
         await Task.detached(priority: .userInitiated) { EmulatorCache.keepWithinBudget { Self.log($0) } }.value
         let fex = FEXProfile.launch(appID: t.appID, exe: plan.exe, ordering: settings.ordering, maxInst: settings.maxInst,
                                     x87Reduced: settings.x87Reduced, diskCache: settings.diskCache)
-        guard TitleLaunch.shared.start(title: t.name, titleID: t.id, exe: plan.exe, args: plan.args + settings.arguments + epicArgs,
+        guard TitleLaunch.shared.start(title: program.map { "\(t.name) · \($0)" } ?? t.name, titleID: t.id, exe: plan.exe,
+                                       args: plan.args + (program == nil ? settings.arguments + epicArgs : []),
                                        config: settings.config(over: plan.config),
                                        screen: settings.guestScreen, frameLimit: settings.frameLimit,
                                        upscaler: settings.upscaler, sharpness: settings.sharpness,

@@ -259,6 +259,9 @@ struct SettingsSwitchRow: View {
 private struct GraphicsSettings: View {
     @ObservedObject private var launchSettings = LaunchSettingsStore.shared
     @AppStorage(MetalHUD.key) private var metalHUD = false
+    @AppStorage(HUDSettings.presetKey) private var hudPreset = HUDPreset.off.rawValue
+    @AppStorage(HUDSettings.positionKey) private var hudPosition = HUDPosition.topLeft.rawValue
+    @AppStorage(HUDSettings.itemsKey) private var hudItems = HUDSettings.list(HUDSettings.defaultCustom)
 
     var body: some View {
         SettingsNote(text: "What every game uses unless you change it on the game's page.")
@@ -287,7 +290,29 @@ private struct GraphicsSettings: View {
                                     defaultValue: GraphicsBackend.default)
         valueRow("graphics", "Direct3D", "Vulkan is experimental", backends,
                  name: LaunchSettingsText.graphics, value: global.graphics)
-        SettingsSwitchRow(id: "metalHUD", title: "Metal HUD", subtitle: "Frame rate, frame time and memory over a game",
+        Group {
+            let presets = SettingSteps(values: HUDPreset.allCases, defaultValue: HUDPreset.off)
+            valueRow("hud", "Performance HUD", "What Playport shows over a game", presets, name: PerformanceHUDText.preset,
+                     value: Binding(get: { HUDPreset(rawValue: hudPreset) }, set: { hudPreset = ($0 ?? .off).rawValue }))
+            if HUDPreset(rawValue: hudPreset) ?? .off != .off {
+                let corners = SettingSteps(values: HUDPosition.allCases, defaultValue: HUDPosition.topLeft)
+                valueRow("hudPosition", "HUD position", "Where on the screen", corners, name: PerformanceHUDText.position,
+                         value: Binding(get: { HUDPosition(rawValue: hudPosition) },
+                                        set: { hudPosition = ($0 ?? .topLeft).rawValue }))
+            }
+            if HUDPreset(rawValue: hudPreset) == .custom {
+                ForEach(HUDItem.allCases, id: \.self) { item in
+                    SettingsSwitchRow(id: "hud-\(item.rawValue)", title: PerformanceHUDText.item(item),
+                                      on: Binding(get: { HUDSettings.items(hudItems).contains(item) }, set: { on in
+                                          var set = HUDSettings.items(hudItems)
+                                          if on { set.insert(item) } else { set.remove(item) }
+                                          hudItems = HUDSettings.list(set)
+                                      }))
+                }
+            }
+            SettingsNote(text: PerformanceHUDText.footer)
+        }
+        SettingsSwitchRow(id: "metalHUD", title: "Apple Metal HUD", subtitle: "Apple's own figures over a game",
                           on: $metalHUD)
         SettingsNote(text: "From each game's next start. 720p at 60 fps keeps the phone cool enough to hold its "
                      + "frame rate; Native is the screen's full resolution, and Off runs a game as fast as the screen "

@@ -615,3 +615,108 @@ bool pp_upscale_encode_for_test(id<MTLTexture> src, id<MTLTexture> dst, id<MTLCo
 }
 
 const char *pp_upscale_shader_source(void) { return pp_upscaler_shaders; }
+
+// MARK: GPU time (the performance HUD)
+
+static os_unfair_lock gpu_lock = OS_UNFAIR_LOCK_INIT;
+static double gpu_busy, gpu_last_end, gpu_since;
+static BOOL gpu_counting;
+typedef void (*commit_fn)(id, SEL);
+typedef void (*commit4_fn)(id, SEL, const id *, NSUInteger);
+typedef void (*commit4o_fn)(id, SEL, const id *, NSUInteger, id);
+static commit_fn orig_commit;
+static commit4_fn orig_commit4;
+static commit4o_fn orig_commit4o;
+
+// One interval of GPU work. Intervals overlap across queues; the time counted
+// is their union, near enough: a later one counts only past the latest end seen.
+static void gpu_record(double start, double end) {
+    if (!(end > start) || start <= 0) return;
+    os_unfair_lock_lock(&gpu_lock);
+    if (end > gpu_last_end) {
+        gpu_busy += end - fmax(start, gpu_last_end);
+        gpu_last_end = end;
+    }
+    os_unfair_lock_unlock(&gpu_lock);
+}
+
+static void hook_commit(id self, SEL sel) {
+    [(id<MTLCommandBuffer>)self addCompletedHandler:^(id<MTLCommandBuffer> cb) {
+        gpu_record(cb.GPUStartTime, cb.GPUEndTime);
+    }];
+    orig_commit(self, sel);
+}
+
+static MTL4CommitFeedbackHandler gpu_feedback(void) {
+    return ^(id<MTL4CommitFeedback> f) { gpu_record(f.GPUStartTime, f.GPUEndTime); };
+}
+
+// The options the game passes (or Playport's own, with none) carry one feedback
+// handler of ours: an options object used again keeps the one it has.
+static id counted_options(id options) {
+    static const char tag;
+    static MTL4CommitOptions *plain;
+    if (!options) {
+        static dispatch_once_t once;
+        dispatch_once(&once, ^{
+            plain = [MTL4CommitOptions new];
+            [plain addFeedbackHandler:gpu_feedback()];
+        });
+        return plain;
+    }
+    if (!objc_getAssociatedObject(options, &tag)) {
+        objc_setAssociatedObject(options, &tag, @YES, OBJC_ASSOCIATION_RETAIN);
+        [(MTL4CommitOptions *)options addFeedbackHandler:gpu_feedback()];
+    }
+    return options;
+}
+
+static void hook_commit4(id self, SEL sel, const id *buffers, NSUInteger count) {
+    orig_commit4o(self, @selector(commit:count:options:), buffers, count, counted_options(nil));
+    (void)sel;
+}
+
+static void hook_commit4o(id self, SEL sel, const id *buffers, NSUInteger count, id options) {
+    orig_commit4o(self, sel, buffers, count, counted_options(options));
+}
+
+bool pp_gpu_stats_start(void) {
+    static dispatch_once_t once;
+    static BOOL ok;
+    dispatch_once(&once, ^{
+        id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+        if (!device) return;
+        id<MTLCommandBuffer> cb = [[device newCommandQueue] commandBuffer];
+        Class c3 = cb ? object_getClass(cb) : Nil;
+        if (!hook(c3, @selector(commit), (IMP)hook_commit, (IMP *)&orig_commit)) {
+            say("GPU time: no commit on %s", c3 ? class_getName(c3) : "(no command buffer)");
+            return;
+        }
+        id<MTL4CommandQueue> q4 = [device newMTL4CommandQueue];
+        if (q4) {
+            Class c4 = object_getClass(q4);
+            // Options first: the plain commit's hook calls it.
+            if (!hook(c4, @selector(commit:count:options:), (IMP)hook_commit4o, (IMP *)&orig_commit4o)
+                || !hook(c4, @selector(commit:count:), (IMP)hook_commit4, (IMP *)&orig_commit4)) {
+                say("GPU time: no commit:count: on %s; Metal 4 work not counted", class_getName(c4));
+            }
+        }
+        os_unfair_lock_lock(&gpu_lock);
+        gpu_since = CACurrentMediaTime();
+        gpu_counting = YES;
+        os_unfair_lock_unlock(&gpu_lock);
+        ok = YES;
+        say("GPU time counted");
+    });
+    return ok;
+}
+
+void pp_gpu_stats_take(double *busy, double *wall) {
+    os_unfair_lock_lock(&gpu_lock);
+    double now = CACurrentMediaTime();
+    *busy = gpu_counting ? gpu_busy : 0;
+    *wall = gpu_counting ? now - gpu_since : 0;
+    gpu_busy = 0;
+    gpu_since = now;
+    os_unfair_lock_unlock(&gpu_lock);
+}

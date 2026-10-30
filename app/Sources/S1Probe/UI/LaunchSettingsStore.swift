@@ -199,3 +199,43 @@ enum LaunchSettingsText {
         return Display.guestSize(panelLong: Int(px.width), panelShort: Int(px.height), spec: aspect.spec(level: spec))
     }
 }
+
+/// How Settings and the in-game menu name the performance HUD's choices.
+enum PerformanceHUDText {
+    static func preset(_ p: HUDPreset) -> String {
+        switch p {
+        case .off: "Off"
+        case .fps: "FPS"
+        case .compact: "Compact"
+        case .full: "Full"
+        case .custom: "Custom"
+        }
+    }
+
+    static func position(_ p: HUDPosition) -> String {
+        switch p {
+        case .topLeft: "Top left"
+        case .topCenter: "Top"
+        case .topRight: "Top right"
+        case .bottomLeft: "Bottom left"
+        case .bottomRight: "Bottom right"
+        }
+    }
+
+    static func item(_ i: HUDItem) -> String {
+        switch i {
+        case .fps: "Frame rate"
+        case .frameTime: "Frame time"
+        case .cpu: "CPU load"
+        case .gpu: "GPU time and load"
+        case .thermal: "Heat"
+        case .battery: "Battery"
+        case .memory: "Memory"
+        case .resolution: "Resolution and upscaler"
+        }
+    }
+
+    static let footer = "Playport's HUD over a game: FPS shows the frame rate; Compact adds frame time, CPU and GPU; "
+        + "Full adds heat, battery, memory and the resolution. GPU load is the share of the time the GPU was busy, "
+        + "as iOS gives no exact figure. The in-game menu's Performance HUD row changes it for the game in play."
+}

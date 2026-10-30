@@ -72,6 +72,7 @@ private struct GameDetailPage: View {
     @ObservedObject private var focus = PadFocus.shared
     @ObservedObject private var gog = GOGAccount.shared
     @ObservedObject private var epic = EpicAccount.shared
+    @ObservedObject private var mods = GameMods.shared
     @State private var playError: String?
     @State private var controllers = GCController.controllers().count
     @State private var stageOnDisk = false
@@ -339,15 +340,15 @@ private struct GameDetailPage: View {
         }
         if job == nil, t.store == .gog, t.source == .installed, let newest = gog.newest[t.key.id], newest != t.storeVersion {
             SecondaryButton(id: "game:update", systemImage: "arrow.down.circle", title: "Update", enabled: canDownloadGOG && !launch.running,
-                            hint: "Update") { gog.install(t.key.id, name: t.name, kind: .update) }
+                            hint: "Update") { mods.confirm(t.id, "Update") { gog.install(t.key.id, name: t.name, kind: .update) } }
         }
         if job == nil, t.store == .epic, t.source == .installed, let newest = epic.newest[t.key.id], newest != t.storeVersion {
             SecondaryButton(id: "game:update", systemImage: "arrow.down.circle", title: "Update", enabled: canDownloadEpic && !launch.running,
-                            hint: "Update") { epic.install(t.key.id, name: t.name, kind: .update) }
+                            hint: "Update") { mods.confirm(t.id, "Update") { epic.install(t.key.id, name: t.name, kind: .update) } }
         }
         if job == nil, let g, SteamInstallStatus.updateAvailable(t, g.info) {
             SecondaryButton(id: "game:update", systemImage: "arrow.down.circle", title: "Update", enabled: canDownload && !launch.running,
-                            hint: "Update") { installs.install(g.id, name: g.info.name) }
+                            hint: "Update") { mods.confirm(t.id, "Update") { installs.install(g.id, name: g.info.name) } }
         } else if job == nil, let g, let app = t.appID,
                   !SteamInstallStatus.missingDLC(t, g.info, model.gameProfiles[app]).isEmpty {
             SecondaryButton(id: "game:dlc", systemImage: "arrow.down.circle", title: "Download DLC", enabled: canDownload && !launch.running,
@@ -818,6 +819,7 @@ private struct GameDetailPage: View {
             executableRow(t)
         }
         filesRows(t)
+        modRows(t)
         if let s = stats, !s.schema.achievements.isEmpty {
             PadRow(id: "opt:achievements", title: "Achievements", value: "\(s.unlockedCount) of \(s.schema.achievements.count)",
                    accessory: .chevron, style: .plain, hint: "Open") { navigation.gamePanels.append(.achievements) }
@@ -867,6 +869,34 @@ private struct GameDetailPage: View {
         }
     }
 
+    // Translations and the like (GameMods): files over the game's, a program run in its folder.
+    @ViewBuilder
+    private func modRows(_ t: InstalledTitle) -> some View {
+        let busy = mods.copying.contains(t.id)
+        let free = job == nil && !launch.running && !busy && !library.removing.contains(t.id)
+        PadRow(id: "opt:addFiles", title: "Add files", subtitle: "A translation: a .zip or a folder, copied over the game's files",
+               value: busy ? "Copying…" : nil, accessory: .chevron, style: .plain, hint: "Pick") {
+            if free { GameMods.requests.send(.files(titleID: t.id)) }
+        }
+        PadRow(id: "opt:runProgram", title: "Run a program", subtitle: "An installer (.exe), run from the game's folder",
+               accessory: .chevron, style: .plain, hint: "Pick") {
+            if free { GameMods.requests.send(.program(titleID: t.id)) }
+        }
+        if let r = mods.record(t.id) {
+            ForEach(r.programs, id: \.self) { name in
+                PadRow(id: "opt:run-\(name)", title: "Run \(name)", subtitle: "Copied into the game's folder before",
+                       accessory: .chevron, style: .plain, hint: "Run") {
+                    if free { mods.run(name, in: t.id) }
+                }
+            }
+            PadRow(id: "opt:added", title: "Added files", subtitle: "Updates and repairs ask first; Y forgets the list",
+                   value: "\(r.files.count) file\(r.files.count == 1 ? "" : "s")", changed: true, style: .plain, hint: "Info",
+                   reset: { mods.forget(t.id) }) {}
+        }
+        PadRow(id: "opt:folder", title: "The game's folder in Files",
+               subtitle: "On My iPhone › Playport › prefix › drive_c › Games › \(t.installDir)", style: .plain, hint: "") {}
+    }
+
     @ViewBuilder
     private func filesRows(_ t: InstalledTitle) -> some View {
         let checking = library.verifying.contains(t.id)
@@ -878,19 +908,19 @@ private struct GameDetailPage: View {
         if t.source == .installed, let app = t.appID, job == nil, !checking, t.lastVerification.map({ !$0.ok }) ?? false {
             PadRow(id: "opt:repair", title: "Repair from Steam", subtitle: "Downloads the damaged files again",
                    accessory: .chevron, style: .plain, hint: "Repair") {
-                if !installs.suspended, !launch.running { installs.repair(app, name: t.name) }
+                if !installs.suspended, !launch.running { mods.confirm(t.id, "Repair") { installs.repair(app, name: t.name) } }
             }
         }
         if t.store == .epic, job == nil, !checking, t.lastVerification.map({ !$0.ok }) ?? false {
             PadRow(id: "opt:repair", title: "Repair from Epic Games", subtitle: "Downloads the damaged files again",
                    accessory: .chevron, style: .plain, hint: "Repair") {
-                if !installs.suspended, !launch.running { epic.install(t.key.id, name: t.name, kind: .repair) }
+                if !installs.suspended, !launch.running { mods.confirm(t.id, "Repair") { epic.install(t.key.id, name: t.name, kind: .repair) } }
             }
         }
         if t.store == .gog, job == nil, !checking, t.lastVerification.map({ !$0.ok }) ?? false {
             PadRow(id: "opt:repair", title: "Repair from GOG", subtitle: "Downloads the damaged files again",
                    accessory: .chevron, style: .plain, hint: "Repair") {
-                if !installs.suspended, !launch.running { gog.install(t.key.id, name: t.name, kind: .repair) }
+                if !installs.suspended, !launch.running { mods.confirm(t.id, "Repair") { gog.install(t.key.id, name: t.name, kind: .repair) } }
             }
         }
     }

@@ -195,6 +195,22 @@ static void presents(void) {
     CHECK([done waitUntilSignaledValue:1 timeoutMS:3000], "the Metal 4 frames' upscales did not finish");
 }
 
+// The performance HUD's GPU time: counted from the commits after it starts.
+static void gpuTime(void) {
+    CHECK(pp_gpu_stats_start(), "GPU time could not be counted");
+    double busy = 0, wall = 0;
+    pp_gpu_stats_take(&busy, &wall);
+    for (int i = 0; i < 4; i++) {
+        id<MTLCommandBuffer> cb = [queue commandBuffer];
+        clear(cb, texture(1024, 1024), (MTLClearColor){0.1, 0.2, 0.3, 1});
+        run(cb, "GPU time");
+    }
+    usleep(100 * 1000);   // completed handlers may run just after the wait
+    pp_gpu_stats_take(&busy, &wall);
+    printf("GPU time: %.3f ms busy in %.3f ms\n", busy * 1000, wall * 1000);
+    CHECK(busy > 0 && busy <= wall + 0.001, "GPU time %.6f s busy in %.6f s", busy, wall);
+}
+
 int main(int argc, char **argv) {
     @autoreleasepool {
         if (argc > 1 && !strcmp(argv[1], "--shaders")) {
@@ -219,6 +235,7 @@ int main(int argc, char **argv) {
         printf("FSR 1: %d (%s)\n", got, note);
         flat("EASU+RCAS");
         presents();
+        gpuTime();
         got = pp_upscale_configure(PP_UPSCALE_METALFX, -1, note, sizeof note);
         printf("MetalFX: %d (%s)\n", got, note);
         if (got == PP_UPSCALE_METALFX) {

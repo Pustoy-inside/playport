@@ -57,7 +57,9 @@ enum TitleScreen {
         // Before the game takes its first drawable (PacedMetalLayer).
         var note = [CChar](repeating: 0, count: 256)
         let stops = upscaler == .fsr1 ? LaunchSettings.rcasStops(sharpness) ?? -1 : -1
-        _ = pp_upscale_configure(upscaler.mode, stops, &note, note.count)
+        let mode = pp_upscale_configure(upscaler.mode, stops, &note, note.count)
+        PerformanceHUD.upscaler = mode == Upscaler.metalFX.mode ? "MetalFX" : mode == Upscaler.fsr1.mode ? "FSR 1" : nil
+        PerformanceHUD.configure()
         let scaled = String(decoding: note.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self)
         GameSurfaceView.onScreen?.setNeedsLayout()
         summary = "screen \(screen) (panel \(Int(px.width))x\(Int(px.height)) px), landscape, swap chain aspect-fitted, "

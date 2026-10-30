@@ -47,6 +47,15 @@ void pp_upscale_set_panel(double width, double height);
  * of the output layer. nil when none can be had (as nextDrawable's nil). */
 id<CAMetalDrawable> _Nullable pp_upscale_next_drawable(CAMetalLayer *game);
 
+/* The GPU's busy time, for Playport's performance HUD: from the first call on,
+ * every Metal 3 command buffer's and Metal 4 commit's GPU start and end times
+ * are counted (hooks on commit). Returns false when they cannot be. */
+bool pp_gpu_stats_start(void);
+
+/* The seconds the GPU was busy since the last call, and the seconds since it;
+ * 0 and 0 before pp_gpu_stats_start. */
+void pp_gpu_stats_take(double *busy, double *wall);
+
 /* The CI smoke test's (tools/upscaler-smoke): src scaled into dst on cb as a
  * frame is, with the mode in effect. dst must be a render target. */
 bool pp_upscale_encode_for_test(id<MTLTexture> src, id<MTLTexture> dst, id<MTLCommandBuffer> cb);

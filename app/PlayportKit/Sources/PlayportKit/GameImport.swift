@@ -62,6 +62,8 @@ public struct ImportPlan: Sendable {
     public var files: [File]
     public var directories: [String]
     public var skippedSymlinks: Int
+    /// A zip's one folder at the top, taken off every path (`name`); nil when none was.
+    public var strippedTop: String? = nil
     public var totalBytes: UInt64 { files.reduce(0) { $0 + $1.size } }
 }
 
@@ -164,10 +166,12 @@ public struct GameImporter: Sendable {
         }
         // One folder at the top holding everything: that is the game's folder.
         var name = url.deletingPathExtension().lastPathComponent
+        var stripped: String?
         let tops = Set(entries.map { $0.parts[0] })
         if tops.count == 1, let top = tops.first,
            entries.allSatisfy({ $0.parts.count > 1 || $0.entry.isDirectory }) {
             name = top
+            stripped = top
             entries = entries.compactMap { $0.parts.count > 1 ? (Array($0.parts.dropFirst()), $0.entry) : nil }
         }
         var files: [ImportPlan.File] = [], dirs = Set<String>()
@@ -187,7 +191,7 @@ public struct GameImporter: Sendable {
         }
         guard !files.isEmpty else { throw ImportError.empty }
         return ImportPlan(source: .zip(url), name: name, files: files.sorted { $0.path < $1.path }, directories: dirs.sorted(),
-                          skippedSymlinks: symlinks)
+                          skippedSymlinks: symlinks, strippedTop: stripped)
     }
 
     /// `name`, or `name 2`, `name 3`…: not a folder in C:\Games yet (without case), nor one of `taken`.

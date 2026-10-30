@@ -633,6 +633,7 @@ final class PacedMetalLayer: CAMetalLayer {
         #if !PLAYPORT_RELEASE
         if drawable != nil { Self.countDrawable() }
         #endif
+        if drawable != nil { PerformanceHUD.frame() }
         drawable?.addPresentedHandler { d in
             if d.presentedTime > 0,
                let then = Self.firstPresent.withLockUnchecked({ h in defer { h = nil }; return h }) { then() }
@@ -655,6 +656,8 @@ final class GameSurfaceView: UIView {
     private var registered = false
     /// The guest's GDI windows until the game's swap chain presents (GuestWindows).
     private let windows = Unmanaged<CALayer>.fromOpaque(winios_windows_layer()).takeUnretainedValue()
+    /// Playport's performance HUD, over everything (PerformanceHUDView.swift).
+    private let hud = PerformanceHUDView()
     #if !PLAYPORT_RELEASE
     /// The view on screen, for the UI driver's tap: action (Dev/UIDriver.swift).
     static weak var current: GameSurfaceView?
@@ -667,6 +670,8 @@ final class GameSurfaceView: UIView {
         backgroundColor = .black
         layer.contentsGravity = .resizeAspect
         layer.addSublayer(windows)
+        addSubview(hud)
+        PerformanceHUD.view = hud
         isMultipleTouchEnabled = false
         // Counted only (hostio: input … hover=N): whether iOS shows a mouse to
         // UIKit as a hovering pointer when GCMouse's handlers stay silent.
@@ -686,6 +691,7 @@ final class GameSurfaceView: UIView {
         windows.frame = bounds
         windows.setNeedsLayout()
         placeUpscaled()
+        hud.place(in: bounds, insets: safeAreaInsets)
         CATransaction.commit()
     }
 
@@ -711,6 +717,7 @@ final class GameSurfaceView: UIView {
         // (912x420 points versus 2736x1260 pixels on a 3x screen).
         contentScaleFactor = window.screen.nativeScale
         Self.onScreen = self
+        hud.restart()
         setNeedsLayout()
         // Landscape before the runtime starts, so the swap chain is made at the final size.
         window.rootViewController?.setNeedsUpdateOfSupportedInterfaceOrientations()

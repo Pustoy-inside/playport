@@ -15,7 +15,7 @@
 //
 // Its rows: Resume (also B, ≡ and Home), Screenshot (the frame on screen to
 // Photos; a dev build also keeps a PNG in Documents/Screenshots), Performance
-// overlay (the Metal HUD on the game layer, now and for this game only), the
+// HUD (Playport's performance HUD, cycled for this game only; PerformanceHUD), the
 // controller with its battery, and Quit game (TitleLaunch.quit: WM_CLOSE to
 // the game's windows, so it saves as when its window is closed, then the
 // restart after the game, decision 0029, returns to Home).
@@ -35,8 +35,8 @@ final class InGameMenu: ObservableObject {
 
     @Published private(set) var isOpen = false
     @Published private(set) var menu = QuickMenu()
-    /// The performance overlay as the game layer has it now.
-    @Published private(set) var overlay = MetalHUD.enabled
+    /// Playport's performance HUD as the game shows it now (PerformanceHUD).
+    @Published private(set) var hud = HUDPreset.off
     /// Screenshot's value: nil until one is taken, then what happened.
     @Published private(set) var shot: String?
     @Published private(set) var quitting = false
@@ -60,6 +60,7 @@ final class InGameMenu: ObservableObject {
             return false
         }
         isOpen = true
+        hud = PerformanceHUD.preset
         menu = QuickMenu()
         shot = nil
         HostIO.shared.holdGuest()
@@ -121,10 +122,10 @@ final class InGameMenu: ObservableObject {
         quitting = false
     }
 
+    /// The HUD row: Off, FPS, Compact, Full, for this game only (Settings keep theirs).
     private func toggleOverlay() {
-        guard let layer = HostIO.shared.gameLayer else { return }
-        overlay.toggle()
-        MetalHUD.set(overlay, on: layer)
+        hud = PerformanceHUD.preset.next
+        PerformanceHUD.show(hud)
     }
 
     // MARK: Screenshot
@@ -235,7 +236,7 @@ final class InGameMenu: ObservableObject {
     #if !PLAYPORT_RELEASE
     /// The driver's summary line (Dev/UIDriver.swift).
     var summary: String {
-        "menu \(isOpen ? "open" : "closed"), ring \(menu.ring.rawValue), paused=\(paused) overlay=\(overlay)"
+        "menu \(isOpen ? "open" : "closed"), ring \(menu.ring.rawValue), paused=\(paused) hud=\(hud.rawValue)"
             + (shot.map { ", screenshot: \($0)" } ?? "") + (quitting ? ", quitting" : "")
     }
     #endif
@@ -336,7 +337,7 @@ struct InGameMenuView: View {
         switch item {
         case .resume: nil
         case .screenshot: model.shot ?? "Saved to Photos"
-        case .overlay: model.overlay ? "On" : "Off"
+        case .overlay: PerformanceHUDText.preset(model.hud)
         case .controller: QuickMenu.controller(name: router.controller?.name, battery: router.controller?.battery)
         case .quit: model.quitting ? "Closing…" : "Saves first"
         }

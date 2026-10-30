@@ -13,7 +13,7 @@ public enum QuickMenuItem: String, CaseIterable, Sendable {
         switch self {
         case .resume: "Resume"
         case .screenshot: "Screenshot"
-        case .overlay: "Performance overlay"
+        case .overlay: "Performance HUD"
         case .controller: "Controller"
         case .quit: "Quit game"
         }

@@ -97,6 +97,8 @@ final class SteamInstalls: DownloadDriver {
             // Only a Steam install follows Steam (SteamInstallStatus.updateAvailable).
             guard t.source == .installed, t.store == .steam, let app = t.appID,
                   let g = games.first(where: { $0.id == app }) else { return nil }
+            // A game with files the player added (a translation) updates only from its page, which asks.
+            guard !GameMods.shared.has(t.id) else { return nil }
             return UpdateCandidate(appID: app, name: t.name, installedBuild: t.buildID,
                                    steamBuild: g.info.depots.buildID(branch: t.branch ?? Branch.publicName))
         }

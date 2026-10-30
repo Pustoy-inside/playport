@@ -42,6 +42,9 @@ public struct SteamAppInfo: Sendable, Codable, Equatable {
     /// `common/controller_support`, lowercased ("full", "partial"); nil when
     /// Steam lists none, or the record was cached before this was read.
     public var controllerSupport: String? = nil
+    /// This app's depots the account's packages list (DepotSelection.Options.ownedDepots),
+    /// when the games list knew them; nil counts every depot.
+    public var ownedDepots: [UInt32]? = nil
 
     public var isGame: Bool { type.caseInsensitiveCompare("game") == .orderedSame }
     /// A game or a demo (`type: Demo`, its own app ID with a free licence): what the Library lists (PLA-19).
@@ -51,12 +54,13 @@ public struct SteamAppInfo: Sendable, Codable, Equatable {
     /// Depots a Windows install would use: Windows or any-OS content that is
     /// not a DLC, not borrowed from another app, not 32-bit only, and neither
     /// another language's nor a low-violence variant (DepotSelection's rules).
-    public var windowsContentDepots: [DepotInfo] { Self.content(depots.depots) }
+    public var windowsContentDepots: [DepotInfo] { Self.content(depots.depots, owned: ownedDepots.map(Set.init)) }
 
-    static func content(_ all: [DepotInfo]) -> [DepotInfo] {
+    static func content(_ all: [DepotInfo], owned: Set<UInt32>? = nil) -> [DepotInfo] {
         let o = DepotSelection.Options()
         return all.filter { $0.isWindows && $0.depotFromApp == nil && $0.dlcAppID == nil && $0.osArch != "32"
-            && !$0.lowViolence && ($0.language == nil || $0.language == o.language) }
+            && !$0.lowViolence && ($0.language == nil || $0.language == o.language)
+            && (owned?.contains($0.depotID) ?? true) }
     }
 
     /// Sum of the public manifests' sizes over `windowsContentDepots`; nil
@@ -66,7 +70,7 @@ public struct SteamAppInfo: Sendable, Codable, Equatable {
     /// The same sum over `branch`'s manifests.
     public func installSize(branch: String) -> UInt64? {
         guard let d = try? depots.onBranch(branch) else { return nil }
-        let sizes = Self.content(d.depots).compactMap(\.publicManifestSize)
+        let sizes = Self.content(d.depots, owned: ownedDepots.map(Set.init)).compactMap(\.publicManifestSize)
         return sizes.isEmpty ? nil : sizes.reduce(0, +)
     }
 

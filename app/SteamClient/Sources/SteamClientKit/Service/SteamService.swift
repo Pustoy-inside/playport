@@ -523,11 +523,17 @@ public actor SteamService {
         let licenses = try await backend.awaitLicenses(timeout: 20)
         let ids = try await backend.ownedAppIDs(licenses: licenses)
         let records = try await backend.appRecords(ids)
+        // What an install can download (DepotSelection's "not in an owned package"), so a
+        // game's size before it is installed counts only those depots.
+        let ownedDepots = try? await backend.ownedDepotIDs(licenses: licenses)
         var infos: [SteamAppInfo] = []
         for id in ids {
             guard let kv = records[id] else { continue }
             do {
-                let info = try SteamAppInfo.parse(appID: id, kv)
+                var info = try SteamAppInfo.parse(appID: id, kv)
+                if let owned = ownedDepots ?? nil {
+                    info.ownedDepots = info.depots.depots.map(\.depotID).filter(owned.contains)
+                }
                 infos.append(info)
                 appInfoCache[id] = info
             } catch {

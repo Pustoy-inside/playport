@@ -18,6 +18,8 @@ public protocol SteamBackend: Sendable {
     func awaitLicenses(timeout: Double) async throws -> [CMsgClientLicenseList.License]
     /// The apps the licenses grant (package -> app), sorted by app ID.
     func ownedAppIDs(licenses: [CMsgClientLicenseList.License]) async throws -> [UInt32]
+    /// The depots the licenses' packages list (Library.ownedDepotIDs); nil when unknown.
+    func ownedDepotIDs(licenses: [CMsgClientLicenseList.License]) async throws -> Set<UInt32>?
     /// PICS app records for the given apps; absent ones are withheld by Steam.
     func appRecords(_ appIDs: [UInt32]) async throws -> [UInt32: KeyValue]
     /// The account's persona name, the one games are told (nil when Steam has none).
@@ -47,6 +49,11 @@ public protocol SteamBackend: Sendable {
     var traffic: CMTraffic { get }
 }
 
+extension SteamBackend {
+    /// A backend that cannot tell (a test's): every depot counts.
+    public func ownedDepotIDs(licenses: [CMsgClientLicenseList.License]) async throws -> Set<UInt32>? { nil }
+}
+
 extension SteamSession: SteamBackend {
     public func isLoggedOn() async -> (loggedOn: Bool, anonymous: Bool, connected: Bool) {
         let connected = await cm?.isOpen ?? false
@@ -56,6 +63,10 @@ extension SteamSession: SteamBackend {
 
     public func ownedAppIDs(licenses: [CMsgClientLicenseList.License]) async throws -> [UInt32] {
         try await Library(session: self).ownedAppIDs(packages: licenses.map { ($0.packageID, $0.accessToken) }).keys.sorted()
+    }
+
+    public func ownedDepotIDs(licenses: [CMsgClientLicenseList.License]) async throws -> Set<UInt32>? {
+        try await Library(session: self).ownedDepotIDs(packages: licenses.map { ($0.packageID, $0.accessToken) })
     }
 
     public func appRecords(_ appIDs: [UInt32]) async throws -> [UInt32: KeyValue] {

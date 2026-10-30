@@ -300,6 +300,30 @@ final class DepotSelectionTests: XCTestCase {
         XCTAssertEqual(try DepotSelection.select(info.depots).depots.map(\.depotID), [289461])
     }
 
+    /// Before an install the size counts only the depots the account's packages list,
+    /// as the install downloads (Metal Gear Solid 3 read 71 GB, then installed 24).
+    func testInstallSizeCountsOnlyOwnedDepots() throws {
+        let vdf = """
+        "2131650"
+        {
+            "common" { "name" "Game" "type" "Game" }
+            "depots"
+            {
+                "2131651" { "config" { "oslist" "windows" } "manifests" { "public" { "gid" "1" "size" "24000" } } }
+                "2131652" { "config" { "oslist" "windows" } "manifests" { "public" { "gid" "2" "size" "47000" } } }
+                "branches" { "public" { "buildid" "1" } }
+            }
+        }
+        """
+        var info = try SteamAppInfo.parse(appID: 2131650, try KeyValue.parseText(Array(vdf.utf8)))
+        XCTAssertEqual(info.installSize, 71000)
+        info.ownedDepots = [2131651]
+        XCTAssertEqual(info.installSize, 24000)
+        XCTAssertEqual(try DepotSelection.select(info.depots, .init(ownedDepots: [2131651])).depots.map(\.depotID), [2131651])
+        let cached = try JSONDecoder().decode(SteamAppInfo.self, from: JSONEncoder().encode(info))
+        XCTAssertEqual(cached.ownedDepots, [2131651])
+    }
+
     /// A beta in the clear (The Witcher 3's `classic`) and a password one.
     func testBranches() throws {
         let vdf = """

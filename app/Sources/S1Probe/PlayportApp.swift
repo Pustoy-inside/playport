@@ -32,6 +32,8 @@ struct PlayportApp: App {
         RuntimeCounters.loadAtStart()
         #endif
         MemoryLimit.logAtStart()
+        // The external drive's folder, open before the library and the runtime use it.
+        ExternalStorage.shared.activate()
         // The on-screen controller sets itself up from its constructor (Sources/TouchPad).
         playport_touchpad_linked()
     }

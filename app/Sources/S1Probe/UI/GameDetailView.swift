@@ -893,8 +893,10 @@ private struct GameDetailPage: View {
                    value: "\(r.files.count) file\(r.files.count == 1 ? "" : "s")", changed: true, style: .plain, hint: "Info",
                    reset: { mods.forget(t.id) }) {}
         }
-        PadRow(id: "opt:folder", title: "The game's folder in Files",
-               subtitle: "On My iPhone › Playport › prefix › drive_c › Games › \(t.installDir)", style: .plain, hint: "") {}
+        let onDrive = ExternalStorage.target(of: LibraryModel.paths.games.appendingPathComponent(t.installDir, isDirectory: true))
+        PadRow(id: "opt:folder", title: onDrive == nil ? "The game's folder in Files" : "On the external drive",
+               subtitle: onDrive.map { "Files › your drive › …/\($0.deletingLastPathComponent().lastPathComponent)/\($0.lastPathComponent)" }
+                   ?? "On My iPhone › Playport › prefix › drive_c › Games › \(t.installDir)", style: .plain, hint: "") {}
     }
 
     @ViewBuilder

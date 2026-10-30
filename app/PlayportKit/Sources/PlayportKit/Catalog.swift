@@ -246,7 +246,9 @@ public enum Adoption {
             if receipts.contains(where: { $0.appID == CommonRedistributables.appID && $0.installDir.lowercased() == folder.lowercased() }) {
                 continue
             }
-            let dir = games.appendingPathComponent(folder, isDirectory: true)
+            // A folder on the external drive is a link here (the app's ExternalStorage): its files are read where it points.
+            let entry = games.appendingPathComponent(folder, isDirectory: true)
+            let dir = (try? fm.destinationOfSymbolicLink(atPath: entry.path)).map { URL(fileURLWithPath: $0, isDirectory: true) } ?? entry
             let exes = executables(in: dir)
             var found: [InstalledTitle] = []
             // A Steam install can reuse a cohort folder with a different build or branch.

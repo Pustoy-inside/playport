@@ -335,6 +335,8 @@ private struct DownloadSettings: View {
     @AppStorage(DownloadPreferences.cellularKey) private var cellular = false
     @AppStorage(DownloadPreferences.dimKey) private var dim = true
     @AppStorage(DownloadPreferences.backgroundKey) private var background = false
+    @AppStorage(ExternalStorage.installKey) private var installExternal = false
+    @ObservedObject private var drive = ExternalStorage.shared
     @AppStorage(SteamAccountModel.cloudKey) private var steamCloud = true
     @ObservedObject private var network = NetworkPath.shared
 
@@ -348,9 +350,21 @@ private struct DownloadSettings: View {
                           subtitle: "After a minute without input", on: $dim)
         SettingsSwitchRow(id: "background", title: "Download in the background",
                           subtitle: "Keeps going with Playport closed or the phone locked", on: $background)
+        PadRow(id: "set:drive", title: "External drive (experimental)",
+               subtitle: drive.name.map { drive.root == nil ? "\($0): not connected" : "\($0), connected" }
+                   ?? "Choose a folder on a USB-C drive in Files",
+               value: drive.name == nil ? "Choose" : "Change", accessory: .chevron, hint: "Choose",
+               reset: drive.name == nil ? nil : { drive.forget() }) { ExternalStorage.requests.send() }
+        if drive.name != nil {
+            SettingsSwitchRow(id: "installExternal", title: "Install on the external drive",
+                              subtitle: "New Steam games go to the drive", on: $installExternal)
+        }
         SettingsSwitchRow(id: "steamCloud", title: "Sync saves with Steam Cloud",
                           subtitle: "For every game that supports it", on: $steamCloud)
-        SettingsNote(text: "In the background Playport plays silence while a download runs, which keeps iOS from "
+        SettingsNote(text: "A game on the external drive plays only while the drive is connected, and runs from it: "
+                     + "a fast SSD keeps loading close to the phone's own. Y on External drive forgets the folder; "
+                     + "the games on it stay there. "
+                     + "In the background Playport plays silence while a download runs, which keeps iOS from "
                      + "pausing it; it stops when the downloads are done. iOS can still close Playport when the phone "
                      + "runs short of memory: the download then goes on when Playport opens again. "
                      + "A game's saves come from Steam Cloud when its page opens, and go back after a play. "

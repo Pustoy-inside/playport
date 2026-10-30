@@ -42,6 +42,8 @@ struct AppShell: View {
     @State private var importingGame = false
     /// A game page's Add files or Run a program (GameMods), when that is what the picker is for.
     @State private var importingMod: GameMods.Pick?
+    /// Settings' Choose the external drive's folder (ExternalStorage).
+    @State private var importingDrive = false
     @ObservedObject private var gog = GOGAccount.shared
     @ObservedObject private var epic = EpicAccount.shared
 
@@ -104,9 +106,12 @@ struct AppShell: View {
         // game to import (Library › Add a game): touch only, as Files is. One picker for both:
         // SwiftUI presents only one fileImporter per hierarchy reliably.
         .fileImporter(isPresented: $importing,
-                      allowedContentTypes: importingMod?.contentTypes
+                      allowedContentTypes: importingDrive ? [.folder] : importingMod?.contentTypes
                           ?? (importingGame ? GameImports.contentTypes : [.propertyList, .xml, .data])) { result in
-            if let pick = importingMod {
+            if importingDrive {
+                importingDrive = false
+                if case let .success(url) = result { ExternalStorage.shared.picked(url) }
+            } else if let pick = importingMod {
                 importingMod = nil
                 guard case let .success(url) = result else { return }
                 Task { await GameMods.shared.picked(url, for: pick) }
@@ -123,6 +128,7 @@ struct AppShell: View {
             }
         }
         .onReceive(SettingsImport.requests) {
+            importingDrive = false
             importingMod = nil
             importingGame = false
             importing = true
@@ -130,11 +136,18 @@ struct AppShell: View {
         // GOG's and Epic's sign-in pages (touch: a web page, as iOS draws it; decision 0058).
         .sheet(isPresented: $gog.signingIn) { GOGSignInSheet() }
         .sheet(isPresented: $epic.signingIn) { EpicSignInSheet() }
+        .onReceive(ExternalStorage.requests) {
+            importingMod = nil
+            importingDrive = true
+            importing = true
+        }
         .onReceive(GameMods.requests) { pick in
+            importingDrive = false
             importingMod = pick
             importing = true
         }
         .onReceive(GameImports.requests) {
+            importingDrive = false
             importingMod = nil
             importingGame = true
             importing = true

@@ -704,8 +704,15 @@ final class LibraryModel: ObservableObject {
         Task.detached(priority: .userInitiated) {
             var failure: String?
             do {
+                // A game on the external drive: C:\Games has a link to it, which the uninstall takes
+                // away; the folder on the drive goes after it (ExternalStorage).
+                let there = ExternalStorage.target(of: LibraryModel.paths.games.appendingPathComponent(t.installDir, isDirectory: true))
                 try TitleInstaller(layout: LibraryModel.paths.layout, session: nil, log: SteamUILog.logger)
                     .uninstall(installDir: t.installDir, appID: t.appID)
+                if let there {
+                    try? FileManager.default.removeItem(at: there)
+                    LibraryModel.log("uninstall \(t.name): its folder on the external drive removed")
+                }
                 // Another store's or an import's receipt (decision 0057).
                 if t.store != .steam { LibraryModel.paths.layout.removeReceipt(t.key) }
                 if t.store == .gog { await GOGAccount.shared.installer.forget(productID: t.key.id) }

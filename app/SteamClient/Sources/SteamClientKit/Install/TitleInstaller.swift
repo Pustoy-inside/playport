@@ -491,7 +491,7 @@ public struct TitleInstaller: Sendable {
             let src = try InstallFS.resolveInside(final, SteamAPISwap.manifestFile(final, f.path), createParents: false)
             let dst = try InstallFS.resolveInside(tree, f.path, createParents: true)
             _ = unlink(dst.path)
-            guard link(src.path, dst.path) == 0 else { throw SteamError.transport("cannot keep \(f.path) for the update (errno \(errno))") }
+            guard Self.keep(src, dst) else { throw SteamError.transport("cannot keep \(f.path) for the update (errno \(errno))") }
         }
         var known = Set(plan.files.map { $0.path.lowercased() })
         if let previous, let old = try? retainedPlan(previous) { known.formUnion(old.files.map { $0.path.lowercased() }) }
@@ -499,9 +499,17 @@ public struct TitleInstaller: Sendable {
         for p in Self.regularFiles(under: final) where !known.contains(p.lowercased()) && !SteamAPISwap.isSwapFile(final, p) {
             guard let src = try? InstallFS.resolveInside(final, p, createParents: false),
                   let dst = try? InstallFS.resolveInside(tree, p, createParents: true) else { continue }
-            if link(src.path, dst.path) == 0 { kept += 1 } else { log.warn("install", "\(p) is not kept across the update (errno \(errno))") }
+            if Self.keep(src, dst) { kept += 1 } else { log.warn("install", "\(p) is not kept across the update (errno \(errno))") }
         }
         if kept > 0 { say("update: \(kept) file(s) the game made in its folder kept (saves, settings)") }
+    }
+
+    /// `src` at `dst` too: a hard link, or a copy where the volume makes none (exFAT, an
+    /// external drive's usual format; Playport's ExternalStorage).
+    static func keep(_ src: URL, _ dst: URL) -> Bool {
+        if link(src.path, dst.path) == 0 { return true }
+        guard [EPERM, ENOTSUP, EOPNOTSUPP, EXDEV, EMLINK].contains(errno) else { return false }
+        return (try? FileManager.default.copyItem(at: src, to: dst)) != nil
     }
 
     /// Renames the stage into place and records it before the previous

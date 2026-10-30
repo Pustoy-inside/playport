@@ -34,7 +34,11 @@ final class SteamInstalls: DownloadDriver {
 
     func run(_ job: DownloadJob, progress: @escaping @Sendable (InstallEngine.Progress) -> Void) async throws -> UInt64? {
         guard let appID = job.appID else { throw ClientError.unsupported("\(job.key) is not a Steam game") }
-        let installer = try await service.titleInstaller(layout: layout)
+        // On the external drive for a game there, or a new install while Settings says so (ExternalStorage).
+        let place = try ExternalStorage.shared.place(appID: appID, base: layout)
+        var drive: InstallLayout?
+        if case let .drive(l) = place { drive = l }
+        let installer = try await service.titleInstaller(layout: drive ?? layout)
         var engine = InstallEngine.Options()
         engine.progressInterval = 0.5
         // The progress lines go to the log from the queue, less often.
@@ -44,6 +48,7 @@ final class SteamInstalls: DownloadDriver {
         switch job.kind {
         case .install, .update:
             let r = try await installer.install(.init(appID: appID, branch: job.branch, engine: engine), progress: progress, say: say)
+            if let drive { try ExternalStorage.shared.link(appID: appID, drive: drive, base: layout) }
             return job.kind == .install ? r.stage?.bytes : r.stage?.downloadedBytes
         case .repair:
             let r = try await installer.repair(appID: appID, engine: engine, progress: progress, say: say)
@@ -69,7 +74,11 @@ final class SteamInstalls: DownloadDriver {
         where n.hasPrefix("\(appID)_") && n.hasSuffix(".journal") {
             try? FileManager.default.removeItem(at: layout.stagingRoot.appendingPathComponent(n))
         }
-        Task.detached(priority: .utility) { installer.discardStage(appID: appID) }
+        let drive = ExternalStorage.shared.layout(base: layout).map { TitleInstaller(layout: $0, session: nil, log: SteamUILog.logger) }
+        Task.detached(priority: .utility) {
+            installer.discardStage(appID: appID)
+            drive?.discardStage(appID: appID)
+        }
     }
 
     func reason(_ error: Error) -> String { InstallCopy.reason(error) }

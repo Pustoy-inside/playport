@@ -399,11 +399,19 @@ private struct StorageSettings: View {
     var body: some View {
         SettingsNote(text: "Games and their saves live inside Playport. Deleting the app deletes them.")
         SettingsInfoRow(id: "free", title: "Free on this phone", value: library.freeBytes.map(ByteCount.format) ?? "Unknown")
-        let used = library.catalog.titles.compactMap(\.sizeBytes).reduce(0, +)
-        SettingsInfoRow(id: "games", title: "Games", subtitle: "\(library.catalog.titles.count) installed",
+        let onDrive = Set(library.catalog.titles.filter(ExternalStorage.onDrive).map(\.id))
+        let phone = library.catalog.titles.filter { !onDrive.contains($0.id) }
+        let used = phone.compactMap(\.sizeBytes).reduce(0, +)
+        SettingsInfoRow(id: "games", title: "Games on this phone", subtitle: "\(phone.count) installed",
                         value: ByteCount.format(used))
+        if !onDrive.isEmpty {
+            let there = library.catalog.titles.filter { onDrive.contains($0.id) }.compactMap(\.sizeBytes).reduce(0, +)
+            SettingsInfoRow(id: "driveGames", title: "Games on the external drive", subtitle: "\(onDrive.count) installed",
+                            value: ByteCount.format(there))
+        }
         ForEach(library.catalog.titles.sorted { ($0.sizeBytes ?? 0) > ($1.sizeBytes ?? 0) }) { t in
-            PadRow(id: "set:title:\(t.id)", title: t.name, value: t.sizeBytes.map(ByteCount.format) ?? "Unknown",
+            PadRow(id: "set:title:\(t.id)", title: t.name, subtitle: onDrive.contains(t.id) ? "On the external drive" : nil,
+                   value: t.sizeBytes.map(ByteCount.format) ?? "Unknown",
                    accessory: .chevron, hint: "Open") {
                 AppNavigation.shared.openTitle(t.id)
             }

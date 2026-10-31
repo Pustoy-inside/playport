@@ -775,6 +775,28 @@ final class LibraryServiceTests: XCTestCase {
         XCTAssertNil(renewal)
     }
 
+    /// A games list cached before the owned depots were kept (no version) is fetched again,
+    /// or every size before install would count every depot.
+    func testCacheOfAnOlderVersionIsFetchedAgain() async throws {
+        let b = FakeBackend()
+        await b.set(library: [10], [10: Self.record(10, name: "Alpha")])
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("svc-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let s = await signedIn(b, dir: dir)
+        _ = try await s.ownedGames(refresh: true)
+        let file = dir.appendingPathComponent("steam-games.json")
+        var json = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(contentsOf: file)) as? [String: Any])
+        XCTAssertEqual(json["version"] as? Int, 2)
+        let s2 = await signedIn(b, dir: dir)
+        let fresh = await s2.cachedGames()
+        XCTAssertNotNil(fresh)
+        json["version"] = nil
+        try JSONSerialization.data(withJSONObject: json).write(to: file)
+        let s3 = await signedIn(b, dir: dir)
+        let old = await s3.cachedGames()
+        XCTAssertNil(old)
+    }
+
     func testCacheIsPerAccount() async throws {
         let b = FakeBackend()
         await b.set(library: [10], [10: Self.record(10, name: "Alpha")])

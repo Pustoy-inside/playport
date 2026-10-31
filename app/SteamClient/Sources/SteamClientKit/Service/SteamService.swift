@@ -508,7 +508,9 @@ public actor SteamService {
     /// before branches were read (so the version picker has them).
     public func cachedGames() -> (games: [SteamGame], fetchedAt: Date)? {
         guard let tag = state.account?.accountTag, let snap = loadGamesCache(), snap.accountTag == tag,
+              (snap.version ?? 0) >= Self.gamesVersion,
               !snap.games.contains(where: { $0.info.depots.branches == nil }) else { return nil }
+        if ownedDepotSet?.tag != tag, let d = snap.ownedDepots { ownedDepotSet = (tag: tag, depots: d) }
         return (snap.games, snap.fetchedAt)
     }
 
@@ -525,13 +527,26 @@ public actor SteamService {
         let records = try await backend.appRecords(ids)
         // What an install can download (DepotSelection's "not in an owned package"), so a
         // game's size before it is installed counts only those depots.
-        let ownedDepots = try? await backend.ownedDepotIDs(licenses: licenses)
+        // A failed read keeps the last list's, so the sizes do not jump to every depot's sum.
+        var ownedDepots: Set<UInt32>?
+        do {
+            ownedDepots = try await backend.ownedDepotIDs(licenses: licenses)
+        } catch {
+            log.warn("library", "owned depots unknown (\(error)); the last known are kept")
+        }
+        if ownedDepots?.isEmpty == true { ownedDepots = nil }
+        let tag = account.accountTag
+        if ownedDepots == nil {
+            if let last = ownedDepotSet, last.tag == tag { ownedDepots = last.depots }
+            else if let snap = loadGamesCache(), snap.accountTag == tag { ownedDepots = snap.ownedDepots }
+        }
+        ownedDepotSet = ownedDepots.map { (tag: tag, depots: $0) }
         var infos: [SteamAppInfo] = []
         for id in ids {
             guard let kv = records[id] else { continue }
             do {
                 var info = try SteamAppInfo.parse(appID: id, kv)
-                if let owned = ownedDepots ?? nil {
+                if let owned = ownedDepots {
                     info.ownedDepots = info.depots.depots.map(\.depotID).filter(owned.contains)
                 }
                 infos.append(info)
@@ -542,7 +557,8 @@ public actor SteamService {
         }
         let games = SteamGame.games(from: infos)
         log.info("library", "\(licenses.count) licenses, \(ids.count) apps, \(games.count) games")
-        saveGamesCache(GamesSnapshot(accountTag: account.accountTag, fetchedAt: now(), games: games))
+        saveGamesCache(GamesSnapshot(accountTag: account.accountTag, fetchedAt: now(), games: games,
+                                     version: Self.gamesVersion, ownedDepots: ownedDepots))
         return games
     }
 
@@ -561,7 +577,8 @@ public actor SteamService {
             }
         }
         guard let kv = try await backend.appRecords([appID])[appID] else { throw SteamError.notFound("PICS app \(appID)") }
-        let info = try SteamAppInfo.parse(appID: appID, kv)
+        var info = try SteamAppInfo.parse(appID: appID, kv)
+        if let owned = ownedDepotSet?.depots, ownedDepotSet?.tag == state.account?.accountTag { info.ownedDepots = info.depots.depots.map(\.depotID).filter(owned.contains) }
         appInfoCache[appID] = info
         return info
     }
@@ -1129,7 +1146,16 @@ public actor SteamService {
         var accountTag: String
         var fetchedAt: Date
         var games: [SteamGame]
+        /// 2: written once the games carry their owned depots (sizes before install). A list
+        /// cached before that (nil) is fetched again, or every size counts every depot.
+        var version: Int? = nil
+        /// The depots the account's packages list, when they were read.
+        var ownedDepots: Set<UInt32>? = nil
     }
+
+    static let gamesVersion = 2
+    /// The owned depots of the last games list (cached or fetched): single-app lookups use them too.
+    private var ownedDepotSet: (tag: String, depots: Set<UInt32>)?
 
     private var gamesURL: URL? { stateDirectory?.appendingPathComponent(Self.gamesFile) }
     private var memoryGames: GamesSnapshot?

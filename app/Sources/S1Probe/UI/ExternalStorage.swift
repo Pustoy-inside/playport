@@ -127,6 +127,11 @@ final class ExternalStorage: ObservableObject {
         return URL(fileURLWithPath: dest, isDirectory: true)
     }
 
+    /// A game whose C:\Games folder is a link to the drive: its size is the drive's, not the phone's.
+    nonisolated static func onDrive(_ t: InstalledTitle) -> Bool {
+        target(of: LibraryModel.paths.games.appendingPathComponent(t.installDir, isDirectory: true)) != nil
+    }
+
     enum Choice {
         case phone
         case drive(InstallLayout)

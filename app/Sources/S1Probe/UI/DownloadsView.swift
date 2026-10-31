@@ -85,7 +85,9 @@ struct DownloadsPage: View {
     private var whileYouWait: some View {
         VStack(alignment: .leading, spacing: 8) {
             SmallCaps("While you wait")
-            Text("Downloads need Playport open. After a minute the screen dims to save power; plug in for big games.")
+            Text(UserDefaults.standard.bool(forKey: DownloadPreferences.backgroundKey)
+                 ? "Downloads go on with Playport closed or the phone locked (Settings › Downloads). Plug in for big games."
+                 : "Downloads need Playport open. After a minute the screen dims to save power; plug in for big games.")
                 .font(.system(size: 13)).foregroundStyle(PP.soft).lineSpacing(2)
                 .fixedSize(horizontal: false, vertical: true)
             HStack(spacing: 8) {
@@ -271,7 +273,10 @@ struct StorageBar: View {
     var body: some View {
         let total = library.totalBytes ?? 0
         let free = library.freeBytes ?? 0
-        let games = library.catalog.titles.compactMap(\.sizeBytes).reduce(0, +)
+        // A game on the external drive takes the drive's space, not the phone's.
+        let split = Dictionary(grouping: library.catalog.titles) { ExternalStorage.onDrive($0) }
+        let games = (split[false] ?? []).compactMap(\.sizeBytes).reduce(0, +)
+        let driveGames = (split[true] ?? []).compactMap(\.sizeBytes).reduce(0, +)
         let used = total > free ? total - free : 0
         let other = used > games ? used - games : 0
         // Both fit the 48-point top bar: a little smaller with the drive's under the phone's.
@@ -304,8 +309,10 @@ struct StorageBar: View {
                 .padding(.top, 1)
                 GeometryReader { geo in
                     HStack(spacing: 0) {
-                        Rectangle().fill(Color(hex: 0x4A5667))
-                            .frame(width: part(c.total > c.free ? c.total - c.free : 0, c.total) * geo.size.width)
+                        let used = c.total > c.free ? c.total - c.free : 0
+                        let ours = min(driveGames, used)
+                        Rectangle().fill(PP.progress).frame(width: part(ours, c.total) * geo.size.width)
+                        Rectangle().fill(Color(hex: 0x4A5667)).frame(width: part(used - ours, c.total) * geo.size.width)
                         Spacer(minLength: 0)
                     }
                 }

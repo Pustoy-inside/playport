@@ -78,7 +78,7 @@ jobs:
         run: |
           set -o pipefail
           swift test --package-path app/SteamClient --filter \
-              'SteamClientKitTests\.(CloudServiceTests|CloudTests|DepotSelectionTests|VerifyRepairTests)' \
+              'SteamClientKitTests\.(CloudServiceTests|CloudTests|DepotSelectionTests|VerifyRepairTests|LibraryServiceTests/testCache)' \
               2>&1 | tee "$RUNNER_TEMP/steam.log" || {
             grep -E 'error:|failed' "$RUNNER_TEMP/steam.log" | head -30 | sed 's/^/::error::/'; exit 1; }
   build:

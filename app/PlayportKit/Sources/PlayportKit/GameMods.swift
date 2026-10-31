@@ -80,7 +80,7 @@ extension GameImporter {
         guard fm.fileExists(atPath: dir.path, isDirectory: &isDir), isDir.boolValue else {
             throw ImportError.refused("the game's folder is not there")
         }
-        try checkSpace(toCopy: plan.totalBytes)
+        try checkSpace(toCopy: plan.totalBytes, in: dir)
         var names = CaselessNames()
         var prefix: [String] = []
         let top: String?
@@ -157,7 +157,7 @@ extension GameImporter {
             target = e.name
         }
         let size = InstallFS.fileSize(src) ?? 0
-        try checkSpace(toCopy: size)
+        try checkSpace(toCopy: size, in: dir)
         let part = dir.appendingPathComponent(".\(target).part")
         try? FileManager.default.removeItem(at: part)
         try Self.copy(src, part) { _ in }

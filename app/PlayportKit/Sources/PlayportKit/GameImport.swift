@@ -291,9 +291,10 @@ public struct GameImporter: Sendable {
         toCopy + UInt64(Double(toCopy) * marginFraction) + reserveBytes
     }
 
-    func checkSpace(toCopy: UInt64) throws {
+    /// Room for `toCopy` on the volume of `dir` (a game on an external drive: the drive's), else of the games.
+    func checkSpace(toCopy: UInt64, in dir: URL? = nil) throws {
         let needed = spaceNeeded(toCopy: toCopy)
-        let available = try freeSpace(layout.gamesRoot)
+        let available = try freeSpace(dir?.resolvingSymlinksInPath() ?? layout.gamesRoot)
         guard available >= needed else { throw ImportError.insufficientSpace(needed: needed, available: available) }
     }
 

@@ -521,12 +521,16 @@ private struct GameDetailPage: View {
             Text("Sign in to Steam to download.")
         } else if let job {
             if case let .paused(reason?) = job.phase { Text(reason).foregroundStyle(.orange) }
-            if job.isRunning { Text("Keep Playport open: the download pauses when it leaves the screen.") }
+            if job.isRunning, !UserDefaults.standard.bool(forKey: DownloadPreferences.backgroundKey) {
+                Text("Keep Playport open: the download pauses when it leaves the screen.")
+            }
         } else {
             let need = g.info.installSize(branch: selectedBranch).map { "Needs \(ByteCount.format($0))" }
-            let free = library.freeBytes.map { "\(ByteCount.format($0)) free" }
-            let parts = [need, free].compactMap { $0 }
-            if !parts.isEmpty { Text(parts.joined(separator: " · ") + " · keep Playport open while it downloads") }
+            let free = library.freeBytes.map { "\(ByteCount.format($0)) free" + (ExternalStorage.shared.root == nil ? "" : " on iPhone") }
+            let onDrive = ExternalStorage.shared.capacity().map { "\(ByteCount.format($0.free)) on the drive" }
+            let parts = [need, free, onDrive].compactMap { $0 }
+            let open = UserDefaults.standard.bool(forKey: DownloadPreferences.backgroundKey) ? "" : " · keep Playport open while it downloads"
+            if !parts.isEmpty { Text(parts.joined(separator: " · ") + open) }
         }
     }
 
@@ -541,7 +545,8 @@ private struct GameDetailPage: View {
                 rows.append(("Version", BranchLabel.text(b, in: g?.info), nil))
             }
             if t.appID != nil { rows.append(("Cloud saves", cloudStatus(t).0, cloudStatus(t).1)) }
-            rows.append(("On this phone", t.sizeBytes.map(ByteCount.format) ?? "Unknown", nil))
+            rows.append((ExternalStorage.onDrive(t) ? "On the external drive" : "On this phone",
+                         t.sizeBytes.map(ByteCount.format) ?? "Unknown", nil))
         } else if let g {
             if let s = g.info.installSize(branch: selectedBranch) { rows.append(("Download", ByteCount.format(s), nil)) }
             if branches.count > 1 { rows.append(("Version", BranchLabel.text(selectedBranch, in: g.info), nil)) }

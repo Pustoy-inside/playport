@@ -335,7 +335,6 @@ private struct DownloadSettings: View {
     @AppStorage(DownloadPreferences.cellularKey) private var cellular = false
     @AppStorage(DownloadPreferences.dimKey) private var dim = true
     @AppStorage(DownloadPreferences.backgroundKey) private var background = false
-    @AppStorage(ExternalStorage.installKey) private var installExternal = false
     @ObservedObject private var drive = ExternalStorage.shared
     @AppStorage(SteamAccountModel.cloudKey) private var steamCloud = true
     @ObservedObject private var network = NetworkPath.shared
@@ -355,13 +354,10 @@ private struct DownloadSettings: View {
                    ?? "Choose a folder on a USB-C drive in Files",
                value: drive.name == nil ? "Choose" : "Change", accessory: .chevron, hint: "Choose",
                reset: drive.name == nil ? nil : { drive.forget() }) { ExternalStorage.requests.send() }
-        if drive.name != nil {
-            SettingsSwitchRow(id: "installExternal", title: "Install on the external drive",
-                              subtitle: "New Steam games go to the drive", on: $installExternal)
-        }
         SettingsSwitchRow(id: "steamCloud", title: "Sync saves with Steam Cloud",
                           subtitle: "For every game that supports it", on: $steamCloud)
-        SettingsNote(text: "A game on the external drive plays only while the drive is connected, and runs from it: "
+        SettingsNote(text: "With the drive connected, Install asks whether a new Steam game goes to the iPhone or the drive. "
+                     + "A game on the external drive plays only while the drive is connected, and runs from it: "
                      + "a fast SSD keeps loading close to the phone's own. Y on External drive forgets the folder; "
                      + "the games on it stay there. "
                      + "In the background Playport plays silence while a download runs, which keeps iOS from "

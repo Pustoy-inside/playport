@@ -3,8 +3,9 @@
 // experimental). The player picks a folder on a drive in Files; Playport keeps
 // a bookmark to it and opens it at every start, before the runtime, so the
 // whole process (the installer, Wine, the emulator) can use it while it runs.
-// With "Install on the external drive" on, a new Steam install is staged and
-// placed in <folder>/Playport Games/<installdir>, and C:\Games\<installdir> is
+// While the drive is connected, Install asks where a new Steam game goes; one
+// for the drive is staged and placed in <folder>/Playport Games/<installdir>
+// (the choice is kept per game until it is installed), and C:\Games\<installdir> is
 // a symbolic link to it: the library, the launch and Wine find the game where
 // they always do. An update or a repair of such a game works on the drive. With
 // the drive away, its games are not in the library until it is back.
@@ -19,7 +20,8 @@ final class ExternalStorage: ObservableObject {
     static let shared = ExternalStorage()
 
     static let bookmarkKey = "storage.external.bookmark"
-    static let installKey = "storage.external.install"
+    /// The Steam games chosen for the drive at Install and not installed yet.
+    static let pendingKey = "storage.external.pending"
     /// Settings' Choose the drive's folder: the shell opens the Files picker (AppShell).
     static let requests = PassthroughSubject<Void, Never>()
 
@@ -76,11 +78,39 @@ final class ExternalStorage: ObservableObject {
         root = nil
         name = nil
         UserDefaults.standard.removeObject(forKey: Self.bookmarkKey)
-        UserDefaults.standard.set(false, forKey: Self.installKey)
+        UserDefaults.standard.removeObject(forKey: Self.pendingKey)
         Self.log("external drive folder forgotten")
     }
 
-    static var installsThere: Bool { UserDefaults.standard.bool(forKey: installKey) }
+    private static var pending: Set<UInt32> {
+        get { Set((UserDefaults.standard.array(forKey: pendingKey) as? [Int] ?? []).map { UInt32($0) }) }
+        set { UserDefaults.standard.set(newValue.sorted().map { Int($0) }, forKey: pendingKey) }
+    }
+
+    /// Install's choice for a new game: the drive or the phone.
+    func choose(appID: UInt32, drive: Bool) {
+        if drive { Self.pending.insert(appID) } else { Self.pending.remove(appID) }
+        Self.log("\(appID) goes to \(drive ? "the external drive" : "the phone")")
+    }
+
+    func chosenDrive(_ appID: UInt32) -> Bool { Self.pending.contains(appID) }
+
+    /// A discarded download: its choice is asked again at the next Install.
+    func unchoose(_ appID: UInt32) { Self.pending.remove(appID) }
+
+    /// The drive's free and total bytes while it is connected.
+    func capacity() -> (free: UInt64, total: UInt64)? {
+        guard let root else { return nil }
+        let v = try? root.resourceValues(forKeys: [.volumeAvailableCapacityKey, .volumeTotalCapacityKey])
+        var free = UInt64(max(0, v?.volumeAvailableCapacity ?? 0))
+        var total = UInt64(max(0, v?.volumeTotalCapacity ?? 0))
+        var s = statfs()
+        if statfs(root.path, &s) == 0 {
+            free = max(free, UInt64(s.f_bavail) * UInt64(s.f_bsize))
+            total = max(total, UInt64(s.f_blocks) * UInt64(s.f_bsize))
+        }
+        return total > 0 ? (free, total) : nil
+    }
 
     /// The layout of installs on the drive: its staging and games beside each other on it (the
     /// commit is one rename), the records where they always are.
@@ -103,7 +133,7 @@ final class ExternalStorage: ObservableObject {
     }
 
     /// Where a Steam job for `appID` works: on the drive for a game already there (its C:\Games
-    /// entry is a link) or for a new install while Settings says so; on the phone otherwise.
+    /// entry is a link) or for a new install chosen for it at Install; on the phone otherwise.
     func place(appID: UInt32, base: InstallLayout) throws -> Choice {
         let receipt = TitleInstaller(layout: base, session: nil, log: .silent).loadReceipt(appID)
         if let r = receipt {
@@ -114,10 +144,14 @@ final class ExternalStorage: ObservableObject {
             }
             return .drive(l)
         }
-        guard Self.installsThere else { return .phone }
+        // A download left on the drive goes on there.
+        if let l = layout(base: base), TitleInstaller(layout: l, session: nil, log: .silent).hasStage(appID: appID) {
+            return .drive(l)
+        }
+        guard Self.pending.contains(appID) else { return .phone }
         guard let l = layout(base: base) else {
             throw SteamError.unsupported("the external drive is not connected: connect it and open Playport again, "
-                                         + "or turn Install on the external drive off")
+                                         + "or discard the download and install it on the iPhone")
         }
         return .drive(l)
     }
@@ -127,6 +161,7 @@ final class ExternalStorage: ObservableObject {
         guard let r = TitleInstaller(layout: base, session: nil, log: .silent).loadReceipt(appID) else { return }
         let entry = base.gamesRoot.appendingPathComponent(r.installDir, isDirectory: true)
         let there = drive.gamesRoot.appendingPathComponent(r.installDir, isDirectory: true)
+        Self.pending.remove(appID)
         if Self.target(of: entry)?.standardizedFileURL.path == there.standardizedFileURL.path { return }
         try FileManager.default.createDirectory(at: base.gamesRoot, withIntermediateDirectories: true)
         if Self.target(of: entry) != nil { try FileManager.default.removeItem(at: entry) }

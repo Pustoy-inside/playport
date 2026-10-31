@@ -262,9 +262,11 @@ private struct JobRow: View {
     }
 }
 
-/// The top bar's storage on Downloads: free of the phone's total, the games and the rest used.
+/// The top bar's storage on Downloads: free of the phone's total, the games and the rest used;
+/// under it the external drive's, while it is connected.
 struct StorageBar: View {
     @ObservedObject private var library = LibraryModel.shared
+    @ObservedObject private var drive = ExternalStorage.shared
 
     var body: some View {
         let total = library.totalBytes ?? 0
@@ -272,13 +274,16 @@ struct StorageBar: View {
         let games = library.catalog.titles.compactMap(\.sizeBytes).reduce(0, +)
         let used = total > free ? total - free : 0
         let other = used > games ? used - games : 0
-        VStack(spacing: 3) {
+        // Both fit the 48-point top bar: a little smaller with the drive's under the phone's.
+        let disk = drive.root == nil ? nil : drive.capacity()
+        let font: CGFloat = disk == nil ? 11 : 10, bar: CGFloat = disk == nil ? 5 : 4
+        VStack(spacing: disk == nil ? 3 : 2) {
             HStack {
-                Text("Storage")
+                Text(disk == nil ? "Storage" : "iPhone")
                 Spacer()
                 Text(total > 0 ? "\(ByteCount.format(free)) free of \(ByteCount.format(total))" : "Unknown")
             }
-            .font(.system(size: 11)).foregroundStyle(PP.muted)
+            .font(.system(size: font)).foregroundStyle(PP.muted)
             GeometryReader { geo in
                 HStack(spacing: 0) {
                     Rectangle().fill(PP.progress).frame(width: part(games, total) * geo.size.width)
@@ -286,9 +291,28 @@ struct StorageBar: View {
                     Spacer(minLength: 0)
                 }
             }
-            .frame(height: 5)
+            .frame(height: bar)
             .background(PP.line)
             .clipShape(Capsule())
+            if let c = disk {
+                HStack {
+                    Text(drive.name ?? "External drive").lineLimit(1)
+                    Spacer()
+                    Text("\(ByteCount.format(c.free)) free of \(ByteCount.format(c.total))")
+                }
+                .font(.system(size: font)).foregroundStyle(PP.muted)
+                .padding(.top, 1)
+                GeometryReader { geo in
+                    HStack(spacing: 0) {
+                        Rectangle().fill(Color(hex: 0x4A5667))
+                            .frame(width: part(c.total > c.free ? c.total - c.free : 0, c.total) * geo.size.width)
+                        Spacer(minLength: 0)
+                    }
+                }
+                .frame(height: bar)
+                .background(PP.line)
+                .clipShape(Capsule())
+            }
         }
         .frame(width: 200)
     }

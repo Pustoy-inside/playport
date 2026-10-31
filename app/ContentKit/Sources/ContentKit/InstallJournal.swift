@@ -244,9 +244,19 @@ public enum InstallFS {
     /// Space the system will let an important, user-started download use.
     public static func availableCapacity(_ url: URL) throws -> UInt64 {
         #if canImport(Darwin)
-        let v = try url.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
-        guard let bytes = v.volumeAvailableCapacityForImportantUsage else { throw ClientError.transport("free space unavailable") }
-        return UInt64(max(0, bytes))
+        // "Important usage" counts what iOS would purge for an install; it is an APFS figure, and an
+        // external drive (exFAT through Files) reports 0 there. The volume's own free space, and
+        // statfs's, are taken too: the largest of them.
+        // A folder not made yet (the drive's Playport Games before its first install): its nearest parent's volume.
+        var url = url
+        while !FileManager.default.fileExists(atPath: url.path), url.pathComponents.count > 1 { url = url.deletingLastPathComponent() }
+        let v = try? url.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey, .volumeAvailableCapacityKey])
+        var best = UInt64(max(0, v?.volumeAvailableCapacityForImportantUsage ?? 0))
+        best = max(best, UInt64(max(0, v?.volumeAvailableCapacity ?? 0)))
+        var s = statfs()
+        if statfs(url.path, &s) == 0 { best = max(best, UInt64(s.f_bavail) * UInt64(s.f_bsize)) }
+        guard best > 0 || v != nil else { throw ClientError.transport("free space unavailable") }
+        return best
         #else
         var s = statvfs()
         guard statvfs(url.path, &s) == 0 else { throw ClientError.transport("statvfs errno \(errno)") }

@@ -37,6 +37,11 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
+      - name: The app's build name matches the requested build
+        run: |
+          want="Dishnur $(jq -r '.build // .request' ci/build-request.json)"
+          have=$(plutil -extract PlayportBuildName raw app/Info.plist)
+          [ "$have" = "$want" ] || { echo "::error::app/Info.plist PlayportBuildName is '$have', the request is '$want'"; exit 1; }
       - name: Compile the on-screen controller for iOS before the long build
         run: |
           sudo xcode-select -s /Applications/Xcode_26.6.app

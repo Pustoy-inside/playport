@@ -466,7 +466,7 @@ private struct AboutSettings: View {
                      + "Wine, FEX-Emu and DXMT in one process.")
         SettingsInfoRow(id: "version", title: "Version", value: version)
         #if PLAYPORT_RELEASE
-        SettingsInfoRow(id: "variant", title: "Build", value: "Release")
+        SettingsInfoRow(id: "variant", title: "Build", value: Self.buildName == nil ? "Release" : "Dishnur")
         #else
         SettingsInfoRow(id: "variant", title: "Build", value: "Development")
         #endif
@@ -479,7 +479,13 @@ private struct AboutSettings: View {
                      + "with ABSOLUTELY NO WARRANTY.")
     }
 
+    /// The owner's name for this build ("Dishnur 18"), which ci/build-request.json's build number keeps in step.
+    private static var buildName: String? {
+        (Bundle.main.infoDictionary?["PlayportBuildName"] as? String)?.nilIfEmpty
+    }
+
     private var version: String {
+        if let name = Self.buildName { return name }
         let info = Bundle.main.infoDictionary ?? [:]
         let short = info["CFBundleShortVersionString"] as? String
         let build = info["CFBundleVersion"] as? String

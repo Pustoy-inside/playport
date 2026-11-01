@@ -15,8 +15,9 @@
 //
 // Its rows: Resume (also B, ≡ and Home), Screenshot (the frame on screen to
 // Photos; a dev build also keeps a PNG in Documents/Screenshots), Performance
-// HUD (Playport's performance HUD, cycled for this game only; PerformanceHUD), the
-// controller with its battery, and Quit game (TitleLaunch.quit: WM_CLOSE to
+// HUD (Playport's performance HUD, cycled for this game only; PerformanceHUD),
+// Controller as mouse (HostIO.setMouseMode: the right stick a cursor, RT and LT its
+// buttons, the left stick the wheel, the rest keys), the controller with its battery, and Quit game (TitleLaunch.quit: WM_CLOSE to
 // the game's windows, so it saves as when its window is closed, then the
 // restart after the game, decision 0029, returns to Home).
 
@@ -37,6 +38,8 @@ final class InGameMenu: ObservableObject {
     @Published private(set) var menu = QuickMenu()
     /// Playport's performance HUD as the game shows it now (PerformanceHUD).
     @Published private(set) var hud = HUDPreset.off
+    /// The controller as a mouse and keys (HostIO.setMouseMode), for the rest of this launch.
+    @Published private(set) var mouse = false
     /// Screenshot's value: nil until one is taken, then what happened.
     @Published private(set) var shot: String?
     @Published private(set) var quitting = false
@@ -61,6 +64,7 @@ final class InGameMenu: ObservableObject {
         }
         isOpen = true
         hud = PerformanceHUD.preset
+        mouse = HostIO.shared.mouseMode
         menu = QuickMenu()
         shot = nil
         HostIO.shared.holdGuest()
@@ -94,6 +98,7 @@ final class InGameMenu: ObservableObject {
         case .resume: resume()
         case .screenshot: screenshot()
         case .overlay: toggleOverlay()
+        case .mouse: HostIO.shared.setMouseMode(!HostIO.shared.mouseMode); mouse = HostIO.shared.mouseMode
         case .controller: PadRouter.shared.refreshControllers()
         case .quit: quit()
         }
@@ -338,6 +343,7 @@ struct InGameMenuView: View {
         case .resume: nil
         case .screenshot: model.shot ?? "Saved to Photos"
         case .overlay: PerformanceHUDText.preset(model.hud)
+        case .mouse: model.mouse ? "On · RS cursor, RT/LT click" : "Off"
         case .controller: QuickMenu.controller(name: router.controller?.name, battery: router.controller?.battery)
         case .quit: model.quitting ? "Closing…" : "Saves first"
         }

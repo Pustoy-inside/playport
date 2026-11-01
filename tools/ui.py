@@ -65,7 +65,7 @@ before playing. --dry-run prints UI_ACTIONS without accessing the phone:
                          the game's first frame, then hold the controller's Home button 0.8 s through
                          HostIO's pad handling, which opens Playport's in-game menu over the paused
                          game (UI/InGameMenuView.swift)
-  menu:ROW               in that menu, move its ring to ROW (resume, screenshot, overlay, controller,
+  menu:ROW               in that menu, move its ring to ROW (resume, screenshot, overlay, mouse, controller,
                          quit) and press A; pad:up/down/a/b press into the menu while it is up.
                          menu:screenshot saves the frame to Photos (the first time iOS asks a person
                          to allow it) and, in a dev build, to Documents/Screenshots; menu:quit closes
@@ -288,7 +288,7 @@ class EndOnTerm:
 ACTION_RE = re.compile((r"^(?:(?:install|pause-resume|queue|downloading):[0-9]+|install:gog-[0-9]+(?:@[0-9]+)?|install:epic-[A-Za-z0-9._-]+|(?:uninstall|verify|play):[a-z]+-[A-Za-z0-9 ._-]+"
                         r"|import:[A-Za-z0-9 ._()'+-]+(?:/[A-Za-z0-9 ._()'+-]+)*"
                        r"|hud:(?:on|off)|open:[a-z]+(?:-[A-Za-z0-9 ._-]+(?:#[a-z]+)?)?|open:settings#(?:accounts|steam|graphics|downloads|controllers|storage|setup|about|developer|account|jit|memory|diagnostics|pairing|probes|logs)|open:licences(?:#[a-z0-9 ._-]+)?|pad:(?:{b})(?:\+(?:{b}))*|set:[A-Za-z0-9._-]+=[^,]*"
-                       r"|wait:[0-9]{1,3}|tap:(?:0(?:\.[0-9]+)?|1(?:\.0+)?):(?:0(?:\.[0-9]+)?|1(?:\.0+)?)|menu:(?:open|resume|screenshot|overlay|controller|quit)|web:(?:wait|close)|web:click:[A-Za-z0-9 ._-]+"
+                       r"|wait:[0-9]{1,3}|tap:(?:0(?:\.[0-9]+)?|1(?:\.0+)?):(?:0(?:\.[0-9]+)?|1(?:\.0+)?)|menu:(?:open|resume|screenshot|overlay|mouse|controller|quit)|web:(?:wait|close)|web:click:[A-Za-z0-9 ._-]+"
                        r"|jit:(?:setup|pair|continue|open-settings|cancel|wait)|probe:settings-url-[0-9]|probe:helper-(?:(?:exit|kill)(?:-hold)?|report)|probe:relaunch|probe:native-auth|probe:pairing(?:-cancel|-use)?)$").replace("{b}", PAD_BUTTONS))
 
 

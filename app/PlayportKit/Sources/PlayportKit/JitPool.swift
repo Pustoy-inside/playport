@@ -37,6 +37,15 @@ public enum JitPool {
     /// heads (Hollow Knight's from 138 to 83 MiB).
     public static let gameRoomMB = 320
 
+    /// The sizes a game's options offer (LaunchSettings.jitPoolMB): up to 768 MiB the executable
+    /// window stays held at every slide seen; 896 keeps it only at the lowest. Each is memory the
+    /// game cannot have (decision 0036).
+    public static let choicesMB = [512, 640, 768, 896]
+
+    /// A program the player runs in a game's folder (an installer, a translation's setup):
+    /// often one large executable, little else, so the largest pool.
+    public static let programMB = maximumMB
+
     /// The pool a Play gets: `minimumMB`, whatever the memory limit (decision 0036).
     /// The limit is still taken, for the day a size depends on it again.
     public static func sizeMB(limitMB: Int?) -> Int {

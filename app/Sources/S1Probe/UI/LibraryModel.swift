@@ -350,7 +350,9 @@ final class LibraryModel: ObservableObject {
                                        graphics: settings.graphics, graphicsEnvironment: settings.graphicsEnvironment,
                                        steamAppID: t.appID, fex: fex, steamAPI: steamAPI,
                                        memory: MemoryNeed.of(t, cohort: Self.cohort), epic: epic, galaxy: galaxy,
-                                       prerequisites: prerequisites, epicOffline: epicOffline) else {
+                                       prerequisites: prerequisites, epicOffline: epicOffline,
+                                       poolMB: program != nil ? max(JitPool.programMB, settings.jitPoolMB ?? 0) : settings.jitPoolMB,
+                                       mouse: program != nil) else {
             endTickets()
             galaxy?.stop()
             return false

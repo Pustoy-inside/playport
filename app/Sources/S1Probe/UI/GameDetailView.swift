@@ -776,6 +776,22 @@ private struct GameDetailPage: View {
                     },
                 selected: own.graphics?.rawValue ?? "") { settings.wrappedValue.graphics = GraphicsBackend(rawValue: $0) }
         }
+        let pool = own.jitPoolMB
+        PadRow(id: "opt:jitPool", title: "JIT memory", value: MemoryNeed.format(mb: pool ?? JitPool.minimumMB) + (pool == nil ? " (default)" : ""),
+               accessory: .chevron, changed: pool != nil, style: .plain,
+               reset: pool == nil ? nil : { settings.wrappedValue.jitPoolMB = nil }) {
+            PadModal.shared.picker(
+                title: "JIT memory", context: "\(context) · Memory",
+                note: LaunchSettingsText.nextStart + " Room for the game's program files and the code Playport translates. "
+                    + "More helps a game that ran out of JIT memory, and leaves the game less of the phone's memory. "
+                    + "A program run from Options gets \(MemoryNeed.format(mb: JitPool.programMB)).",
+                options: [PadOption(id: "", label: "Default", detail: MemoryNeed.format(mb: JitPool.minimumMB))]
+                    + JitPool.choicesMB.filter { $0 != JitPool.minimumMB }.map {
+                        PadOption(id: String($0), label: MemoryNeed.format(mb: $0),
+                                  detail: $0 == JitPool.maximumMB ? "The most; a few games may not start" : nil)
+                    },
+                selected: pool.map(String.init) ?? "") { settings.wrappedValue.jitPoolMB = Int($0) }
+        }
         let args = own.arguments.trimmingCharacters(in: .whitespaces)
         PadRow(id: "opt:arguments", title: "Launch arguments", value: args.isEmpty ? "None" : args, accessory: .chevron,
                changed: !args.isEmpty, style: .plain, hint: "Edit",
@@ -1417,7 +1433,9 @@ enum JitNote {
         let size = poolMB > 0 ? "\(MemoryNeed.format(mb: poolMB)) of " : ""
         let more = poolMB > 0 && poolMB < JitPool.minimumMB
             ? "Less than usual was set aside: Settings › Developer's Simulated JIT memory makes it smaller."
-            : "This game needs more than Playport sets aside."
+            : poolMB > 0 && poolMB < JitPool.maximumMB
+                ? "The game's Options › JIT memory can set aside more."
+                : "This game needs more than Playport can set aside."
         return "Playport set aside \(size)JIT memory for the game, and \(what) filled it. \(more)"
     }
 }

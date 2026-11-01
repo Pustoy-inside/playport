@@ -3,7 +3,8 @@
 /// until the game's swap chain presents; decision 0075): its presses as the
 /// keys a dialog moves and answers with. The D-pad and left stick are the
 /// arrow keys, A is Enter (the default button), B is Escape (Cancel), X is
-/// Space (the focused button or check box), RB is Tab and LB Shift+Tab.
+/// Space (the focused button or check box), Y is Backspace (a path typed in
+/// a box), RB is Tab and LB Shift+Tab.
 public enum WindowKeys {
     /// The key events for a press, in order: (virtual-key code, down).
     public static func events(for b: NavButton) -> [(vk: Int32, down: Bool)] {
@@ -22,6 +23,7 @@ public enum WindowKeys {
         case .a: 0x0D
         case .b: 0x1B
         case .x: 0x20
+        case .y: 0x08
         case .rb: 0x09
         default: nil
         }

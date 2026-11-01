@@ -74,7 +74,8 @@ final class TitleLaunch: ObservableObject {
                graphicsEnvironment: [String: String] = [:], steamAppID: UInt32? = nil,
                fex: FEXProfile.Launch? = nil, steamAPI: LaunchCoordinator.SteamAPI? = nil,
                memory: MemoryNeed? = nil, epic: LaunchCoordinator.Epic? = nil, galaxy: GalaxyListener? = nil,
-               prerequisites: [Prerequisite] = [], epicOffline: Bool = false) -> Bool {
+               prerequisites: [Prerequisite] = [], epicOffline: Bool = false,
+               poolMB: Int? = nil, mouse: Bool = false) -> Bool {
         guard !running, !spent else { return false }
         self.title = title
         self.titleID = titleID
@@ -106,11 +107,14 @@ final class TitleLaunch: ObservableObject {
         }
         let request = LaunchCoordinator.Request(exe: exe, args: args, config: config,
                                                 steamAppID: steamAppID, graphics: graphics,
-                                                graphicsEnvironment: graphicsEnvironment, fex: fex, jitWait: 180, steamAPI: steamAPI,
+                                                graphicsEnvironment: graphicsEnvironment, fex: fex, poolMB: poolMB,
+                                                jitWait: 180, steamAPI: steamAPI,
                                                 memory: memory, epic: epic, title: title, galaxy: galaxy,
                                                 prerequisites: prerequisites,
                                                 restartAfterPrerequisites: restartAfterPrerequisites,
                                                 quitting: { DispatchQueue.main.sync { MainActor.assumeIsolated { TitleLaunch.shared.quitting } } })
+        // A program the player runs (an installer) has the controller as a mouse from the start.
+        HostIO.shared.setMouseMode(mouse)
         Thread.detachNewThread {
             let outcome = LaunchCoordinator.run(request) { step in
                 DispatchQueue.main.async { MainActor.assumeIsolated { TitleLaunch.shared.advance(step) } }
@@ -235,6 +239,7 @@ final class TitleLaunch: ObservableObject {
             TitleMode.log("the game ended with a window on screen; it stays until a tap or a button, \(Int(Self.lastWindowHold)) s at most")
             return
         }
+        HostIO.shared.setMouseMode(false)
         spent = WineHostRuntime.shared.poolAcquired
         // The player's Quit game during the prerequisites ends the Play: no game after the restart.
         if outcome.kind == .prerequisitesRan, !quitting {

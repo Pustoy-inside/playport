@@ -71,7 +71,7 @@ jobs:
         run: |
           set -o pipefail
           swift test --package-path app/PlayportKit --filter \
-              'PlayportKitTests\.(PlayportKitTests/test(AnInstaller|ASteamReceipts|SteamReceiptOverrides|AdoptionFinds|SteamAppsSharing)|GameImportTests/testTheExecutablePicker|UpscalerSettingsTests|ScreenAspectTests|PerformanceHUDTests|GameModsTests|ExternalDriveTests)' \
+              'PlayportKitTests\.(PlayportKitTests/test(AnInstaller|ASteamReceipts|SteamReceiptOverrides|AdoptionFinds|SteamAppsSharing)|GameImportTests/testTheExecutablePicker|UpscalerSettingsTests|ScreenAspectTests|PerformanceHUDTests|GameModsTests|ExternalDriveTests|QuickMenuTests|LaunchSettingsTests)' \
               2>&1 | tee "$RUNNER_TEMP/kit.log" || {
             grep -E 'error:|failed' "$RUNNER_TEMP/kit.log" | head -30 | sed 's/^/::error::/'; exit 1; }
       - name: Steam Cloud sync, depot selection and install tests
@@ -81,6 +81,12 @@ jobs:
               'SteamClientKitTests\.(CloudServiceTests|CloudTests|DepotSelectionTests|VerifyRepairTests|LibraryServiceTests/testCache)' \
               2>&1 | tee "$RUNNER_TEMP/steam.log" || {
             grep -E 'error:|failed' "$RUNNER_TEMP/steam.log" | head -30 | sed 's/^/::error::/'; exit 1; }
+      - name: Controller input tests (the pad as a mouse, a dialog's keys)
+        run: |
+          set -o pipefail
+          swift test --package-path app/HostIOKit --filter 'HostIOKitTests\.(PadMouseTests|WindowKeysTests|PadNavigationTests)' \
+              2>&1 | tee "$RUNNER_TEMP/hostio.log" || {
+            grep -E 'error:|failed' "$RUNNER_TEMP/hostio.log" | head -30 | sed 's/^/::error::/'; exit 1; }
   build:
     if: github.repository == 'Pustoy-inside/playport' && github.event.repository.visibility == 'public' && !contains(github.event.head_commit.message, '[local-handoff]')
     needs: [precheck]

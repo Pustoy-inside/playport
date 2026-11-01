@@ -75,6 +75,13 @@ final class HostIO {
     private var windowNav = PadNavigation()
     /// The in-game menu is up: keys, touches and the mouse do not reach the guest.
     private(set) var menuUp = false
+    /// The controller as a mouse and keys (PadMouse, WindowKeys), set from the in-game menu
+    /// or for a program the player runs; over the guest's windows it is one anyway.
+    private(set) var mouseMode = false
+    private var padMouse = PadMouse()
+    private var mousePad = PadInput()
+    private var mouseClock: Timer?
+    private var mouseTick = 0.0
     /// The game layer, once registered: the menu's performance overlay switches its HUD.
     weak var gameLayer: CAMetalLayer?
     /// What the guest's pads get (HostIOKit.GuestPadGate), from the main thread
@@ -351,7 +358,81 @@ final class HostIO {
     private func padChanged(_ gp: GCExtendedGamepad, slot: Int) {
         let input = PadInput(gp)   // UI/Pad/PadRouter.swift
         menuInput(input)
+        mouseInput(input)
         Self.publish(PadMapping.values(input), slot: slot)
+    }
+
+    // MARK: the controller as a mouse (HostIOKit.PadMouse)
+
+    /// The pad is a mouse now: in mouse mode, or over the guest's windows (an installer, a launcher).
+    private var mouseActive: Bool {
+        !menuUp && !GameWebSheet.shared.isUp && !GuestWindows.holdingAfterExit && (mouseMode || GuestWindows.shown)
+    }
+
+    /// The in-game menu's Controller as mouse, or a program's launch: the game's pad rests while it is on.
+    func setMouseMode(_ on: Bool) {
+        guard on != mouseMode else { return }
+        mouseMode = on
+        if on {
+            Self.gate.withLock { g in for s in g.hold(.mouse) { Self.set(s, PadValues()) } }
+        } else {
+            Self.gate.withLock { g in for (s, v) in g.release(.mouse) { Self.set(s, v) } }
+            endMouse()
+        }
+        HostIO.log("hostio: controller as mouse \(on ? "on" : "off")")
+    }
+
+    private func mouseInput(_ p: PadInput) {
+        mousePad = p
+        guard mouseActive else { endMouse(); return }
+        for flag in padMouse.buttons(p) { GameSurfaceView.onScreen?.padPointer(flags: flag) }
+        if PadMouse.moving(p), mouseClock == nil {
+            mouseTick = ProcessInfo.processInfo.systemUptime
+            let t = Timer(timeInterval: 1.0 / 120, repeats: true) { _ in
+                MainActor.assumeIsolated { HostIO.shared.mouseStep() }
+            }
+            RunLoop.main.add(t, forMode: .common)
+            mouseClock = t
+        }
+    }
+
+    private func mouseStep() {
+        let now = ProcessInfo.processInfo.systemUptime
+        let dt = min(0.05, now - mouseTick)
+        mouseTick = now
+        guard mouseActive, PadMouse.moving(mousePad) else {
+            mouseClock?.invalidate()
+            mouseClock = nil
+            if !mouseActive { endMouse() }
+            return
+        }
+        let m = padMouse.tick(mousePad, dt: dt)
+        if m.dx != 0 || m.dy != 0 { GameSurfaceView.onScreen?.movePadCursor(dx: m.dx, dy: m.dy) }
+        if m.wheel != 0 { winios_pointer(0, 0, Pointer.wheel, UInt32(bitPattern: m.wheel)) }
+    }
+
+    /// Out of mouse mode: its buttons up, its cursor hidden.
+    private func endMouse() {
+        for flag in padMouse.release() { GameSurfaceView.onScreen?.padPointer(flags: flag) }
+        mouseClock?.invalidate()
+        mouseClock = nil
+        GameSurfaceView.onScreen?.hidePadCursor()
+    }
+
+    /// The pad cursor's press or move at a guest window's desktop pixel, or at a fraction of
+    /// the game's picture (GameSurfaceView.padPointer).
+    func padPointer(window: (Int32, Int32)?, client: (Int32, Int32)?, flags: UInt32) {
+        let downs: [(UInt32, UInt32)] = [(Pointer.leftDown, Pointer.leftUp), (Pointer.rightDown, Pointer.rightUp),
+                                         (Pointer.middleDown, Pointer.middleUp)]
+        for (down, up) in downs {
+            if flags & down != 0, !lifecycle.buttonDown(upFlag: up) { return }
+            if flags & up != 0, !lifecycle.buttonUp(upFlag: up) { return }
+        }
+        if let w = window {
+            winios_pointer(w.0, w.1, Pointer.move | Pointer.absolute | flags, 0)
+        } else if let c = client {
+            winios_post_client_pointer(c.0, c.1, Pointer.move | flags, 0)
+        }
     }
 
     /// A pad's values toward the guest's slot, through the menu's gate.
@@ -383,14 +464,16 @@ final class HostIO {
             return
         }
         // The guest's GDI windows on screen (a launcher, a dialog) get the presses as keys too.
-        let presses = windowNav.update(p, at: ProcessInfo.processInfo.systemUptime)
+        var nav = p
+        if mouseActive { nav.lx = 0; nav.ly = 0 }   // the left stick scrolls in mouse mode (PadMouse)
+        let presses = windowNav.update(nav, at: ProcessInfo.processInfo.systemUptime)
         // The game has ended with its last window kept on screen: a press only ends that.
         if GuestWindows.holdingAfterExit {
             if !presses.isEmpty { GuestWindows.endExitHold() }
             return
         }
-        if !menuUp, GuestWindows.shown {
-            for b in presses {
+        if !menuUp, GuestWindows.shown || mouseMode {
+            for b in presses where !(mouseMode && b == .menu) {
                 for k in WindowKeys.events(for: b) { winios_post_key(k.vk, k.down ? 1 : 0) }
                 #if !PLAYPORT_RELEASE
                 HostIO.log("hostio: window keys for \(b.rawValue)")
@@ -429,6 +512,7 @@ final class HostIO {
     func holdGuest() {
         guard !menuUp else { return }
         menuUp = true
+        endMouse()
         Self.gate.withLock { g in for s in g.hold(.menu) { Self.set(s, PadValues()) } }
         handle(.menuOpened)
     }
@@ -664,6 +748,20 @@ final class GameSurfaceView: UIView {
     #endif
     /// The view on screen, laid out again when the upscaler starts (TitleScreen.configure).
     static weak var onScreen: GameSurfaceView?
+    /// The controller's cursor in mouse mode (HostIO.mouseInput), drawn by Playport: Winios draws none.
+    private let padCursor: UIImageView = {
+        let v = UIImageView(image: UIImage(systemName: "cursorarrow",
+                                           withConfiguration: UIImage.SymbolConfiguration(pointSize: 20, weight: .semibold)))
+        v.tintColor = .white
+        v.layer.shadowColor = UIColor.black.cgColor
+        v.layer.shadowOpacity = 0.9
+        v.layer.shadowRadius = 1.5
+        v.layer.shadowOffset = .zero
+        v.isHidden = true
+        v.isUserInteractionEnabled = false
+        return v
+    }()
+    private var padCursorAt: CGPoint?
 
     init() {
         super.init(frame: .zero)
@@ -671,6 +769,7 @@ final class GameSurfaceView: UIView {
         layer.contentsGravity = .resizeAspect
         layer.addSublayer(windows)
         addSubview(hud)
+        addSubview(padCursor)
         PerformanceHUD.view = hud
         isMultipleTouchEnabled = false
         // Counted only (hostio: input … hover=N): whether iOS shows a mouse to
@@ -767,6 +866,51 @@ final class GameSurfaceView: UIView {
             size = CGSize(width: r.2, height: r.3)
         }
         HostIO.shared.touch(at: CGPoint(x: p.x - origin.x, y: p.y - origin.y), in: size, phase: phase)
+    }
+
+    // MARK: the controller's cursor (HostIO, PadMouse)
+
+    /// The right stick's motion, in points.
+    func movePadCursor(dx: Double, dy: Double) {
+        let from = padCursorAt ?? CGPoint(x: bounds.midX, y: bounds.midY)
+        let to = CGPoint(x: min(max(from.x + dx, bounds.minX), bounds.maxX - 1),
+                         y: min(max(from.y + dy, bounds.minY), bounds.maxY - 1))
+        padCursorAt = to
+        showPadCursor(at: to)
+        padPointer(flags: 0)
+    }
+
+    /// A button at the cursor (0 moves the guest's pointer there only).
+    func padPointer(flags: UInt32) {
+        let p = padCursorAt ?? CGPoint(x: bounds.midX, y: bounds.midY)
+        if flags != 0 { padCursorAt = p; showPadCursor(at: p) }
+        var dx: Int32 = 0, dy: Int32 = 0
+        if winios_windows_point(Double(p.x), Double(p.y), &dx, &dy) != 0 {
+            HostIO.shared.padPointer(window: (dx, dy), client: nil, flags: flags)
+            return
+        }
+        var origin = CGPoint.zero, size = bounds.size
+        if let d = (layer as? CAMetalLayer)?.drawableSize {
+            let r = Display.aspectFit(contentWidth: d.width, contentHeight: d.height, width: size.width, height: size.height)
+            origin = CGPoint(x: r.0, y: r.1)
+            size = CGSize(width: r.2, height: r.3)
+        }
+        let x = min(max(p.x - origin.x, 0), size.width - 0.001), y = min(max(p.y - origin.y, 0), size.height - 0.001)
+        HostIO.shared.padPointer(window: nil, client: Pointer.clientFraction(x: x, y: y, width: size.width, height: size.height),
+                                 flags: flags)
+    }
+
+    func hidePadCursor() { padCursor.isHidden = true }
+
+    private func showPadCursor(at p: CGPoint) {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        // The arrow's tip is the point.
+        padCursor.sizeToFit()
+        padCursor.frame.origin = CGPoint(x: p.x - padCursor.bounds.width * 0.3, y: p.y - padCursor.bounds.height * 0.15)
+        padCursor.isHidden = false
+        bringSubviewToFront(padCursor)
+        CATransaction.commit()
     }
 
     #if !PLAYPORT_RELEASE

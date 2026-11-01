@@ -432,10 +432,52 @@ final class WindowKeysTests: XCTestCase {
         XCTAssertEqual(keys(.lb), ["16+", "9+", "9-", "16-"])   // Shift+Tab
     }
 
+    func testYIsBackspace() {
+        XCTAssertEqual(keys(.y), ["8+", "8-"])
+    }
+
     func testOtherButtonsSendNothing() {
-        XCTAssertEqual(keys(.y), [])
         XCTAssertEqual(keys(.menu), [])
         XCTAssertEqual(keys(.view), [])
+    }
+}
+
+final class PadMouseTests: XCTestCase {
+    private func pad(_ set: (inout PadInput) -> Void) -> PadInput {
+        var p = PadInput()
+        set(&p)
+        return p
+    }
+
+    func testTheTriggersAreTheButtonsWithHysteresis() {
+        var m = PadMouse()
+        XCTAssertEqual(m.buttons(pad { $0.rightTrigger = 0.4 }), [])
+        XCTAssertEqual(m.buttons(pad { $0.rightTrigger = 0.6 }), [Pointer.leftDown])
+        XCTAssertEqual(m.buttons(pad { $0.rightTrigger = 0.4 }), [])            // still down above 0.3
+        XCTAssertEqual(m.buttons(pad { $0.rightTrigger = 0.1 }), [Pointer.leftUp])
+        XCTAssertEqual(m.buttons(pad { $0.leftTrigger = 1 }), [Pointer.rightDown])
+        XCTAssertEqual(m.release(), [Pointer.rightUp])
+        XCTAssertEqual(m.release(), [])
+    }
+
+    func testTheRightStickMovesTheCursorDownForDown() {
+        var m = PadMouse()
+        let r = m.tick(pad { $0.rx = 0; $0.ry = -1 }, dt: 0.1)
+        XCTAssertEqual(r.dx, 0, accuracy: 0.001)
+        XCTAssertEqual(r.dy, 75, accuracy: 0.001)              // 750 points a second, all the way over
+        let slow = m.tick(pad { $0.rx = 1; $0.rightThumb = true }, dt: 0.1)
+        XCTAssertEqual(slow.dx, 22.5, accuracy: 0.001)
+        XCTAssertEqual(m.tick(pad { $0.rx = 0.1 }, dt: 0.1).dx, 0)   // inside the dead zone
+        XCTAssertFalse(PadMouse.moving(pad { $0.rx = 0.1; $0.ly = -0.1 }))
+        XCTAssertTrue(PadMouse.moving(pad { $0.rx = 0.5 }))
+    }
+
+    func testTheLeftStickScrollsInWholeSteps() {
+        var m = PadMouse()
+        var total: Int32 = 0
+        for _ in 0..<10 { total += m.tick(pad { $0.ly = 1 }, dt: 0.1).wheel }
+        XCTAssertEqual(Double(total), 960, accuracy: 40)        // 8 notches in a second
+        XCTAssertLessThan(m.tick(pad { $0.ly = -1 }, dt: 0.1).wheel, 0)
     }
 }
 

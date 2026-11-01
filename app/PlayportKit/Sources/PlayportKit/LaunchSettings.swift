@@ -58,12 +58,15 @@ public struct LaunchSettings: Codable, Equatable, Sendable {
     /// (LaunchSettings.graphicsVariables) or a DXVK option (`dxvk.tilerMode=False`), which
     /// goes into DXVK_CONFIG. LaunchSettings.graphicsEnvironment parses them.
     public var graphicsOptions: String
+    /// The JIT memory set aside for the game, in MiB (JitPool.choicesMB, per game only); nil
+    /// takes JitPool.sizeMB. A game whose program files fill the 512 MiB needs more.
+    public var jitPoolMB: Int?
 
     public init(screen: String? = nil, aspect: String? = nil, frameLimit: Int? = nil, graphics: GraphicsBackend? = nil,
                 arguments: String = "", steamAPI: SteamAPISwap.Mode? = nil,
                 cloudSync: Bool? = nil, ordering: MemoryOrdering = MemoryOrdering(), maxInst: Int? = nil,
                 x87Reduced: Bool? = nil, diskCache: Bool? = nil, runtime: String = "", graphicsOptions: String = "",
-                upscaler: Upscaler? = nil, sharpness: Int? = nil) {
+                upscaler: Upscaler? = nil, sharpness: Int? = nil, jitPoolMB: Int? = nil) {
         self.screen = screen
         self.aspect = aspect
         self.frameLimit = frameLimit
@@ -79,6 +82,7 @@ public struct LaunchSettings: Codable, Equatable, Sendable {
         self.graphicsOptions = graphicsOptions
         self.upscaler = upscaler
         self.sharpness = sharpness
+        self.jitPoolMB = jitPoolMB
     }
 
     public init(from decoder: Decoder) throws {
@@ -101,6 +105,7 @@ public struct LaunchSettings: Codable, Equatable, Sendable {
         // As graphics: an upscaler this build does not know inherits.
         upscaler = try c.decodeIfPresent(String.self, forKey: .upscaler).flatMap(Upscaler.init(rawValue:))
         sharpness = try c.decodeIfPresent(Int.self, forKey: .sharpness)
+        jitPoolMB = try c.decodeIfPresent(Int.self, forKey: .jitPoolMB)
     }
 
     public var isEmpty: Bool {
@@ -109,7 +114,7 @@ public struct LaunchSettings: Codable, Equatable, Sendable {
             && ordering.isEmpty && maxInst == nil && x87Reduced == nil && diskCache == nil
             && runtime.trimmingCharacters(in: .whitespaces).isEmpty
             && graphicsOptions.trimmingCharacters(in: .whitespaces).isEmpty
-            && upscaler == nil && sharpness == nil
+            && upscaler == nil && sharpness == nil && jitPoolMB == nil
     }
 
     /// Arguments as a command line splits them: at spaces, except inside
@@ -196,13 +201,15 @@ public struct LaunchSettings: Codable, Equatable, Sendable {
         public var upscaler: Upscaler
         /// FSR 1's sharpening, a percentage (LaunchSettings.rcasStops).
         public var sharpness: Int
+        /// The game's JIT memory in MiB; nil for JitPool.sizeMB's.
+        public var jitPoolMB: Int?
 
         public init(screen: String?, aspect: ScreenAspect = .phone, frameLimit: Int, graphics: GraphicsBackend = .default,
                     arguments: [String] = [], steamAPI: SteamAPISwap.Mode = .emulated,
                     ordering: MemoryOrdering = MemoryOrdering(), maxInst: Int? = nil,
                     x87Reduced: Bool? = nil, diskCache: Bool? = nil, runtime: [String: String] = [:],
                     graphicsEnvironment: [String: String] = [:], upscaler: Upscaler = .default,
-                    sharpness: Int = LaunchSettings.defaultSharpness) {
+                    sharpness: Int = LaunchSettings.defaultSharpness, jitPoolMB: Int? = nil) {
             self.screen = screen
             self.aspect = aspect
             self.frameLimit = frameLimit
@@ -217,6 +224,7 @@ public struct LaunchSettings: Codable, Equatable, Sendable {
             self.graphicsEnvironment = graphicsEnvironment
             self.upscaler = upscaler
             self.sharpness = sharpness
+            self.jitPoolMB = jitPoolMB
         }
 
         /// The guest screen's spec for HostIOKit Display.guestSize: the resolution in the shape
@@ -260,7 +268,8 @@ public struct LaunchSettings: Codable, Equatable, Sendable {
                          x87Reduced: game?.x87Reduced, diskCache: game?.diskCache,
                          runtime: runtimeKeys(game?.runtime ?? "") ?? [:],
                          graphicsEnvironment: graphicsEnvironment(game?.graphicsOptions ?? "") ?? [:],
-                         upscaler: game?.upscaler ?? global.upscaler ?? .default, sharpness: sharpness)
+                         upscaler: game?.upscaler ?? global.upscaler ?? .default, sharpness: sharpness,
+                         jitPoolMB: game?.jitPoolMB.flatMap { JitPool.choicesMB.contains($0) ? $0 : nil })
     }
 
     /// The resolutions the pickers offer, the same in every aspect ratio, as screen specs;

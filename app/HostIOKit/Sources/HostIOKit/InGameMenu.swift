@@ -98,6 +98,8 @@ public struct GuestPadGate: Sendable {
         case menu
         /// A guest dialog over the running game (its keys are WindowKeys').
         case dialog
+        /// The controller is a mouse and keys (PadMouse, WindowKeys) instead of a pad.
+        case mouse
     }
 
     private var holders: Set<Holder> = []

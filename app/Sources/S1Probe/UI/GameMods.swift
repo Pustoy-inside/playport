@@ -2,7 +2,8 @@
 // A game page's Add files and Run a program (PlayportKit GameMods): a
 // translation's .zip or folder, picked in Files, copied over the game's folder;
 // an installer's .exe copied into it and run there, in the game's prefix, as
-// the game would be. What was added is recorded, and an update or a repair of
+// the game would be; an Inno Setup installer's files unpacked instead of run
+// (PlayportKit InnoSetup: one too large for the JIT pool can be). What was added is recorded, and an update or a repair of
 // the game asks first (they may put the store's files back); updates that
 // Settings queue by themselves leave such a game alone.
 
@@ -23,7 +24,7 @@ final class GameMods: ObservableObject {
 
         var contentTypes: [UTType] {
             switch self {
-            case .files: [.folder, .zip]
+            case .files: [.folder, .zip, UTType(filenameExtension: "exe") ?? .data]
             case .program: [UTType(filenameExtension: "exe") ?? .data]
             }
         }
@@ -34,6 +35,8 @@ final class GameMods: ObservableObject {
     @Published private(set) var records: [String: GameModRecord]
     /// Games whose files are being copied now.
     @Published private(set) var copying: Set<String> = []
+    /// An installer being unpacked: its game's id, and the share done (0...1).
+    @Published private(set) var unpacking: (id: String, done: Double)?
 
     private let store = GameModStore(url: FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         .appendingPathComponent("Playport/mods.json"))
@@ -80,9 +83,11 @@ final class GameMods: ObservableObject {
             source = .folder(url)
         } else if url.pathExtension.lowercased() == "zip" {
             source = .zip(url)
+        } else if url.pathExtension.lowercased() == "exe" {
+            return await unpack(url, into: id)
         } else {
-            return tell("Can't add \(url.lastPathComponent)", "Pick a folder or a .zip. Files unpacks other archives: "
-                        + "tap one there, then pick the folder it makes.")
+            return tell("Can't add \(url.lastPathComponent)", "Pick a folder, a .zip or an installer's .exe. Files unpacks "
+                        + "other archives: tap one there, then pick the folder it makes.")
         }
         copying.insert(id)
         defer { copying.remove(id) }
@@ -105,7 +110,68 @@ final class GameMods: ObservableObject {
         }
     }
 
+    /// An installer's files put into the game's folder without running it (Inno Setup's).
+    private func unpack(_ url: URL, into id: String) async {
+        guard let found = folder(id) else { return }
+        let (t, dir) = found
+        copying.insert(id)
+        unpacking = (id, 0)
+        defer { copying.remove(id); unpacking = nil }
+        let importer = self.importer
+        let result = await Task.detached(priority: .userInitiated) { () -> Result<[String], Error> in
+            let access = url.startAccessingSecurityScopedResource()
+            defer { if access { url.stopAccessingSecurityScopedResource() } }
+            var shown = -1.0
+            return Result {
+                try importer.unpack(installer: url, into: dir) { p in
+                    let done = p.bytesTotal > 0 ? Double(p.bytesDone) / Double(p.bytesTotal) : 0
+                    guard done - shown >= 0.01 || done == 1 else { return }
+                    shown = done
+                    DispatchQueue.main.async { MainActor.assumeIsolated { GameMods.shared.unpacking = (id, done) } }
+                }
+            }
+        }.value
+        switch result {
+        case let .success(written):
+            records[id, default: GameModRecord()].add(files: written)
+            save()
+            Self.log("\(id): \(written.count) files unpacked from \(url.lastPathComponent)")
+            tell("Unpacked into \(t.name)", "\(written.count) file\(written.count == 1 ? "" : "s") from \(url.lastPathComponent) "
+                 + "are in the game's folder, replacing the game's own where they had the same name. "
+                 + "An installer that also changes files as it runs or asks for choices may need more than its files.")
+        case let .failure(e):
+            Self.log("\(id): \(url.lastPathComponent) not unpacked: \(e)")
+            tell("Can't unpack \(url.lastPathComponent)", ((e as? ImportError)?.description ?? "\(e)")
+                 + " Run a program runs an installer instead, if it is small enough.")
+        }
+    }
+
     private func addProgram(_ url: URL, to id: String) async {
+        guard let found = folder(id) else { return }
+        // An Inno Setup installer is better unpacked: no JIT pool, no restart, any size.
+        let inno = await Task.detached(priority: .userInitiated) { () -> Bool in
+            let access = url.startAccessingSecurityScopedResource()
+            defer { if access { url.stopAccessingSecurityScopedResource() } }
+            return InnoSetup.recognizes(url)
+        }.value
+        if inno {
+            PadModal.shared.picker(
+                title: "Unpack \(url.lastPathComponent)?", context: found.0.name,
+                note: "It is an Inno Setup installer: Playport can put its files into the game's folder without running it, "
+                    + "which works whatever its size. Running it needs it to fit Playport's JIT memory (896 MB).",
+                options: [PadOption(id: "unpack", label: "Unpack its files", detail: "Recommended"),
+                          PadOption(id: "run", label: "Run it")],
+                selected: "unpack") { choice in
+                    Task {
+                        if choice == "unpack" { await self.unpack(url, into: id) } else { await self.copyAndRun(url, to: id) }
+                    }
+                }
+            return
+        }
+        await copyAndRun(url, to: id)
+    }
+
+    private func copyAndRun(_ url: URL, to id: String) async {
         guard let found = folder(id) else { return }
         let (t, dir) = found
         let replacing = record(id)?.programs.contains { $0.caseInsensitiveCompare(url.lastPathComponent) == .orderedSame } ?? false

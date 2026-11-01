@@ -895,8 +895,11 @@ private struct GameDetailPage: View {
     private func modRows(_ t: InstalledTitle) -> some View {
         let busy = mods.copying.contains(t.id)
         let free = job == nil && !launch.running && !busy && !library.removing.contains(t.id)
-        PadRow(id: "opt:addFiles", title: "Add files", subtitle: "A translation: a .zip or a folder, copied over the game's files",
-               value: busy ? "Copying…" : nil, accessory: .chevron, style: .plain, hint: "Pick") {
+        let unpacked = mods.unpacking.flatMap { $0.id == t.id ? Int($0.done * 100) : nil }
+        let status: String? = busy ? unpacked.map { "Unpacking \($0)%" } ?? "Copying…" : nil
+        PadRow(id: "opt:addFiles", title: "Add files",
+               subtitle: "A translation: a .zip, a folder or an installer's .exe, over the game's files",
+               value: status, accessory: .chevron, style: .plain, hint: "Pick") {
             if free { GameMods.requests.send(.files(titleID: t.id)) }
         }
         PadRow(id: "opt:runProgram", title: "Run a program", subtitle: "An installer (.exe), run from the game's folder",

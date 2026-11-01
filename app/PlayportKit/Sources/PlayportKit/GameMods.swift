@@ -74,13 +74,15 @@ extension GameImporter {
     /// the top, or a picked folder, that the game's folder has too is that folder (a picked
     /// `Data`); any other is the translation's wrapper, left out. Returns the paths written, as
     /// they are in `dir`.
-    public func merge(_ plan: ImportPlan, into dir: URL, progress: (Progress) -> Void = { _ in }) throws -> [String] {
+    /// `moving`: a folder's files are moved, not copied (one Playport unpacked beside the game).
+    public func merge(_ plan: ImportPlan, into dir: URL, moving: Bool = false,
+                      progress: (Progress) -> Void = { _ in }) throws -> [String] {
         let fm = FileManager.default
         var isDir: ObjCBool = false
         guard fm.fileExists(atPath: dir.path, isDirectory: &isDir), isDir.boolValue else {
             throw ImportError.refused("the game's folder is not there")
         }
-        try checkSpace(toCopy: plan.totalBytes, in: dir)
+        if !moving { try checkSpace(toCopy: plan.totalBytes, in: dir) }
         var names = CaselessNames()
         var prefix: [String] = []
         let top: String?
@@ -88,7 +90,8 @@ extension GameImporter {
         case let .folder(root): top = root.lastPathComponent
         case .zip: top = plan.strippedTop
         }
-        if let top, let existing = try names.find(dir, top), existing.isDirectory { prefix = [existing.name] }
+        // An unpacked installer's folder (moving) is the game's folder's own layout already.
+        if !moving, let top, let existing = try names.find(dir, top), existing.isDirectory { prefix = [existing.name] }
         var zip: ZipArchive?
         if case let .zip(u) = plan.source { zip = try ZipArchive(url: u) }
         let byPath = Dictionary((zip?.entries ?? []).map { ($0.path, $0) }, uniquingKeysWith: { a, _ in a })
@@ -120,6 +123,14 @@ extension GameImporter {
                 name = e.name
             }
             let dst = at.appendingPathComponent(name)
+            if moving, case let .folder(root) = plan.source,
+               rename(root.appendingPathComponent(f.from).path, dst.path) == 0 {
+                names.added(at, name, isDirectory: false)
+                written.append((rel + [name]).joined(separator: "/"))
+                done += f.size
+                progress(Progress(bytesDone: done, bytesTotal: plan.totalBytes, filesDone: i + 1, filesTotal: plan.files.count))
+                continue
+            }
             let part = at.appendingPathComponent(".\(name).part")
             try? fm.removeItem(at: part)
             switch plan.source {
@@ -140,6 +151,25 @@ extension GameImporter {
             progress(Progress(bytesDone: done, bytesTotal: plan.totalBytes, filesDone: i + 1, filesTotal: plan.files.count))
         }
         return written
+    }
+
+    /// Unpacks an Inno Setup installer's files for its folder ({app}) over `dir`, an installed
+    /// game's folder, as `merge` puts a folder's: into a hidden folder in `dir` first (on the
+    /// game's own drive), then moved into place. Returns the paths written, as they are in `dir`.
+    public func unpack(installer: URL, into dir: URL,
+                       progress: @escaping (InnoSetup.Progress) -> Void = { _ in }) throws -> [String] {
+        let setup: InnoSetup
+        do { setup = try InnoSetup(installer) } catch let e as InnoSetupError { throw ImportError.refused(e.description) }
+        try checkSpace(toCopy: setup.appFiles.bytes, in: dir)
+        let stage = dir.appendingPathComponent(".playport-unpack", isDirectory: true)
+        try? FileManager.default.removeItem(at: stage)
+        defer { try? FileManager.default.removeItem(at: stage) }
+        do {
+            _ = try setup.extract(into: stage, progress: progress)
+        } catch let e as InnoSetupError {
+            throw ImportError.refused(e.description)
+        }
+        return try merge(try GameImporter.plan(.folder(stage)), into: dir, moving: true)
     }
 
     /// Copies a program (`src`, an .exe) into `dir`, the game's folder, to run from there, as

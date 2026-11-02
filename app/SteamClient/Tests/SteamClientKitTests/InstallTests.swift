@@ -300,6 +300,32 @@ final class DepotSelectionTests: XCTestCase {
         XCTAssertEqual(try DepotSelection.select(info.depots).depots.map(\.depotID), [289461])
     }
 
+    /// Steam's Properties › Language: the languages listed, and the language depots a choice downloads.
+    func testLanguagesAndTheirDepots() throws {
+        let vdf = """
+        "289460"
+        {
+            "common" { "name" "RC Cars" "type" "Game" "languages" { "english" "1" "russian" "1" "french" "0" } }
+            "depots"
+            {
+                "289461" { "config" { "oslist" "windows" } "manifests" { "public" { "gid" "1" "size" "10" } } }
+                "289462" { "config" { "oslist" "windows" "language" "russian" } "manifests" { "public" { "gid" "2" "size" "20" } } }
+                "289463" { "config" { "oslist" "windows" "language" "polish" } "manifests" { "public" { "gid" "3" "size" "30" } } }
+                "branches" { "public" { "buildid" "1" } }
+            }
+        }
+        """
+        let info = try SteamAppInfo.parse(appID: 289460, try KeyValue.parseText(Array(vdf.utf8)))
+        XCTAssertEqual(info.languages, ["english", "russian"])
+        XCTAssertEqual(Set(info.offeredLanguages), ["english", "russian", "polish"])
+        XCTAssertEqual(info.languageDepots, [289462: "russian", 289463: "polish"])
+        XCTAssertEqual(try DepotSelection.select(info.depots, .init(language: "Russian")).depots.map(\.depotID), [289461, 289462])
+        let supported = try KeyValue.parseText(Array("""
+        "common" { "supported_languages" { "english" { "supported" "true" } "german" { "supported" "true" "full_audio" "true" } } }
+        """.utf8))
+        XCTAssertEqual(SteamAppInfo.parseLanguages(supported), ["english", "german"])
+    }
+
     /// Before an install the size counts only the depots the account's packages list,
     /// as the install downloads (Metal Gear Solid 3 read 71 GB, then installed 24).
     func testInstallSizeCountsOnlyOwnedDepots() throws {

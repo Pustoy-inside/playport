@@ -786,7 +786,7 @@ final class LibraryServiceTests: XCTestCase {
         _ = try await s.ownedGames(refresh: true)
         let file = dir.appendingPathComponent("steam-games.json")
         var json = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(contentsOf: file)) as? [String: Any])
-        XCTAssertEqual(json["version"] as? Int, 2)
+        XCTAssertEqual(json["version"] as? Int, SteamService.gamesVersion)
         let s2 = await signedIn(b, dir: dir)
         let fresh = await s2.cachedGames()
         XCTAssertNotNil(fresh)

@@ -47,7 +47,10 @@ final class SteamInstalls: DownloadDriver {
         }
         switch job.kind {
         case .install, .update:
-            let r = try await installer.install(.init(appID: appID, branch: job.branch, engine: engine), progress: progress, say: say)
+            // The game's language's depots (Properties › Language on Steam): SteamGameLanguage.
+            let selection = DepotSelection.Options(language: SteamGameLanguage.chosen(appID))
+            let r = try await installer.install(.init(appID: appID, selection: selection, branch: job.branch, engine: engine),
+                                                progress: progress, say: say)
             if let drive { try ExternalStorage.shared.link(appID: appID, drive: drive, base: layout) }
             return job.kind == .install ? r.stage?.bytes : r.stage?.downloadedBytes
         case .repair:

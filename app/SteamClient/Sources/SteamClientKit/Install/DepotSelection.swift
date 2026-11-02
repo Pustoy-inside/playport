@@ -74,8 +74,9 @@ public struct DepotSelection: Sendable, Equatable {
     /// The depots of owned DLC (`ownedDLC`, the emulator's profile) that an install of `app`
     /// lacks (`installed`): an install made while every DLC depot was left out. Downloading
     /// them is an update of the same build (TitleInstaller keeps the files it already has).
-    public static func missingDLC(_ app: AppDepots, installed: Set<UInt32>, ownedDLC: Set<UInt32>) -> [UInt32] {
-        let o = Options(ownedDLC: ownedDLC)
+    public static func missingDLC(_ app: AppDepots, installed: Set<UInt32>, ownedDLC: Set<UInt32>,
+                                  language: String = "english") -> [UInt32] {
+        let o = Options(language: language, ownedDLC: ownedDLC)
         return app.depots.filter { d in d.dlcAppID != nil && !installed.contains(d.depotID) && exclusion(d, o) == nil }.map(\.depotID)
     }
 

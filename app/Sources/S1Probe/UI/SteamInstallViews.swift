@@ -37,7 +37,8 @@ struct SteamInstallStatus: View {
     static func missingDLC(_ t: InstalledTitle, _ info: SteamAppInfo, _ profile: SteamGameProfile?) -> [UInt32] {
         guard t.source == .installed, t.store == .steam, let profile, !profile.dlc.isEmpty,
               let depots = try? info.depots.onBranch(t.branch ?? Branch.publicName) else { return [] }
-        return DepotSelection.missingDLC(depots, installed: Set(t.depots.map(\.depotID)), ownedDLC: Set(profile.dlc.map(\.appID)))
+        return DepotSelection.missingDLC(depots, installed: Set(t.depots.map(\.depotID)), ownedDLC: Set(profile.dlc.map(\.appID)),
+                                         language: t.appID.map { SteamGameLanguage.chosen($0, info: info) } ?? GameLanguage.fallback)
     }
 }
 

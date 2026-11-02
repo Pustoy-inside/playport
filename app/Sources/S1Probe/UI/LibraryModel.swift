@@ -259,10 +259,16 @@ final class LibraryModel: ObservableObject {
             ticket = await service.encryptedAppTicket(appID: app)
             tickets = await service.prepareTicketSession(appID: app, playLog: SteamTicketHost.log)
         }
+        // The game's language (Properties › Language on Steam), once its files are installed.
+        let language = SteamGameLanguage.running(t)
         let steamAPI = t.appID.map { app in
             LaunchCoordinator.SteamAPI(appID: app, root: Self.paths.games.appendingPathComponent(t.installDir, isDirectory: true),
                                        mode: settings.steamAPI,
-                                       settings: { await service?.emulatorSettings(appID: app) ?? .init(appID: app) },
+                                       settings: {
+                                           var s = await service?.emulatorSettings(appID: app) ?? .init(appID: app)
+                                           if let language { s.language = language }
+                                           return s
+                                       },
                                        ticket: ticket, tickets: tickets)
         }
         let endTickets = { if tickets != nil { Task { await service?.endPlay() } } }

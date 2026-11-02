@@ -1148,12 +1148,13 @@ public actor SteamService {
         var games: [SteamGame]
         /// 2: written once the games carry their owned depots (sizes before install). A list
         /// cached before that (nil) is fetched again, or every size counts every depot.
+        /// 3: the games carry their languages (GameLanguage), which a list cached before lacks.
         var version: Int? = nil
         /// The depots the account's packages list, when they were read.
         var ownedDepots: Set<UInt32>? = nil
     }
 
-    static let gamesVersion = 2
+    static let gamesVersion = 3
     /// The owned depots of the last games list (cached or fetched): single-app lookups use them too.
     private var ownedDepotSet: (tag: String, depots: Set<UInt32>)?
 

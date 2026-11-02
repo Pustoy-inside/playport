@@ -338,6 +338,7 @@ private struct DownloadSettings: View {
     @ObservedObject private var drive = ExternalStorage.shared
     @AppStorage(SteamAccountModel.cloudKey) private var steamCloud = true
     @ObservedObject private var network = NetworkPath.shared
+    @ObservedObject private var launchSettings = LaunchSettingsStore.shared
 
     var body: some View {
         Color.clear.frame(height: 42)
@@ -354,6 +355,18 @@ private struct DownloadSettings: View {
                    ?? "Choose a folder on a USB-C drive in Files",
                value: drive.name == nil ? "Choose" : "Change", accessory: .chevron, hint: "Choose",
                reset: drive.name == nil ? nil : { drive.forget() }) { ExternalStorage.requests.send() }
+        let language = launchSettings.global.language ?? GameLanguage.fallback
+        PadRow(id: "set:language", title: "Game language",
+               subtitle: "What Steam games download and run in, where they offer it",
+               value: GameLanguage.name(language), accessory: .chevron, hint: "Choose",
+               reset: launchSettings.global.language == nil ? nil : { launchSettings.global.language = nil }) {
+            PadModal.shared.picker(
+                title: "Game language", context: "Settings · Downloads",
+                note: "As Steam's own language: a game that offers it downloads and runs in it, any other in English. "
+                    + "A game's page can choose its own. Installed games get their language's files with their next update.",
+                options: GameLanguage.all.map { PadOption(id: $0.code, label: $0.name, detail: $0.code == GameLanguage.fallback ? "Default" : nil) },
+                selected: language) { launchSettings.global.language = $0 == GameLanguage.fallback ? nil : $0 }
+        }
         SettingsSwitchRow(id: "steamCloud", title: "Sync saves with Steam Cloud",
                           subtitle: "For every game that supports it", on: $steamCloud)
         SettingsNote(text: "With the drive connected, Install asks whether a new Steam game goes to the iPhone or the drive. "

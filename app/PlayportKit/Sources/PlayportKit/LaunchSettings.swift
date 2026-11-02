@@ -61,12 +61,15 @@ public struct LaunchSettings: Codable, Equatable, Sendable {
     /// The JIT memory set aside for the game, in MiB (JitPool.choicesMB, per game only); nil
     /// takes JitPool.sizeMB. A game whose program files fill the 512 MiB needs more.
     public var jitPoolMB: Int?
+    /// The language a Steam game downloads and runs in, a Steam API code (GameLanguage);
+    /// nil inherits: a game's from the global one, the global one English.
+    public var language: String?
 
     public init(screen: String? = nil, aspect: String? = nil, frameLimit: Int? = nil, graphics: GraphicsBackend? = nil,
                 arguments: String = "", steamAPI: SteamAPISwap.Mode? = nil,
                 cloudSync: Bool? = nil, ordering: MemoryOrdering = MemoryOrdering(), maxInst: Int? = nil,
                 x87Reduced: Bool? = nil, diskCache: Bool? = nil, runtime: String = "", graphicsOptions: String = "",
-                upscaler: Upscaler? = nil, sharpness: Int? = nil, jitPoolMB: Int? = nil) {
+                upscaler: Upscaler? = nil, sharpness: Int? = nil, jitPoolMB: Int? = nil, language: String? = nil) {
         self.screen = screen
         self.aspect = aspect
         self.frameLimit = frameLimit
@@ -83,6 +86,7 @@ public struct LaunchSettings: Codable, Equatable, Sendable {
         self.upscaler = upscaler
         self.sharpness = sharpness
         self.jitPoolMB = jitPoolMB
+        self.language = language
     }
 
     public init(from decoder: Decoder) throws {
@@ -106,6 +110,7 @@ public struct LaunchSettings: Codable, Equatable, Sendable {
         upscaler = try c.decodeIfPresent(String.self, forKey: .upscaler).flatMap(Upscaler.init(rawValue:))
         sharpness = try c.decodeIfPresent(Int.self, forKey: .sharpness)
         jitPoolMB = try c.decodeIfPresent(Int.self, forKey: .jitPoolMB)
+        language = try c.decodeIfPresent(String.self, forKey: .language)
     }
 
     public var isEmpty: Bool {
@@ -114,7 +119,7 @@ public struct LaunchSettings: Codable, Equatable, Sendable {
             && ordering.isEmpty && maxInst == nil && x87Reduced == nil && diskCache == nil
             && runtime.trimmingCharacters(in: .whitespaces).isEmpty
             && graphicsOptions.trimmingCharacters(in: .whitespaces).isEmpty
-            && upscaler == nil && sharpness == nil && jitPoolMB == nil
+            && upscaler == nil && sharpness == nil && jitPoolMB == nil && language == nil
     }
 
     /// Arguments as a command line splits them: at spaces, except inside

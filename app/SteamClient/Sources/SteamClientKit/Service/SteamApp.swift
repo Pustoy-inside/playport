@@ -45,6 +45,22 @@ public struct SteamAppInfo: Sendable, Codable, Equatable {
     /// This app's depots the account's packages list (DepotSelection.Options.ownedDepots),
     /// when the games list knew them; nil counts every depot.
     public var ownedDepots: [UInt32]? = nil
+    /// The languages Steam lists for the game (`common/languages`, else
+    /// `common/supported_languages`), as API codes; nil when it lists none, or the
+    /// record was cached before this was read.
+    public var languages: [String]? = nil
+
+    /// The languages the game's Properties › Language offers: those listed, and those
+    /// of its language depots; empty when Steam lists none.
+    public var offeredLanguages: [String] {
+        Array(Set((languages ?? []) + depots.depots.compactMap(\.language)))
+    }
+
+    /// The game's language depots (Windows ones), by depot, with their languages.
+    public var languageDepots: [UInt32: String] {
+        Dictionary(depots.depots.compactMap { d in d.language.flatMap { d.isWindows ? (d.depotID, $0) : nil } },
+                   uniquingKeysWith: { a, _ in a })
+    }
 
     public var isGame: Bool { type.caseInsensitiveCompare("game") == .orderedSame }
     /// A game or a demo (`type: Demo`, its own app ID with a free licence): what the Library lists (PLA-19).
@@ -113,7 +129,18 @@ public struct SteamAppInfo: Sendable, Codable, Equatable {
             osList: list(common?["oslist"]?.value), osArch: nonEmpty(common?["osarch"]?.value),
             installDir: nonEmpty(config?["installdir"]?.value), launch: launch,
             depots: try Library.parseDepots(appID: appID, app), art: art,
-            controllerSupport: nonEmpty(common?["controller_support"]?.value)?.lowercased())
+            controllerSupport: nonEmpty(common?["controller_support"]?.value)?.lowercased(),
+            languages: Self.parseLanguages(common))
+    }
+
+    /// `common/languages` ("english" "1") or `common/supported_languages` ("english" { "supported" "true" }).
+    static func parseLanguages(_ common: KeyValue?) -> [String]? {
+        func on(_ v: String?) -> Bool { v == "1" || v?.lowercased() == "true" }
+        var codes = (common?["languages"]?.children ?? []).filter { on($0.value) }.map { $0.name.lowercased() }
+        if codes.isEmpty {
+            codes = (common?["supported_languages"]?.children ?? []).filter { on($0["supported"]?.value) }.map { $0.name.lowercased() }
+        }
+        return codes.isEmpty ? nil : codes
     }
 }
 

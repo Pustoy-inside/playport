@@ -349,6 +349,11 @@ private struct GameDetailPage: View {
         if job == nil, let g, SteamInstallStatus.updateAvailable(t, g.info) {
             SecondaryButton(id: "game:update", systemImage: "arrow.down.circle", title: "Update", enabled: canDownload && !launch.running,
                             hint: "Update") { mods.confirm(t.id, "Update") { installs.install(g.id, name: g.info.name) } }
+        } else if job == nil, let g, let app = t.appID, SteamGameLanguage.needsUpdate(t, g.info) {
+            // Another language chosen (Game options › Language), whose files are its own depots.
+            SecondaryButton(id: "game:language", systemImage: "globe", title: "Download \(GameLanguage.name(SteamGameLanguage.chosen(app, info: g.info)))",
+                            enabled: canDownload && !launch.running,
+                            hint: "Download") { mods.confirm(t.id, "Update") { installs.install(g.id, name: g.info.name) } }
         } else if job == nil, let g, let app = t.appID,
                   !SteamInstallStatus.missingDLC(t, g.info, model.gameProfiles[app]).isEmpty {
             SecondaryButton(id: "game:dlc", systemImage: "arrow.down.circle", title: "Download DLC", enabled: canDownload && !launch.running,
@@ -634,6 +639,39 @@ private struct GameDetailPage: View {
 
     // MARK: Game options
 
+    /// Steam's Properties › Language: the language the game downloads and runs in (SteamGameLanguage).
+    private func languageRow(_ t: InstalledTitle, _ app: UInt32, _ g: SteamGame?, _ settings: Binding<LaunchSettings>) -> some View {
+        let own = settings.wrappedValue.language
+        let chosen = SteamGameLanguage.chosen(app, info: g?.info)
+        let offered = GameLanguage.choices(offered: g?.info.offeredLanguages ?? [])
+        let fallback = GameLanguage.resolve(game: nil, global: launchSettings.global.language, offered: g?.info.offeredLanguages ?? [])
+        let pending = g.map { SteamGameLanguage.needsUpdate(t, $0.info) } ?? false
+        return PadRow(id: "opt:language", title: "Language",
+                      subtitle: pending ? "Its files download with the game's next update; Download on the game's page gets them now"
+                          : offered.isEmpty ? "Steam lists no languages for this game" : nil,
+                      subtitleLines: 2,
+                      value: GameLanguage.name(chosen) + (own == nil ? " (default)" : ""), accessory: .chevron,
+                      changed: own != nil, style: .plain, reset: own == nil ? nil : { settings.wrappedValue.language = nil }) {
+            PadModal.shared.picker(
+                title: "Language", context: "\(t.name) · Game",
+                note: "As Language in the game's Properties on Steam: the language its files download in and the "
+                    + "game is told. A language with its own files downloads them before the game uses it. "
+                    + "Some games pick their language in their own menu instead.",
+                options: [PadOption(id: "", label: "Default", detail: GameLanguage.name(fallback) + ", from Settings")]
+                    + (offered.isEmpty ? GameLanguage.all.map(\.code) : offered).map {
+                        PadOption(id: $0, label: GameLanguage.name($0),
+                                  detail: g?.info.languageDepots.values.contains($0) == true ? "Own files" : nil)
+                    },
+                selected: own ?? "") {
+                settings.wrappedValue.language = $0.isEmpty ? nil : $0
+                // Its files at once, as Steam does, when the install lacks them.
+                if let g, job == nil, !launch.running, !installs.suspended, SteamGameLanguage.needsUpdate(t, g.info) {
+                    mods.confirm(t.id, "Update") { installs.install(g.id, name: g.info.name) }
+                }
+            }
+        }
+    }
+
     private func optionsPanel(_ t: InstalledTitle, _ g: SteamGame?) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             Text("Game options").font(PP.display(22)).foregroundStyle(PP.text)
@@ -809,6 +847,9 @@ private struct GameDetailPage: View {
         if let g, t.source == .installed, branches.count > 1 {
             PadRow(id: "opt:version", title: "Version", value: BranchLabel.text(t.branch, in: g.info), accessory: .chevron,
                    style: .plain) { if job == nil { pickVersion(g) } }
+        }
+        if let app = t.appID, t.store == .steam {
+            languageRow(t, app, g, settings)
         }
         if let app = t.appID {
             let cloudOn = settings.wrappedValue.cloudSync ?? true

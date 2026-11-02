@@ -1,0 +1,76 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Pavel Demyanov <greypax@cybergusli.ai>
+Date: Fri, 23 Oct 2026 11:50:13 +0300
+Subject: [PATCH] kernelbase: Wait for a new thread to start before returning
+ it.
+
+On iOS the server suspends a thread through Mach, and a thread suspended
+before its init_thread request reached the server never runs. Half-Life 2
+creates its worker threads suspended and suspends each one again at once
+to read its context; the one whose init came after that stayed parked,
+and the engine waited 60 s for it ("Thread failed to initialize") with a
+black screen. The server learns a thread's TEB from init_thread, so
+CreateRemoteThreadEx in the current process waits, up to about a second,
+until ThreadBasicInformation shows it.
+
+Built for i386 only, the scope tested in Half-Life 2: 64-bit programs
+keep Wine's behaviour.
+
+Class: ios-port
+Evidence: docs/evidence/2026-10-25-touchpad-build.md
+Offered-upstream: no; Mach thread suspension is the iOS port's
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ dlls/kernelbase/thread.c | 32 ++++++++++++++++++++++++++++++++
+ 1 file changed, 32 insertions(+)
+
+diff --git a/dlls/kernelbase/thread.c b/dlls/kernelbase/thread.c
+index 92ef073..3dd7162 100644
+--- a/dlls/kernelbase/thread.c
++++ b/dlls/kernelbase/thread.c
+@@ -79,6 +79,35 @@ struct _PROC_THREAD_ATTRIBUTE_LIST
+     struct proc_thread_attr attrs[];
+ };
+ 
++/* Playport: the new thread's own start before the caller may suspend it.
++ *
++ * On iOS the server suspends a thread through Mach. A thread suspended
++ * before its init_thread request has reached the server never runs:
++ * Half-Life 2 creates its worker threads suspended and suspends each one
++ * again at once to read its context, and the one whose init came after that
++ * suspension stayed parked, so the engine waited 60 s for it ("Thread failed
++ * to initialize") with a black screen. The server learns the thread's TEB
++ * from init_thread, so the creator waits, up to about a second, until
++ * ThreadBasicInformation shows it. */
++#ifdef __i386__
++static void wait_thread_started( HANDLE handle )
++{
++    THREAD_BASIC_INFORMATION info;
++    LARGE_INTEGER delay;
++    unsigned int i;
++
++    delay.QuadPart = -10000; /* 1 ms */
++    for (i = 0; i < 1000; i++)
++    {
++        if (NtQueryInformationThread( handle, ThreadBasicInformation, &info, sizeof(info), NULL )) return;
++        if (info.TebBaseAddress) return;
++        if (i < 16) NtYieldExecution();
++        else NtDelayExecution( FALSE, &delay );
++    }
++}
++#endif
++
++
+ /***************************************************************************
+  *           CreateRemoteThreadEx   (kernelbase.@)
+  */
+@@ -157,6 +186,9 @@ HANDLE WINAPI DECLSPEC_HOTPATCH CreateRemoteThreadEx( HANDLE process, SECURITY_A
+         RtlReleaseActivationContext( actctx );
+     }
+ 
++#ifdef __i386__
++    if (process == GetCurrentProcess()) wait_thread_started( handle );
++#endif
+     if (id) *id = HandleToULong( client_id.UniqueThread );
+     if (!(flags & CREATE_SUSPENDED)) NtResumeThread( handle, &ret );
+     return handle;

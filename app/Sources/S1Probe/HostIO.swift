@@ -156,11 +156,10 @@ final class HostIO {
     func start() {
         guard !started else { return }
         started = true
-        // windows.gaming.input is disabled: with no winebus it lists no pad, and
-        // Unity picks it over XInput when it loads, so the game never sees the
-        // pad; without it Unity falls back to XInput (Wine's builtin, which
-        // reads the controller snapshot host_pad_set writes).
-        setenv("WINEDLLOVERRIDES", "windows.gaming.input=d", 0)
+        // windows.gaming.input stays enabled: wine-pe 0066 gives it a Gamepad
+        // provider for each host pad slot, so a game that reads pads through it
+        // (Rewired's Windows.Gaming.Input source) sees the pad host_pad_set
+        // writes, and so does Unity, which picks it over XInput when it loads.
         // SDL 2's raw input joystick driver is off for the same reason: it takes
         // XInput pads only as raw input HID devices, which there are none of
         // here, and while it is on SDL's XInput driver neither loads XInput nor

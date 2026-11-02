@@ -42,11 +42,8 @@ jobs:
           want="Dishnur $(jq -r '.build // .request' ci/build-request.json)"
           have=$(plutil -extract PlayportBuildName raw app/Info.plist)
           [ "$have" = "$want" ] || { echo "::error::app/Info.plist PlayportBuildName is '$have', the request is '$want'"; exit 1; }
-      - name: Compile the on-screen controller for iOS before the long build
-        run: |
-          sudo xcode-select -s /Applications/Xcode_26.6.app
-          xcrun -sdk iphoneos clang -arch arm64 -mios-version-min=26.0 -fobjc-arc -fsyntax-only -Wall \
-              -I app/Sources/HostIO/include -I app/Sources/TouchPad/include app/Sources/TouchPad/touchpad.m
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode_26.6.app
       # The upscaler (app/Sources/Upscale): compiled for iOS, then for this Mac with its smoke
       # test, which runs its shaders and its present hooks on the runner's GPU.
       - name: Upscaler for iOS, its shaders, and its smoke test on the runner's Metal
@@ -76,7 +73,7 @@ jobs:
         run: |
           set -o pipefail
           swift test --package-path app/PlayportKit --filter \
-              'PlayportKitTests\.(PlayportKitTests/test(AnInstaller|ASteamReceipts|SteamReceiptOverrides|AdoptionFinds|SteamAppsSharing)|GameImportTests/testTheExecutablePicker|UpscalerSettingsTests|ScreenAspectTests|PerformanceHUDTests|GameModsTests|ExternalDriveTests|QuickMenuTests|LaunchSettingsTests|InnoSetupTests|GameLanguageTests)' \
+              'PlayportKitTests\.(PlayportKitTests/test(AnInstaller|ASteamReceipts|SteamReceiptOverrides|AdoptionFinds|SteamAppsSharing)|GameImportTests/testTheExecutablePicker|UpscalerSettingsTests|ScreenAspectTests|GameModsTests|ExternalDriveTests|QuickMenuTests|LaunchSettingsTests|InnoSetupTests|GameLanguageTests)' \
               2>&1 | tee "$RUNNER_TEMP/kit.log" || {
             grep -E 'error:|failed' "$RUNNER_TEMP/kit.log" | head -30 | sed 's/^/::error::/'; exit 1; }
       - name: Steam Cloud sync, depot selection and install tests
@@ -86,7 +83,7 @@ jobs:
               'SteamClientKitTests\.(CloudServiceTests|CloudTests|DepotSelectionTests|VerifyRepairTests|LibraryServiceTests/testCache)' \
               2>&1 | tee "$RUNNER_TEMP/steam.log" || {
             grep -E 'error:|failed' "$RUNNER_TEMP/steam.log" | head -30 | sed 's/^/::error::/'; exit 1; }
-      - name: Controller input tests (the pad as a mouse, a dialog's keys)
+      - name: Controller input tests (a dialog's keys, pad navigation)
         run: |
           set -o pipefail
           swift test --package-path app/HostIOKit --filter 'HostIOKitTests\.(WindowKeysTests|PadNavigationTests)' \

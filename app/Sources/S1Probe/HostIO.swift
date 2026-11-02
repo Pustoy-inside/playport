@@ -17,11 +17,26 @@
 //   input         touches, hardware keys and a mouse into Winios's input ring;
 //                 game controllers into Madeira's controller snapshot, which
 //                 Wine's xinput1_*.dll reads through win32u
-//   in-game menu  the controller's Home button held opens Playport's menu
+//   on-screen     the touch controls over the game (UI/TouchControlsView.swift):
+//   controls      their pad merged into slot 0 with the physical pad there
+//                 (HostIOKit.InputMixer), their keys and buttons through
+//                 Lifecycle, shown while no extended controller is connected
+//   in-game menu  the controller's Home button held, or a three-finger tap
+//                 anywhere on the game (GameSurfaceView), opens Playport's menu
 //                 (UI/InGameMenuView.swift, HostIOKit.QuickMenuControl); while
 //                 it is up the pads' presses are the menu's, the guest's pads
 //                 are at rest (HostIOKit.GuestPadGate), audio stops and the
 //                 session root holds the game's threads (pauseGame)
+//   gyro aim      the iPhone's or a controller's gyro as slot 0's right stick
+//                 or relative mouse motion while the game takes input
+//                 (GyroSensors.swift, HostIOKit.GyroAim)
+//   controller    a game's controller map (PlayportKit ControllerMap, its own
+//   maps          over Settings'): with one that is not `controller`, every
+//                 physical pad (the scripted pad too) plays through it
+//                 (HostIOKit.InputMixer, MappedPad): its slot at rest but for
+//                 its pad: actions, its keys and mouse buttons through
+//                 Lifecycle, its sticks' mouse motion on InputClock's ticks;
+//                 the on-screen controls' pad is never mapped
 //   lifecycle     focus loss before releasing held controls (pads by Winios's
 //                 drain, after the loss reaches the game), audio back when
 //                 active, foreground and uninterrupted, and DXMT's Metal
@@ -44,12 +59,14 @@
 
 #if canImport(UIKit)
 import AVFAudio
+import Combine
 import Foundation
 import GameController
 import HostIO
 import HostIOKit
 import os
 import Metal
+import PlayportKit
 import QuartzCore
 import SwiftUI
 import UIKit
@@ -66,28 +83,46 @@ final class HostIO {
     nonisolated static let surfaceReady = DispatchSemaphore(value: 0)
 
     private var lifecycle = Lifecycle()
+    /// The held keys that went down extended (keypad Enter): their release goes
+    /// out extended too, also when Lifecycle releases them on a focus loss.
+    private var extendedHeld: Set<UInt8> = []
     private var slots = PadSlots<ObjectIdentifier>()
+    /// Each physical pad's name, by slot, for the logs.
+    private var padNames: [Int: String] = [:]
+    /// The controller map the pads play through now (updateControllerMap).
+    private var controllerMap: ControllerMap?
+    /// Its look speed (updateControllerMap).
+    private var lookSpeed = LookSpeed.defaultValue
+    /// The map last logged for each slot's pad.
+    private var loggedMaps: [Int: String] = [:]
+    private var subscriptions: Set<AnyCancellable> = []
+    /// The extended controllers connected (the dev build's scripted pad too): any hides
+    /// the on-screen controls in Automatic (OnScreenControls).
+    private var extended = Set<ObjectIdentifier>()
     private var motion = RelativeMotion()
     /// The Home button and the in-game menu's presses, from every pad.
     private var menuControl = QuickMenuControl()
+    /// The last pad snapshot the menu read (menuInput): what is held when the menu opens another way (menuOpened).
+    private var lastMenuInput = PadInput()
     private var menuClock: Timer?
     /// A pad's presses for the guest's GDI windows while they are shown (WindowKeys).
     private var windowNav = PadNavigation()
+    /// The mapped pads are held for the guest's windows (WindowKeys.takesPads).
+    private var windowsHoldPads = false
     /// The in-game menu is up: keys, touches and the mouse do not reach the guest.
     private(set) var menuUp = false
-    /// The controller as a mouse and keys (PadMouse, WindowKeys), set from the in-game menu
-    /// or for a program the player runs; over the guest's windows it is one anyway.
-    private(set) var mouseMode = false
-    private var padMouse = PadMouse()
-    private var mousePad = PadInput()
-    private var mouseClock: Timer?
-    private var mouseTick = 0.0
-    /// The game layer, once registered: the menu's performance overlay switches its HUD.
-    weak var gameLayer: CAMetalLayer?
-    /// What the guest's pads get (HostIOKit.GuestPadGate), from the main thread
-    /// and the scripted pad's queue; host_pad_set is called under it, so a
-    /// stale value never overtakes the rest the menu put there.
-    nonisolated static let gate = OSAllocatedUnfairLock(initialState: GuestPadGate())
+    /// What the guest's pads get: slot 0 merged with the on-screen controls
+    /// (HostIOKit.InputMixer), then held while the menu is up (HostIOKit.GuestPadGate),
+    /// from the main thread and the scripted pad's queue; host_pad_set is called
+    /// under it, so a stale value never overtakes the rest the menu put there.
+    nonisolated static let pads = OSAllocatedUnfairLock(initialState: GuestPads())
+
+    struct GuestPads: Sendable {
+        var mixer = InputMixer()
+        var gate = GuestPadGate()
+        /// The mixer's need of InputClock as sendMixer last saw it.
+        var clockOn = false
+    }
     /// The in-game menu's controls to the session root, in order (pauseGame).
     private nonisolated static let sessionQueue = DispatchQueue(label: "hostio.session", qos: .userInitiated)
     private var observers: [NSObjectProtocol] = []
@@ -105,7 +140,7 @@ final class HostIO {
     /// the RemoteIO driver. start() has already set the guest's environment.
     nonisolated static func prepareRuntime(log: (String) -> Void) {
         let env = ProcessInfo.processInfo.environment
-        log("hostio: WINEDLLOVERRIDES=\(env["WINEDLLOVERRIDES"] ?? "unset")")
+        log("hostio: WINEDLLOVERRIDES=\(env["WINEDLLOVERRIDES"] ?? "unset") SDL_JOYSTICK_RAWINPUT=\(env["SDL_JOYSTICK_RAWINPUT"] ?? "unset")")
         let session = AVAudioSession.sharedInstance()
         do {
             try session.setCategory(.playback, mode: .default, options: [])
@@ -121,10 +156,17 @@ final class HostIO {
     func start() {
         guard !started else { return }
         started = true
-        // windows.gaming.input stays enabled: wine-pe 0047 gives it a Gamepad
-        // provider for each host pad slot, so a game that reads pads through it
-        // (Rewired's Windows.Gaming.Input source) sees the pad host_pad_set
-        // writes, and so does Unity, which picks it over XInput when it loads.
+        // windows.gaming.input is disabled: with no winebus it lists no pad, and
+        // Unity picks it over XInput when it loads, so the game never sees the
+        // pad; without it Unity falls back to XInput (Wine's builtin, which
+        // reads the controller snapshot host_pad_set writes).
+        setenv("WINEDLLOVERRIDES", "windows.gaming.input=d", 0)
+        // SDL 2's raw input joystick driver is off for the same reason: it takes
+        // XInput pads only as raw input HID devices, which there are none of
+        // here, and while it is on SDL's XInput driver neither loads XInput nor
+        // adds a pad, so a game on SDL (World of Warcraft) never sees one. SDL
+        // reads its hints from the environment, over a game's own SDL_SetHint.
+        setenv("SDL_JOYSTICK_RAWINPUT", "0", 0)
         let nc = NotificationCenter.default
         let app: [(Notification.Name, LifecycleEvent)] = [
             (UIApplication.willResignActiveNotification, .resignActive),
@@ -191,11 +233,25 @@ final class HostIO {
         startVirtualPad()
         Self.trace.start()
         #endif
+        OnScreenControls.shared.start(controllers: extended.count)
+        GyroSensors.shared.start()
+        // A change applies at once (objectWillChange fires before it: read on the next turn).
+        let later = { DispatchQueue.main.async { MainActor.assumeIsolated { HostIO.shared.updateControllerMap() } } }
+        ControlsStore.shared.objectWillChange.sink { _ in later() }.store(in: &subscriptions)
+        TitleLaunch.shared.objectWillChange.sink { _ in later() }.store(in: &subscriptions)
+        updateControllerMap()
     }
 
     #if !PLAYPORT_RELEASE
-    /// A pad slot for something other than a GameController pad (Dev/VirtualPad.swift).
-    func connectSlot(_ id: ObjectIdentifier) -> Int? { slots.connect(id) }
+    /// A pad slot for something other than a GameController pad (Dev/VirtualPad.swift);
+    /// it counts as a connected controller.
+    func connectSlot(_ id: ObjectIdentifier, name: String) -> Int? {
+        extended.insert(id)
+        OnScreenControls.shared.controllersChanged(extended.count)
+        let slot = slots.connect(id)
+        if let slot { padNames[slot] = name; logControllerMaps() }
+        return slot
+    }
     #endif
 
     // MARK: lifecycle
@@ -203,12 +259,14 @@ final class HostIO {
     private func handle(_ event: LifecycleEvent) {
         let actions = lifecycle.handle(event)
         if event == .resignActive { motion.reset() }
+        defer { GyroSensors.shared.appState(active: lifecycle.active && !lifecycle.background) }
+        defer { if event == .resignActive { OnScreenControls.shared.releaseAll() } }
         for a in actions {
             switch a {
             case .focus(let active):
                 winios_post_focus(active ? 1 : 0)
             case .releaseKeys(let vks):
-                for vk in vks { winios_post_key(Int32(vk), 0) }
+                for vk in vks { postKey(vk, down: false) }
             case .releaseButtons(let flags):
                 for f in flags { winios_pointer(0, 0, f, 0) }
             case .suspendAudio(let deactivate):
@@ -239,9 +297,39 @@ final class HostIO {
     func key(hidUsage: Int, down: Bool) -> Bool {
         guard let vk = KeyMap.virtualKey(hidUsage: hidUsage) else { return false }
         if down && menuUp { return true }   // a key let go while the menu is up still reaches the game
-        if down ? lifecycle.keyDown(vk) : lifecycle.keyUp(vk) { winios_post_key(Int32(vk), down ? 1 : 0) }
+        if down ? lifecycle.keyDown(vk) : lifecycle.keyUp(vk) {
+            postKey(vk, down: down, extended: down && KeyMap.postsExtended(hidUsage: hidUsage))
+        }
         return true
     }
+
+    /// winios_post_key, or winios_post_key_extended for a key that went down
+    /// extended: a release takes the flag of its press, whatever its source.
+    private func postKey(_ vk: UInt8, down: Bool, extended: Bool = false) {
+        let ext = down ? extended : extendedHeld.remove(vk) != nil
+        if down && extended { extendedHeld.insert(vk) }
+        if ext { winios_post_key_extended(Int32(vk), down ? 1 : 0) } else { winios_post_key(Int32(vk), down ? 1 : 0) }
+    }
+
+    /// The text bar's input (HostIOKit TextBar, UI/TextBarView.swift): a character as
+    /// winios_post_char (WM_CHAR for the focused window), a key pressed and let go.
+    /// Nothing while the menu is up, as a key. Nothing here logs what was typed.
+    func text(_ inputs: [TextBar.Input]) {
+        guard !menuUp else { return }
+        for i in inputs {
+            switch i {
+            case .char(let unit): winios_post_char(UInt32(unit))
+            case .key(let vk):
+                winios_post_key(vk, 1)
+                winios_post_key(vk, 0)
+            }
+        }
+    }
+
+    /// Whether everything posted so far (keys, characters, touches) has left Winios's input ring
+    /// for the server's queue (winios_input_pending; patches/madeira-winios 0009). A guest thread
+    /// pumping messages drains the ring, so it stays false while none does.
+    var inputPosted: Bool { winios_input_pending() == 0 }
 
     /// A direct touch as the left button, at the same point of the client area.
     func touch(at p: CGPoint, in size: CGSize, phase: UITouch.Phase) {
@@ -260,17 +348,18 @@ final class HostIO {
         }
     }
 
-    /// A touch on a guest GDI window (GuestWindows) as the left button at that desktop pixel.
+    /// A touch on a guest GDI window (GuestWindows) as the left button at that desktop pixel,
+    /// to the window drawn there (winios_window_pointer).
     func windowTouch(x: Int32, y: Int32, phase: UITouch.Phase) {
         if menuUp && phase != .ended && phase != .cancelled { return }
         let at = Pointer.move | Pointer.absolute
         switch phase {
         case .began:
-            if lifecycle.buttonDown(upFlag: Pointer.leftUp) { winios_pointer(x, y, at | Pointer.leftDown, 0) }
+            if lifecycle.buttonDown(upFlag: Pointer.leftUp) { winios_window_pointer(x, y, at | Pointer.leftDown) }
         case .moved:
-            winios_pointer(x, y, at, 0)
+            winios_window_pointer(x, y, at)
         case .ended, .cancelled:
-            if lifecycle.buttonUp(upFlag: Pointer.leftUp) { winios_pointer(x, y, at | Pointer.leftUp, 0) }
+            if lifecycle.buttonUp(upFlag: Pointer.leftUp) { winios_window_pointer(x, y, at | Pointer.leftUp) }
         default:
             break
         }
@@ -328,8 +417,13 @@ final class HostIO {
     private func attach(controller c: GCController) {
         // The log names each accessory the app saw.
         HostIO.log("hostio: controller connected \"\(c.vendorName ?? "?")\" category \"\(c.productCategory)\" extended=\(c.extendedGamepad != nil)")
-        guard let pad = c.extendedGamepad, let slot = slots.connect(ObjectIdentifier(c)) else { return }
+        guard let pad = c.extendedGamepad else { return }
+        extended.insert(ObjectIdentifier(c))
+        defer { OnScreenControls.shared.controllersChanged(extended.count) }
+        guard let slot = slots.connect(ObjectIdentifier(c)) else { return }
         HostIO.log("hostio: controller \"\(c.vendorName ?? "?")\" is XInput slot \(slot)")
+        padNames[slot] = c.vendorName ?? "?"
+        defer { logControllerMaps() }
         pad.valueChangedHandler = { gp, _ in
             MainActor.assumeIsolated { HostIO.shared.padChanged(gp, slot: slot) }
         }
@@ -349,98 +443,145 @@ final class HostIO {
 
     private func detach(controller c: GCController) {
         HostIO.log("hostio: controller disconnected \"\(c.vendorName ?? "?")\"")
+        extended.remove(ObjectIdentifier(c))
+        defer { OnScreenControls.shared.controllersChanged(extended.count) }
         guard let slot = slots.disconnect(ObjectIdentifier(c)) else { return }
         HostIO.trace.update { $0.pads[slot] = nil }
-        Self.gate.withLock { $0.disconnect(slot: slot) }
-        host_pad_disconnect(Int32(slot))
+        padNames[slot] = nil
+        loggedMaps[slot] = nil
+        Self.pads.withLock { p in Self.apply(p.mixer.physicalLeft(slot: slot), slot: slot, &p.gate) }
+        sendMixer()
+    }
+
+    /// A slot's update under the pad lock: new values through the gate, or the slot gone
+    /// (here, and gyro aim's right stick: GyroSensors.swift).
+    nonisolated static func apply(_ u: SlotUpdate, slot: Int, _ gate: inout GuestPadGate) {
+        switch u {
+        case .unchanged:
+            break
+        case .set(let v):
+            if let out = gate.input(slot: slot, v) { set(slot, out) }
+        case .disconnect:
+            gate.disconnect(slot: slot)
+            host_pad_disconnect(Int32(slot))
+        }
+    }
+
+    /// The on-screen controls' state (OnScreenControls), nil while they are off:
+    /// their pad into slot 0 (unless `padOn` is false: the touch keyboard over a
+    /// controller that is player 1), their keys and mouse buttons through Lifecycle
+    /// (a press while the menu is up does not reach the game, a release does), the
+    /// Playport button's menu.
+    func touchControls(_ t: TouchOutput?, padOn: Bool = true) {
+        let outputs = Self.pads.withLock { p in
+            let earlier = p.mixer.takeOutputs()   // the mapped pads', in the order they came
+            let r = p.mixer.touch(t, padOn: padOn)
+            Self.apply(r.slot0, slot: 0, &p.gate)
+            return earlier + r.outputs
+        }
+        outputs.forEach(send)
+    }
+
+    /// One of the mixer's outputs to the guest: keys and mouse buttons through
+    /// Lifecycle (a press while the menu is up does not reach the game, a release
+    /// does), the wheel and motion only while the menu is down and the app active.
+    private func send(_ o: MixerOutput) {
+        switch o {
+        case .key(let vk, let down):
+            if down && menuUp { return }
+            if down ? lifecycle.keyDown(vk) : lifecycle.keyUp(vk) { postKey(vk, down: down) }
+        case .pointer(let flags, let data):
+            if flags == Pointer.wheel {
+                if !menuUp && lifecycle.active { winios_pointer(0, 0, flags, data) }
+            } else if [Pointer.leftDown, Pointer.rightDown, Pointer.middleDown].contains(flags) {
+                if menuUp { return }
+                mouseButton(down: true, downFlag: flags, upFlag: flags << 1)
+            } else {
+                mouseButton(down: false, downFlag: flags >> 1, upFlag: flags)
+            }
+        case .move(let dx, let dy):
+            if !menuUp && lifecycle.active { winios_pointer(dx, dy, Pointer.move, 0) }
+        case .place(let x, let y):
+            if !menuUp && lifecycle.active { winios_post_client_pointer(x, y, Pointer.move, 0) }
+        case .playport(.menu):
+            InGameMenu.shared.open()
+        case .playport(.keyboard):
+            // The touch keyboard opens or closes on the next turn, not while the mixer's outputs are being sent.
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated { OnScreenControls.shared.setKeyboard(!OnScreenControls.shared.keyboard) }
+            }
+        }
+    }
+
+    /// What the mapped pads sent (from any thread, in order) to the guest, and
+    /// InputClock on while a mapped stick moves the mouse or a wheel repeats.
+    func sendMixer() {
+        let (outputs, clock) = Self.pads.withLock { p in
+            p.clockOn = p.mixer.needsClock
+            return (p.mixer.takeOutputs(), p.clockOn)
+        }
+        outputs.forEach(send)
+        InputClock.shared.need(.controllerMap, clock)
+    }
+
+    /// InputClock's tick while the mapped pads need it: their mouse motion and wheel repeats.
+    func controllerMapTick() {
+        Self.pads.withLock { $0.mixer.tick(time: CACurrentMediaTime()) }
+        sendMixer()
+    }
+
+    /// The running game's controller map and look speed (its own over Settings'), into the mixer when either changed.
+    func updateControllerMap() {
+        let store = ControlsStore.shared
+        let game = TitleLaunch.shared.titleID.map { store.game($0) } ?? GameControls()
+        let map = game.controllerMap(over: store.defaults), speed = game.lookSpeed(over: store.defaults)
+        guard map != controllerMap || speed != lookSpeed else { return }
+        #if !PLAYPORT_RELEASE
+        if speed != lookSpeed { HostIO.log("controls: look speed \(LookSpeed.label(speed))") }
+        #endif
+        controllerMap = map
+        lookSpeed = speed
+        Self.pads.withLock { p in
+            for (slot, v) in p.mixer.setMap(map.bindings, lookSpeed: speed) {
+                if let out = p.gate.input(slot: slot, v) { Self.set(slot, out) }
+            }
+        }
+        sendMixer()
+        logControllerMaps()
+    }
+
+    /// Once per pad and map: `controls: controller map keyboardMouse for <pad name> (slot N)`.
+    private func logControllerMaps() {
+        #if !PLAYPORT_RELEASE
+        guard let map = controllerMap else { return }
+        for slot in padNames.keys.sorted() where loggedMaps[slot] != map.summary {
+            loggedMaps[slot] = map.summary
+            HostIO.log("controls: controller map \(map.summary) for \(padNames[slot] ?? "?") (slot \(slot))")
+        }
+        #endif
     }
 
     private func padChanged(_ gp: GCExtendedGamepad, slot: Int) {
         let input = PadInput(gp)   // UI/Pad/PadRouter.swift
         menuInput(input)
-        mouseInput(input)
         Self.publish(PadMapping.values(input), slot: slot)
-    }
-
-    // MARK: the controller as a mouse (HostIOKit.PadMouse)
-
-    /// The pad is a mouse now: in mouse mode, or over the guest's windows (an installer, a launcher).
-    private var mouseActive: Bool {
-        !menuUp && !GameWebSheet.shared.isUp && !GuestWindows.holdingAfterExit && (mouseMode || GuestWindows.shown)
-    }
-
-    /// The in-game menu's Controller as mouse, or a program's launch: the game's pad rests while it is on.
-    func setMouseMode(_ on: Bool) {
-        guard on != mouseMode else { return }
-        mouseMode = on
-        if on {
-            Self.gate.withLock { g in for s in g.hold(.mouse) { Self.set(s, PadValues()) } }
-        } else {
-            Self.gate.withLock { g in for (s, v) in g.release(.mouse) { Self.set(s, v) } }
-            endMouse()
-        }
-        HostIO.log("hostio: controller as mouse \(on ? "on" : "off")")
-    }
-
-    private func mouseInput(_ p: PadInput) {
-        mousePad = p
-        guard mouseActive else { endMouse(); return }
-        for flag in padMouse.buttons(p) { GameSurfaceView.onScreen?.padPointer(flags: flag) }
-        if PadMouse.moving(p), mouseClock == nil {
-            mouseTick = ProcessInfo.processInfo.systemUptime
-            let t = Timer(timeInterval: 1.0 / 120, repeats: true) { _ in
-                MainActor.assumeIsolated { HostIO.shared.mouseStep() }
-            }
-            RunLoop.main.add(t, forMode: .common)
-            mouseClock = t
-        }
-    }
-
-    private func mouseStep() {
-        let now = ProcessInfo.processInfo.systemUptime
-        let dt = min(0.05, now - mouseTick)
-        mouseTick = now
-        guard mouseActive, PadMouse.moving(mousePad) else {
-            mouseClock?.invalidate()
-            mouseClock = nil
-            if !mouseActive { endMouse() }
-            return
-        }
-        let m = padMouse.tick(mousePad, dt: dt)
-        if m.dx != 0 || m.dy != 0 { GameSurfaceView.onScreen?.movePadCursor(dx: m.dx, dy: m.dy) }
-        if m.wheel != 0 { winios_pointer(0, 0, Pointer.wheel, UInt32(bitPattern: m.wheel)) }
-    }
-
-    /// Out of mouse mode: its buttons up, its cursor hidden.
-    private func endMouse() {
-        for flag in padMouse.release() { GameSurfaceView.onScreen?.padPointer(flags: flag) }
-        mouseClock?.invalidate()
-        mouseClock = nil
-        GameSurfaceView.onScreen?.hidePadCursor()
-    }
-
-    /// The pad cursor's press or move at a guest window's desktop pixel, or at a fraction of
-    /// the game's picture (GameSurfaceView.padPointer).
-    func padPointer(window: (Int32, Int32)?, client: (Int32, Int32)?, flags: UInt32) {
-        let downs: [(UInt32, UInt32)] = [(Pointer.leftDown, Pointer.leftUp), (Pointer.rightDown, Pointer.rightUp),
-                                         (Pointer.middleDown, Pointer.middleUp)]
-        for (down, up) in downs {
-            if flags & down != 0, !lifecycle.buttonDown(upFlag: up) { return }
-            if flags & up != 0, !lifecycle.buttonUp(upFlag: up) { return }
-        }
-        if let w = window {
-            winios_pointer(w.0, w.1, Pointer.move | Pointer.absolute | flags, 0)
-        } else if let c = client {
-            winios_post_client_pointer(c.0, c.1, Pointer.move | flags, 0)
-        }
     }
 
     /// A pad's values toward the guest's slot, through the menu's gate.
     /// `changesOnly`: the trace counts only a change (the scripted pad, which sends every 8 ms).
+    /// A mapped pad's keys, buttons and clock go to the main thread (sendMixer).
     nonisolated static func publish(_ v: PadValues, slot: Int, changesOnly: Bool = false) {
-        gate.withLock { g in
-            guard let out = g.input(slot: slot, v) else { return }
-            set(slot, out)
+        let due = pads.withLock { p in
+            let merged = p.mixer.physical(slot: slot, v)
+            if let out = p.gate.input(slot: slot, merged) { set(slot, out) }
+            return p.mixer.hasOutputs || p.mixer.needsClock != p.clockOn
+        }
+        if due {
+            if Thread.isMainThread {
+                MainActor.assumeIsolated { HostIO.shared.sendMixer() }
+            } else {
+                DispatchQueue.main.async { MainActor.assumeIsolated { HostIO.shared.sendMixer() } }
+            }
         }
         #if !PLAYPORT_RELEASE
         if let line = trace.update({ changesOnly && $0.pads[slot] == v ? nil : $0.pad(slot: slot, v) }) { log(line) }
@@ -458,22 +599,28 @@ final class HostIO {
     /// A pad's snapshot as the menu reads it: from a GameController pad, the
     /// scripted pad (Dev/VirtualPad.swift) and a dev build's driver (`menu:open`).
     func menuInput(_ p: PadInput) {
+        lastMenuInput = p
         // A web page the game opened takes the presses while it is up (UI/GameWebSheet.swift).
         if GameWebSheet.shared.isUp {
             GameWebSheet.shared.padInput(p)
             return
         }
-        // The guest's GDI windows on screen (a launcher, a dialog) get the presses as keys too.
-        var nav = p
-        if mouseActive { nav.lx = 0; nav.ly = 0 }   // the left stick scrolls in mouse mode (PadMouse)
-        let presses = windowNav.update(nav, at: ProcessInfo.processInfo.systemUptime)
+        // The guest's GDI windows on screen (a launcher, a dialog) get the presses as keys too,
+        // and the mapped pads hold nothing meanwhile (before publish reads this snapshot).
+        let windows = WindowKeys.takesPads(windowsShown: GuestWindows.shown, menuUp: menuUp)
+        if windows != windowsHoldPads {
+            windowsHoldPads = windows
+            Self.pads.withLock { $0.mixer.hold(.windows, windows) }
+            sendMixer()
+        }
+        let presses = windowNav.update(p, at: ProcessInfo.processInfo.systemUptime)
         // The game has ended with its last window kept on screen: a press only ends that.
         if GuestWindows.holdingAfterExit {
             if !presses.isEmpty { GuestWindows.endExitHold() }
             return
         }
-        if !menuUp, GuestWindows.shown || mouseMode {
-            for b in presses where !(mouseMode && b == .menu) {
+        if windows {
+            for b in presses {
                 for k in WindowKeys.events(for: b) { winios_post_key(k.vk, k.down ? 1 : 0) }
                 #if !PLAYPORT_RELEASE
                 HostIO.log("hostio: window keys for \(b.rawValue)")
@@ -504,6 +651,25 @@ final class HostIO {
         }
     }
 
+    /// The menu opened another way than a held Home (InGameMenu.open): a pad's
+    /// presses are the menu's from here, as after a held Home; what the pads
+    /// hold now (a button mapped to `playport:menu`) is not a press.
+    func menuOpened() {
+        menuControl.opened(holding: lastMenuInput)
+        menuEvents([])
+    }
+
+    /// A three-finger tap on the game (GameSurfaceView's recognizer, which has
+    /// already taken its fingers back from the controls and the game) or a dev
+    /// build's `gesture:three-finger-tap`: the in-game menu, with or without
+    /// on-screen controls or a controller.
+    func menuGesture() {
+        #if !PLAYPORT_RELEASE
+        HostIO.log("hostio: three-finger tap")
+        #endif
+        InGameMenu.shared.open()
+    }
+
     private func menuTick() {
         menuEvents(menuControl.tick(at: ProcessInfo.processInfo.systemUptime))
     }
@@ -512,9 +678,14 @@ final class HostIO {
     func holdGuest() {
         guard !menuUp else { return }
         menuUp = true
-        endMouse()
-        Self.gate.withLock { g in for s in g.hold(.menu) { Self.set(s, PadValues()) } }
+        Self.pads.withLock { p in
+            for s in p.gate.hold(.menu) { Self.set(s, PadValues()) }
+            p.mixer.hold(.menu, true)
+        }
+        sendMixer()
         handle(.menuOpened)
+        OnScreenControls.shared.guestHeld(true)
+        GyroSensors.shared.guestHeld(true)
     }
 
     /// The menu closed: the pads the guest's again, but not the buttons still
@@ -524,8 +695,14 @@ final class HostIO {
         menuEvents([])
         guard menuUp else { return }
         menuUp = false
-        Self.gate.withLock { g in for (s, v) in g.release(.menu) { Self.set(s, v) } }
+        Self.pads.withLock { p in
+            for (s, v) in p.gate.release(.menu) { Self.set(s, v) }
+            p.mixer.hold(.menu, false)
+        }
+        sendMixer()
         handle(.menuClosed)
+        OnScreenControls.shared.guestHeld(false)
+        GyroSensors.shared.guestHeld(false)
     }
 
     /// A guest dialog came over the running game, or the last one went
@@ -533,10 +710,19 @@ final class HostIO {
     /// rest, and their presses are the dialog's keys (WindowKeys).
     func dialogOverGame(_ up: Bool) {
         if up {
-            Self.gate.withLock { g in for s in g.hold(.dialog) { Self.set(s, PadValues()) } }
+            Self.pads.withLock { p in
+                for s in p.gate.hold(.dialog) { Self.set(s, PadValues()) }
+                p.mixer.hold(.dialog, true)
+            }
         } else {
-            Self.gate.withLock { g in for (s, v) in g.release(.dialog) { Self.set(s, v) } }
+            Self.pads.withLock { p in
+                for (s, v) in p.gate.release(.dialog) { Self.set(s, v) }
+                p.mixer.hold(.dialog, false)
+            }
         }
+        sendMixer()
+        OnScreenControls.shared.dialogOverGame(up)
+        GyroSensors.shared.dialogOverGame(up)
     }
 
     /// One of the in-game menu's controls to the session root
@@ -589,6 +775,16 @@ final class TraceBox: @unchecked Sendable {
         // After wine_host_init: shows that HostIO's lines still reach the log with no input at all.
         let n = lock.withLock { ticks += 1; return ticks }
         if n == 15 || n == 60 { HostIO.log("hostio: log alive at \(n) s") }
+        #if !PLAYPORT_RELEASE
+        // The game's XInput requests over the last 10 s (hio_pads.c; win32u reports each one,
+        // madeira-unix 0273), while it makes any: a pad check reads whether it keeps reading.
+        if n % 10 == 0 {
+            var line = [CChar](repeating: 0, count: 256)
+            if host_pad_xinput_summary(&line, UInt32(line.count)) > 0 {
+                HostIO.log("controls: XInput in 10 s: " + String(cString: line))
+            }
+        }
+        #endif
         if let quiet { HostIO.log("hostio: main queue has not run for \(Int(quiet)) s; GameController handlers and notifications wait on it") }
         DispatchQueue.main.async { [self] in
             let back: Double? = lock.withLock {
@@ -599,42 +795,6 @@ final class TraceBox: @unchecked Sendable {
             }
             if let back { HostIO.log("hostio: main queue ran again after \(Int(back)) s") }
         }
-    }
-}
-
-/// Apple's Metal performance HUD over a game, from Settings. Metal loads the
-/// HUD only when MTL_HUD_ENABLED=1 is in the environment as the process
-/// starts, so the app always sets it then (PlayportApp); each game layer then
-/// shows or hides it from the setting as it is at that launch. A dev build
-/// that starts with the setting on also has Metal log the HUD's figures once a
-/// second (MTL_HUD_LOG_ENABLED; `pp perf` reads them). A process launched
-/// with its own MTL_HUD_ENABLED keeps what that says.
-enum MetalHUD {
-    static let key = "metalHUD"
-    static var enabled: Bool { UserDefaults.standard.bool(forKey: key) }
-
-    private static let inherited = ProcessInfo.processInfo.environment["MTL_HUD_ENABLED"] != nil
-
-    /// Before anything creates a Metal device.
-    static func loadAtStart() {
-        if !inherited { setenv("MTL_HUD_ENABLED", "1", 1) }
-        #if !PLAYPORT_RELEASE
-        if !inherited, enabled { setenv("MTL_HUD_LOG_ENABLED", "1", 1) }
-        #endif
-    }
-
-    static func show(on layer: CAMetalLayer) {
-        guard !inherited else { return HostIO.log("hostio: Metal HUD from the launch environment") }
-        set(enabled, on: layer)
-    }
-
-    /// The HUD on the game layer now (the in-game menu's performance overlay),
-    /// for this game only: the setting stays as Settings has it.
-    static func set(_ on: Bool, on layer: CAMetalLayer) {
-        layer.developerHUDProperties = ["mode": on ? "default" : "off"]
-        // With an upscaler the frames are shown on its layer (PacedMetalLayer).
-        pp_upscale_output_layer()?.developerHUDProperties = ["mode": on ? "default" : "off"]
-        HostIO.log("hostio: Metal HUD " + (on ? "on" : "off"))
     }
 }
 
@@ -650,16 +810,19 @@ enum MetalHUD {
 /// framebuffer-only and blits each frame into the drawable from its own
 /// swapchain image, which it hangs on the drawable's texture
 /// (patches/mesa 0035): that image, which a blit can read, is kept instead.
-/// With an upscaler (Settings › Upscaler; app/Sources/Upscale) the game draws
-/// into a texture of its own size instead of a drawable, and the upscaler
-/// presents the frame scaled up on its own layer, a sublayer of the game's
-/// (GameSurfaceView): what is kept then is that texture.
 final class PacedMetalLayer: CAMetalLayer {
     private static let pacer = OSAllocatedUnfairLock(initialState: FramePacer(fps: 0))
     private static let shown = OSAllocatedUnfairLock<(any MTLTexture)?>(uncheckedState: nil)
 
     /// The frame on screen, nil before the first or when it cannot be read.
     static var lastPresented: (any MTLTexture)? { shown.withLockUnchecked { $0 } }
+
+    private static let presents = OSAllocatedUnfairLock(initialState: PresentRate())
+
+    /// The game's frame rate and frame time on screen now (the performance overlay).
+    static func presentRate() -> PresentRate.Reading {
+        presents.withLock { $0.reading(now: CACurrentMediaTime()) }
+    }
 
     /// The associated-object key KosmicKrisp hangs a drawable texture's
     /// readable source under (mtl_drawable_texture_set_readable_source).
@@ -713,14 +876,17 @@ final class PacedMetalLayer: CAMetalLayer {
     override func nextDrawable() -> (any CAMetalDrawable)? {
         let wait = Self.pacer.withLock { $0.delay(now: CACurrentMediaTime()) }
         if wait > 0 { Thread.sleep(forTimeInterval: wait) }
+        // With an upscaler (Settings › Upscaler; app/Sources/Upscale) the game draws into a
+        // texture of its own size, which the upscaler presents scaled up on its own layer.
         let drawable = pp_upscale_active() ? pp_upscale_next_drawable(self) : super.nextDrawable()
         #if !PLAYPORT_RELEASE
         if drawable != nil { Self.countDrawable() }
         #endif
-        if drawable != nil { PerformanceHUD.frame() }
         drawable?.addPresentedHandler { d in
-            if d.presentedTime > 0,
-               let then = Self.firstPresent.withLockUnchecked({ h in defer { h = nil }; return h }) { then() }
+            if d.presentedTime > 0 {
+                Self.presents.withLock { $0.presented(at: d.presentedTime) }
+                if let then = Self.firstPresent.withLockUnchecked({ h in defer { h = nil }; return h }) { then() }
+            }
             guard let t = (d as? CAMetalDrawable)?.texture else { return }
             let readable = Self.readable(t)
             Self.shown.withLockUnchecked { $0 = readable }
@@ -733,48 +899,65 @@ final class PacedMetalLayer: CAMetalLayer {
 /// The full-screen view DXMT presents into: its backing layer is a
 /// PacedMetalLayer, registered with IOSDisplayShim when the view reaches a window.
 /// The swap chain is aspect-fitted, black around it, and touches map into
-/// the fitted picture.
+/// the fitted picture: one finger at a time is the game's (the first down).
+/// While the on-screen controls show, a finger outside them is no one's
+/// (HostIOKit TouchRoute): no cursor, no click.
+/// A three-finger tap anywhere on it, on the on-screen controls too, opens the
+/// in-game menu (HostIO.menuGesture); UIKit cancels the tap's fingers out of
+/// the controls and the game, and iOS's own three-finger editing gestures
+/// (undo, copy, paste) are off here.
 final class GameSurfaceView: UIView {
     override class var layerClass: AnyClass { PacedMetalLayer.self }
     override var canBecomeFirstResponder: Bool { true }
+    override var editingInteractionConfiguration: UIEditingInteractionConfiguration { .none }
     private var registered = false
+    /// The finger that is the game's now.
+    private weak var gameTouch: UITouch?
     /// The guest's GDI windows until the game's swap chain presents (GuestWindows).
     private let windows = Unmanaged<CALayer>.fromOpaque(winios_windows_layer()).takeUnretainedValue()
-    /// Playport's performance HUD, over everything (PerformanceHUDView.swift).
-    private let hud = PerformanceHUDView()
-    #if !PLAYPORT_RELEASE
-    /// The view on screen, for the UI driver's tap: action (Dev/UIDriver.swift).
+    /// The on-screen controls, over the game and its windows (UI/TouchControlsView.swift).
+    private let controls = TouchControlsView()
+    /// The "Gyro aim" chip, over them and shown without them too; it takes no touch.
+    private let gyroChip = GyroChipOverlay()
+    /// Point & click's magnifier, over the controls at its own opacity; it takes no touch.
+    private let magnifier = MagnifierOverlay()
+    /// The suggested layout's toast (UI/LayoutSuggestionToast.swift), over them; it takes touches on its card only.
+    private let suggestion = LayoutSuggestionToast()
+    /// The performance overlay (UI/PerformanceOverlay.swift), over them all; it takes no touch.
+    let performance = PerformanceOverlayView()
+    /// The view on screen: the text bar gives it the hardware keys back as it closes
+    /// (UI/TextBarView.swift); a dev build's UI driver taps it (Dev/UIDriver.swift).
     static weak var current: GameSurfaceView?
-    #endif
     /// The view on screen, laid out again when the upscaler starts (TitleScreen.configure).
     static weak var onScreen: GameSurfaceView?
-    /// The controller's cursor in mouse mode (HostIO.mouseInput), drawn by Playport: Winios draws none.
-    private let padCursor: UIImageView = {
-        let v = UIImageView(image: UIImage(systemName: "cursorarrow",
-                                           withConfiguration: UIImage.SymbolConfiguration(pointSize: 20, weight: .semibold)))
-        v.tintColor = .white
-        v.layer.shadowColor = UIColor.black.cgColor
-        v.layer.shadowOpacity = 0.9
-        v.layer.shadowRadius = 1.5
-        v.layer.shadowOffset = .zero
-        v.isHidden = true
-        v.isUserInteractionEnabled = false
-        return v
-    }()
-    private var padCursorAt: CGPoint?
 
     init() {
         super.init(frame: .zero)
         backgroundColor = .black
         layer.contentsGravity = .resizeAspect
         layer.addSublayer(windows)
-        addSubview(hud)
-        addSubview(padCursor)
-        PerformanceHUD.view = hud
-        isMultipleTouchEnabled = false
+        addSubview(controls)
+        addSubview(magnifier)
+        addSubview(gyroChip)
+        addSubview(suggestion)
+        addSubview(performance)
+        // Every finger reaches the view, so the three-finger tap sees them; forward lets only one through.
+        isMultipleTouchEnabled = true
+        let menuTap = UITapGestureRecognizer(target: self, action: #selector(threeFingerTap))
+        menuTap.numberOfTouchesRequired = 3
+        // Its fingers' presses are cancelled when it is recognized (cancelsTouchesInView), and
+        // their releases held until it fails (delaysTouchesEnded): both UIKit's defaults.
+        menuTap.cancelsTouchesInView = true
+        menuTap.delaysTouchesEnded = true
+        addGestureRecognizer(menuTap)
         // Counted only (hostio: input … hover=N): whether iOS shows a mouse to
         // UIKit as a hovering pointer when GCMouse's handlers stay silent.
         addGestureRecognizer(UIHoverGestureRecognizer(target: self, action: #selector(hovered)))
+    }
+
+    @objc private func threeFingerTap(_ g: UITapGestureRecognizer) {
+        guard g.state == .recognized else { return }
+        HostIO.shared.menuGesture()
     }
 
     @objc private func hovered(_ g: UIHoverGestureRecognizer) {
@@ -790,8 +973,12 @@ final class GameSurfaceView: UIView {
         windows.frame = bounds
         windows.setNeedsLayout()
         placeUpscaled()
-        hud.place(in: bounds, insets: safeAreaInsets)
         CATransaction.commit()
+        controls.frame = bounds
+        gyroChip.frame = bounds
+        magnifier.frame = bounds
+        suggestion.frame = bounds
+        performance.frame = bounds
     }
 
     /// The upscaler's layer, while one is on: over the game layer's own (empty)
@@ -816,21 +1003,19 @@ final class GameSurfaceView: UIView {
         // (912x420 points versus 2736x1260 pixels on a 3x screen).
         contentScaleFactor = window.screen.nativeScale
         Self.onScreen = self
-        hud.restart()
         setNeedsLayout()
         // Landscape before the runtime starts, so the swap chain is made at the final size.
         window.rootViewController?.setNeedsUpdateOfSupportedInterfaceOrientations()
         window.windowScene?.requestGeometryUpdate(.iOS(interfaceOrientations: .landscape))
         if !registered, let layer = layer as? CAMetalLayer {
             registered = true
-            HostIO.shared.gameLayer = layer
+            #if !PLAYPORT_RELEASE
             MetalHUD.show(on: layer)
+            #endif
             madeira_display_set_layer(layer)
             HostIO.surfaceReady.signal()
         }
-        #if !PLAYPORT_RELEASE
         Self.current = self
-        #endif
         becomeFirstResponder()   // hardware keys come here
     }
 
@@ -844,7 +1029,12 @@ final class GameSurfaceView: UIView {
     private func forward(_ touches: Set<UITouch>) {
         let indirect = touches.filter { $0.type != .direct }.count
         HostIO.trace.update { $0.touches += touches.count - indirect; $0.pointerTouches += indirect }
-        for t in touches where t.type == .direct { route(t.location(in: self), phase: t.phase) }
+        for t in touches where t.type == .direct {
+            if t.phase == .began, gameTouch == nil, OnScreenControls.shared.route(t.location(in: controls)) == .game { gameTouch = t }
+            guard t === gameTouch else { continue }
+            if t.phase == .ended || t.phase == .cancelled { gameTouch = nil }
+            route(t.location(in: self), phase: t.phase)
+        }
     }
 
     /// A finger at p: on a guest GDI window while one is shown, else at the same
@@ -859,67 +1049,31 @@ final class GameSurfaceView: UIView {
             HostIO.shared.windowTouch(x: dx, y: dy, phase: phase)
             return
         }
-        var origin = CGPoint.zero, size = bounds.size
-        if let d = (layer as? CAMetalLayer)?.drawableSize {
-            let r = Display.aspectFit(contentWidth: d.width, contentHeight: d.height, width: size.width, height: size.height)
-            origin = CGPoint(x: r.0, y: r.1)
-            size = CGSize(width: r.2, height: r.3)
-        }
-        HostIO.shared.touch(at: CGPoint(x: p.x - origin.x, y: p.y - origin.y), in: size, phase: phase)
+        let r = picture
+        HostIO.shared.touch(at: CGPoint(x: p.x - r.minX, y: p.y - r.minY), in: r.size, phase: phase)
     }
 
-    // MARK: the controller's cursor (HostIO, PadMouse)
-
-    /// The right stick's motion, in points.
-    func movePadCursor(dx: Double, dy: Double) {
-        let from = padCursorAt ?? CGPoint(x: bounds.midX, y: bounds.midY)
-        let to = CGPoint(x: min(max(from.x + dx, bounds.minX), bounds.maxX - 1),
-                         y: min(max(from.y + dy, bounds.minY), bounds.maxY - 1))
-        padCursorAt = to
-        showPadCursor(at: to)
-        padPointer(flags: 0)
-    }
-
-    /// A button at the cursor (0 moves the guest's pointer there only).
-    func padPointer(flags: UInt32) {
-        let p = padCursorAt ?? CGPoint(x: bounds.midX, y: bounds.midY)
-        if flags != 0 { padCursorAt = p; showPadCursor(at: p) }
-        var dx: Int32 = 0, dy: Int32 = 0
-        if winios_windows_point(Double(p.x), Double(p.y), &dx, &dy) != 0 {
-            HostIO.shared.padPointer(window: (dx, dy), client: nil, flags: flags)
-            return
-        }
-        var origin = CGPoint.zero, size = bounds.size
-        if let d = (layer as? CAMetalLayer)?.drawableSize {
-            let r = Display.aspectFit(contentWidth: d.width, contentHeight: d.height, width: size.width, height: size.height)
-            origin = CGPoint(x: r.0, y: r.1)
-            size = CGSize(width: r.2, height: r.3)
-        }
-        let x = min(max(p.x - origin.x, 0), size.width - 0.001), y = min(max(p.y - origin.y, 0), size.height - 0.001)
-        HostIO.shared.padPointer(window: nil, client: Pointer.clientFraction(x: x, y: y, width: size.width, height: size.height),
-                                 flags: flags)
-    }
-
-    func hidePadCursor() { padCursor.isHidden = true }
-
-    private func showPadCursor(at p: CGPoint) {
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        // The arrow's tip is the point.
-        padCursor.sizeToFit()
-        padCursor.frame.origin = CGPoint(x: p.x - padCursor.bounds.width * 0.3, y: p.y - padCursor.bounds.height * 0.15)
-        padCursor.isHidden = false
-        bringSubviewToFront(padCursor)
-        CATransaction.commit()
+    /// Where the game's picture is in the view: the swap chain aspect-fitted, black around it
+    /// (contentsGravity resizeAspect). A game touch maps through it, and so does the on-screen
+    /// controls' pointer surface (Point & click; OnScreenControls.began).
+    var picture: CGRect {
+        guard let d = (layer as? CAMetalLayer)?.drawableSize else { return bounds }
+        let r = Display.aspectFit(contentWidth: d.width, contentHeight: d.height, width: bounds.width, height: bounds.height)
+        return CGRect(x: r.0, y: r.1, width: r.2, height: r.3)
     }
 
     #if !PLAYPORT_RELEASE
-    /// The UI driver's tap: a finger down and up at (fx, fy), fractions of the view, 0.1 s apart.
-    func tap(fx: Double, fy: Double) async {
+    /// The UI driver's tap: a finger down and up at (fx, fy), fractions of the view, 0.1 s apart,
+    /// when it is the game's (not with the on-screen controls shown: those take `touch:`).
+    func tap(fx: Double, fy: Double) async throws -> TouchRoute {
+        try UIDriver.checkpoint()
         let p = CGPoint(x: fx * bounds.width, y: fy * bounds.height)
+        let to = OnScreenControls.shared.route(convert(p, to: controls))
+        guard to == .game else { return to }
         route(p, phase: .began)
-        try? await Task.sleep(for: .milliseconds(100))
-        route(p, phase: .ended)
+        defer { route(p, phase: .ended) }
+        try await UIDriver.pause(.milliseconds(100))
+        return to
     }
     #endif
 

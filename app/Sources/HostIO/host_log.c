@@ -8,8 +8,9 @@
  * Winios's own fprintf(stderr) lines, called from the same main thread, did.
  * So this does what Winios does: once fd 2 is the log (wine_host_init dup2s it
  * there, O_APPEND), the line goes through stderr; before that it is appended
- * to the file directly. A release build sets a limit (host_log_set_limit):
- * a line is dropped once the file has reached it, whichever way it would go.
+ * to the file directly. AppLog.swift sets a limit (host_log_set_limit; a
+ * release build's 4 MiB, a dev build's twice WINE_HOST_DEV_LOG_CAP): a line is
+ * dropped once the file has reached it, whichever way it would go.
  */
 #include <fcntl.h>
 #include <stdio.h>
@@ -47,4 +48,12 @@ void host_log(const char *path, const char *line)
     struct iovec iov[2] = {{(void *)line, strlen(line)}, {"\n", 1}};
     (void)!writev(fd, iov, 2);
     close(fd);
+}
+
+void host_log_rotate(const char *path, const char *previous, long over)
+{
+    struct stat st;
+    if (!path || !previous || stat(path, &st) || st.st_size <= over) return;
+    unlink(previous);
+    rename(path, previous);
 }

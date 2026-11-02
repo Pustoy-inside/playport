@@ -11,9 +11,11 @@ use and the SoC's thermal power budget, second by second.
 WHEN is SECS after the launch, or first-frame+SECS after the game's first
 frame. The launch is the product UI's Play of --title (default app-367520,
 Hollow Knight), through `pp ui`. Settings' Metal HUD is turned on first, in
-a launch of its own: a dev build that starts with it on also has Metal log the
-HUD's figures (MetalHUD in HostIO.swift). --no-hud turns it off instead: the
-HUD's per-frame logging costs the process CPU work, and frames are then
+a launch of its own: the app loads the HUD only when it starts with the
+setting on, and a dev build then also has Metal log the HUD's figures
+(MetalHUD in HostIO.swift). --no-hud turns it off instead, so the measured
+launch loads no HUD: its interposer costs CPU on every encoder and its
+per-frame logging more, and frames are then
 counted from the game layer's per-16-drawable `[frames] HH:MM:SS.mmm n=N` lines
 (PacedMetalLayer in HostIO.swift, either backend), or in a run from before
 them, DXMT's per-16-present `[iOS DXMT] Present #N t=` lines.
@@ -60,9 +62,11 @@ without a special build:
                     patches/dxmt 0005: shader and pipeline compiles and the
                     draws that waited for one (hitches.txt)
   [pass-prof]       only with --pass-prof (Settings' Diagnostics, GPU time per
-                    pass; patches/dxmt 0008): every encoder of two frames in
-                    every 1200 presents, its GPU time, size and attachments
-                    (passes.txt, tools/passprof.py)
+                    pass; DXMT and KosmicKrisp): every encoder of two frames
+                    in every 1200 presents, its GPU time, size and attachments
+                    (passes.txt, tools/passprof.py). KosmicKrisp also logs pipeline
+                    limits keyed by MSL hash; capture must be off. Copy/empty
+                    encoder times are unavailable and GPU totals are partial
   [wprof]           only with --cpu-prof (Settings' Diagnostics, CPU sampling;
                     patches/madeira-unix 0028): the busiest threads' samples
                     (profile.txt, tools/sampleprof.py)
@@ -165,6 +169,10 @@ XP_RE = re.compile(r"^\[xp\] (\d\d):(\d\d):([\d.]+) \S+ dt=([\d.]+) cpu=(\d+) \(
 # before the wine tid), then P ms / E ms : P GHz / E GHz : M instructions
 XPT_RE = re.compile(r"^\[xp-t\] (\d\d):(\d\d):([\d.]+) (.*)")
 XPT_ENT = re.compile(r"^(m\d+|[A-Z]*-?[0-9a-f]{4,}):([\d.]+)/([\d.]+):[\d.]+/[\d.]+:([\d.]+)$")
+# madeira-unix 0223, under MADEIRA_FEX_PAUSE=yield-os or wait-os: per guest thread, its
+# traps in the tick / those under 2 us / ms inside them (PLA-462)
+XPAUSE_RE = re.compile(r"^\[xp-pause\] (\d\d):(\d\d):([\d.]+) (.*)")
+XPAUSE_ENT = re.compile(r"^-([0-9a-f]{4,}):(\d+)/(\d+)/([\d.]+)$")
 # FEX's lookup-cache summary (every 16384 lookups): real_compiles counts guest
 # blocks translated so far; DXMT's per-16-present line counts mach exceptions
 CB_RE = re.compile(r"\[CB_SUMMARY\] total=\d+ real_compiles=(\d+)")
@@ -348,6 +356,7 @@ def analyze(d, bucket=5.0, frames_from="auto", echo=True):
     with open(this, errors="replace") as f:
         lines = f.read().splitlines()
     hud, xp, budget, xpt, names, vpad, pres, srv, srvt, lay = [], [], [], [], {}, [], [], [], [], []
+    xpause = []
     # (t, kind, n): lines without a time of their own take the last time seen
     # in the log, which runs at least four times a second ([xp], [xp-t])
     ev, cur_t, last_cb = [], None, None
@@ -400,6 +409,16 @@ def analyze(d, bucket=5.0, frames_from="auto", echo=True):
                         k = me[1] if me[1].startswith("m") else me[1].lstrip("ABCDEFGHIJKLMNOPQRSTUVWXYZ-")
                         ents[k] = (float(me[2]), float(me[3]), float(me[4]))
                 xpt.append((secs_of(m[1], m[2], m[3]), ents))
+            continue
+        if l.startswith("[xp-pause] "):
+            m = XPAUSE_RE.match(l)
+            if m:
+                ents = {}
+                for e in m[4].split():
+                    me = XPAUSE_ENT.match(e)
+                    if me:
+                        ents[me[1]] = (int(me[2]), int(me[3]), float(me[4]))
+                xpause.append((secs_of(m[1], m[2], m[3]), ents))
             continue
         if l.startswith("[srv"):
             m = SRV_RE.match(l)
@@ -610,7 +629,7 @@ def analyze(d, bucket=5.0, frames_from="auto", echo=True):
     out.append("summary " + json.dumps(summ))
     with open(os.path.join(d, "summary.txt"), "w") as f:
         f.write("\n".join(out) + "\n")
-    threads = thread_table(d, hud, xp, xpt, names, t0, bucket * 3)
+    threads = thread_table(d, hud, xp, xpt, names, t0, bucket * 3, xpause=xpause)
     server = server_table(d, hud, srv, srvt, xpt, names, t0, bucket * 3)
     import sampleprof
     prof = sampleprof.report(lines)   # a launch with WINE_IOS_PROF=1
@@ -618,7 +637,7 @@ def analyze(d, bucket=5.0, frames_from="auto", echo=True):
         with open(os.path.join(d, "profile.txt"), "w") as f:
             f.write(prof)
     import passprof
-    passes = passprof.report(lines)   # a launch with DXMT_PASS_PROF=1
+    passes = passprof.report(lines)   # DXMT or KosmicKrisp, Diagnostics' passProfile
     if passes:
         with open(os.path.join(d, "passes.txt"), "w") as f:
             f.write(passes)
@@ -878,11 +897,15 @@ def hitch_table(d, hud, vpad, ev, t0, slack=0.3):
     return res
 
 
-def thread_table(d, hud, xp, xpt, names, t0, window, top=8):
+def thread_table(d, hud, xp, xpt, names, t0, window, top=8, xpause=()):
     """threads.txt: per window, the busiest threads by instructions retired.
     cpu% is of one core; Mi/f (million instructions per presented frame) does
     not depend on the cluster or clock the scheduler gave the thread, so it is
-    the measure of work to compare between runs and phases."""
+    the measure of work to compare between runs and phases. Under
+    MADEIRA_FEX_PAUSE=yield-os or wait-os ([xp-pause]) a thread's row also has its
+    PAUSE traps per second, the share of them that took 2 us or more (for
+    yield-os: the kernel ran something else), and the time inside them as % of
+    one core."""
     dts = {round(r[0], 3): r[1] for r in xp}   # [xp] and [xp-t] of one tick share the wall time
     out, res = [], []
     w = 0
@@ -891,6 +914,13 @@ def thread_table(d, hud, xp, xpt, names, t0, window, top=8):
         if lo > (hud[-1][0] if hud else 0):
             break
         seg = [e for e in xpt if lo <= e[0] < hi]
+        pz = {}
+        for t, ents in xpause:
+            if lo <= t < hi:
+                for k, v in ents.items():
+                    a = pz.setdefault(k, [0, 0, 0.0])
+                    for i in range(3):
+                        a[i] += v[i]
         fr = [h for h in hud if lo <= h[0] < hi]
         w += 1
         if not seg or len(fr) < 2:
@@ -910,14 +940,20 @@ def thread_table(d, hud, xp, xpt, names, t0, window, top=8):
             rows.append({"thread": k, "name": names.get(k, ""), "cpu_pct": round(100 * (p + e) / wall),
                          "p_share": round(p / (p + e), 2) if p + e else 0.0,
                          "minst_per_frame": round(mi / frames, 2) if frames else None})
+            if k in pz and pz[k][0]:
+                traps, short, ms = pz[k]
+                rows[-1]["yield_os"] = {"traps_ps": round(1000 * traps / wall), "long_pct": round(100 * (traps - short) / traps),
+                                        "in_trap_pct": round(100 * ms / wall, 1)}
         res.append({"t": round(lo - t0), "fps": round(frames / (fr[-1][0] - fr[0][0]), 1),
                     "cpu_pct": round(100 * (tot[0] + tot[1]) / wall),
                     "minst_per_frame": round(tot[2] / frames, 1) if frames else None, "top": rows})
         r = res[-1]
         out.append(f"t={r['t']:>4} fps={r['fps']:>6} cpu={r['cpu_pct']:>4}% all threads {r['minst_per_frame']} Mi/f")
         for x in rows:
+            y = x.get("yield_os")
             out.append(f"    {x['thread']:>9} {x['name'][:28]:28} cpu {x['cpu_pct']:>4}%  P {x['p_share']:>4.2f}  "
-                       f"{x['minst_per_frame']:>6} Mi/f")
+                       f"{x['minst_per_frame']:>6} Mi/f"
+                       + (f"  yield-os {y['traps_ps']}/s long {y['long_pct']}% in-trap {y['in_trap_pct']}%" if y else ""))
     with open(os.path.join(d, "threads.txt"), "w") as f:
         f.write("\n".join(out) + "\n")
     return res
@@ -1097,12 +1133,15 @@ def parser():
     p.add_argument("--keep-log", action="store_true", help="do not rotate s1-host.log before the launch")
     p.add_argument("--syslog-all", action="store_true", help="also keep the whole device syslog (syslog-all.txt)")
     p.add_argument("--no-hud", action="store_true",
-                   help="turn Settings' Metal HUD off first (its per-frame logging costs CPU); frames then come from "
+                   help="turn Settings' Metal HUD off first, so the measured launch does not load it (its "
+                        "interposer and per-frame logging cost CPU); frames then come from "
                         "the game layer's [frames] lines (any backend) and the frame-time, GPU and memory columns "
                         "stay empty")
     p.add_argument("--pass-prof", action="store_true",
-                   help="turn on Settings' Diagnostics, GPU time per pass, for this run: winemetal times every "
-                        "encoder of two frames in every 1200 presents; passes.txt tables them (tools/passprof.py)")
+                   help="turn on Settings' Diagnostics, GPU time per pass, for this run: DXMT or KosmicKrisp times every "
+                        "encoder of two frames in every 1200 presents; passes.txt tables them and KosmicKrisp's "
+                        "pipeline limits (tools/passprof.py); copy/empty timings are unavailable, totals partial; "
+                        "GPU capture must be off")
     p.add_argument("--gpu-capture", type=int, metavar="FRAME",
                    help="turn on Settings' Diagnostics, GPU capture, for this run: DXMT writes frame FRAME (presents "
                         "from the game's first) as a .gputrace; it is pulled into the run directory and "

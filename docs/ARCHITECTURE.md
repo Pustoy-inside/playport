@@ -14,6 +14,25 @@ rebased as `patches/*-port` series (decisions
 [0007](decisions/0007-dxmt-on-upstream.md), [0008](decisions/0008-fex-on-upstream.md)).
 `pins.lock`'s header says what each row means.
 
+### Valve's ARM64 Proton items not carried
+
+Valve's Proton bleeding-edge is the reference for ARM64 defaults, not a base
+([decision 0049](decisions/0049-latest-pins.md); the items taken and still open
+are in [the alignment plan](https://linear.app/playportdev/issue/PLA-76)). These
+do not apply on iOS:
+
+| Proton item | Why not |
+|---|---|
+| `ProfileStats=1` | Writes Linux stats shared memory. `pp perf` has its own telemetry (0021). |
+| FEX Linux UnixLib (prctl hardware TSO and unaligned atomics, THP, VMA names) | Linux-only kernel interfaces. iOS has no separate FEX UnixLib; its entry points are no-ops (`patches/fex-port` 0030). |
+| `-march=armv8.2-a -mtune=cortex-x3` | Tuning for Snapdragon/Cortex. Apple cores need their own check. |
+| `-marm64x` for DXVK/vkd3d-proton | ARM64X serves native ARM64 callers. Guests are x86, except a native ARM64 child (decision [0170](decisions/0170-native-arm64-guests.md)), which gets a separate `aarch64-windows` build of vkd3d-proton, DXVK's `dxgi` and the Vulkan loader instead (`build/stages/vulkan-pe.sh`). |
+| fsync/ntsync, the Steam runtime, `PROTON_USE_ARM64` paths, `SilentLog`/`PROTON_LOG`, NVAPI | Linux launcher, driver or GPU specifics. In-process sync is ppsync, Playport's userspace ntsync driver ([below](#in-process-sync), 0157, proposed). |
+| FEX `client.json`/`steamwebhelper.json` app configs | These target the Linux Steam client. Playport's Steam client is native Swift. |
+| Valve Wine AVX/YMM contexts, SVE state | Not carried: since `patches/fex-port` 0064 the ARM64EC host has AVX128, which keeps the ymm high halves only in FEX's thread state; Wine's ARM64EC contexts drop them and never set `CONTEXT_XSTATE`, so a guest's handler cannot see them and its own AVX writes reach the code it resumes (`build/ymm-context/test.py` checks this convention; the `ymmctx` probe checks it in a guest). A title's `env.FEX_HOSTFEATURES` with `disableavx` runs it as on a CPU without AVX (`patches/fex` 0088); every World of Warcraft product has it by compatibility default ([evidence](evidence/2026-11-01-x64-ymm-contexts.md)). Apple CPUs have no SVE (0018). |
+| `MIMALLOC_DISABLE_REDIRECT` for Teardown (1167630) | Per-game data, not an ARM default. Carry it only if Teardown is played. |
+| Valve's FEX DLL names (`libarm64ecfex.dll`, `libwow64fex.dll`) | Playport ships `xtajit64.dll`/`xtajit.dll`, the names Windows uses and Madeira's loader expects (0018). |
+
 ## One process on iOS
 
 Everything runs inside the app's single Mach process. iOS allows no `fork`,
@@ -32,7 +51,8 @@ Wine's multi-process design into threads:
 | Wine PE side | the `arm64ec-windows`, `aarch64-windows` (including `wow64.dll`/`wow64win.dll`) and `i386-windows` DLL sets, `nls/` data; `system32` is the arm64ec set, with Wine's programs (`start`, `reg`, `conhost`, …) built for arm64ec ([decision 0082](decisions/0082-system32-programs.md)) | WineHQ wine plus Madeira's fork (`patches/wine-port`) and Valve's Wine commits (`patches/wine-valve`) |
 | FEX | `xtajit64.dll` (arm64ec, `libarm64ecfex.dll`) for x86-64 and `xtajit.dll` (aarch64, `libwow64fex.dll`) for i386: translate guest code into the JIT pool | FEX-Emu/FEX plus Madeira's port |
 | DXMT PE side | `d3d11.dll`, `dxgi.dll`, `winemetal.dll` (and `d3d10core.dll` in the arm64ec set); no i386 build or Direct3D 9 | DXMT fork |
-| Vulkan PE side | DXVK's arm64ec Direct3D 8–11 DLLs and vkd3d-proton's Direct3D 12 DLLs; i386 ships DXVK's `d3d9`, `d3d10core`, `d3d11` and `dxgi` (not `d3d8`, and no i386 vkd3d-proton), over Wine's i386 `winevulkan` and KosmicKrisp | `build/stages/vulkan-pe.sh` |
+| Vulkan PE side | DXVK's arm64ec Direct3D 8–11 DLLs and vkd3d-proton's Direct3D 12 DLLs; i386 ships DXVK's `d3d9`, `d3d10core`, `d3d11` and `dxgi` (not `d3d8`, and no i386 vkd3d-proton), over Wine's i386 `winevulkan` and KosmicKrisp; aarch64 ships vkd3d-proton's `d3d12` and `d3d12core` and DXVK's `dxgi` for a native ARM64 child (decision [0170](decisions/0170-native-arm64-guests.md)), linked over `sysarm64` | `build/stages/vulkan-pe.sh` |
+| Khronos Vulkan loader | the Khronos Vulkan-Loader's arm64ec and aarch64 `vulkan-1.dll` and winevulkan's `winevulkan.json`, linked over system32 (and `sysarm64`) after the backend's set for a play with `khronosVulkanLoader` (RDR2), so a game's own Vulkan layer loads in front of winevulkan; every other play keeps Wine's `vulkan-1.dll` (decision [0131](decisions/0131-the-khronos-vulkan-loader-for-a-game-whose-layer-must-load.md)) | `build/stages/vulkan-pe.sh loader` |
 | OpenGL | Mesa's EGL, OpenGL frontend and Zink over KosmicKrisp (`MesaEGL.framework`, `MesaGallium.framework`), reached through win32u's EGL backend and Wine's opengl32 unix thunks, for x86-64 and i386 (see [OpenGL](#opengl)) | `build/stages/mesa.sh` with `patches/mesa`; `patches/madeira-unix` 0114–0116, `patches/wine-unix` 0028–0029 |
 | XInput | Wine's builtin `xinput*.dll`, reading Madeira's controller snapshot through win32u | Madeira `app/Madeira/Winios/WiniosGamepad.c`, Wine `dlls/xinput1_3` |
 
@@ -46,6 +66,42 @@ with its own PEB and private ntdll copy:
   audited guest-pointer thunks (wow64win's `window_audited.h` in
   `patches/wine-pe`), not every i386 title or API
   ([decision 0047](decisions/0047-i386-titles-on-vulkan.md)).
+- **A plain ARM64 program runs as a native ARM64 child** (decision
+  [0170](decisions/0170-native-arm64-guests.md), accepted after the phone runs of 2026-10-31).
+  The x86-64 session starts it with its own aarch64 ntdll (`patches/madeira-unix` 0249,
+  the image a WoW64 child's native side uses), no WoW64 window and no FEX; its system
+  DLLs come from `sysarm64` (`patches/wine-pe` 0015, 0056). Its image and DLLs take the
+  JIT pool copy and x18 patching like any ARM64 image, and the copy is the image
+  ([decision 0176](decisions/0176-native-arm64-images-live-in-the-jit-pool.md),
+  `patches/madeira-unix` 0262): the mapping returns the copy's address, so the PEB, the
+  module list and the unwinder hold the address the code runs at. The PE view stays as
+  Wine's backing store, which the virtual-memory calls translate to and from, and which
+  the IAT sync never copies over the copy. Its private ntdll stays on its view.
+  Every instruction that reads x18 is patched, not only the ADD/LDR/STR forms
+  (`patches/madeira-unix` 0252, 0263); a native child's copy also gets every
+  relocation. An image that replaces itself with a section of its own (WoW's client,
+  0264, 0176's amendment) has a section view mapped at its copy go to the backing store
+  and be copied in, the section's other views `vm_remap`ped onto the copy's RW alias, and
+  the code reachable from each `FlushInstructionCache` x18-patched; the load's patcher
+  leaves encrypted 1 KB windows of a native child's `.text` alone. So the image a native
+  child runs is rewritten in memory, never on disk. No game runs this way any more:
+  World of Warcraft plays its x64 client through FEX, and the runtime changes no game's
+  code in memory ([decision 0177](decisions/0177-wow-plays-its-x64-client-through-fex.md)).
+  A context continued with Cpsr.SS is stepped in software (0253, 0256, 0259, 0261);
+  code it writes runs through the anonymous executable path. `tools/compat/probes`
+  `arm64`, `arm64-fault` and `arm64-min` test it
+  ([evidence](evidence/2026-10-30-native-arm64-child.md)). The `arm64` probe's `x18`
+  argument, with `madeira.cfg` `x18-abi = 1` (madeira-unix 0272, a diagnostic, off by
+  default), measures whether iOS keeps x18 under the custom x18 ABI of macOS 26.4's
+  `os_set_custom_x18_abi_enabled`, which would make the patching unnecessary
+  ([evidence](evidence/2026-11-01-ios-custom-x18-abi.md)). Its
+  Direct3D 12 is the Vulkan backend's aarch64 set (`Runtime/vulkan*/aarch64-windows`)
+  linked over `sysarm64` by a Vulkan launch; the `d3d12` probe tests it
+  ([evidence](evidence/2026-10-30-arm64-d3d12.md)). As run on the phone (2026-11-01, IPA
+  `ff0cd315`): the `arm64` and `d3d12` probes pass and Hollow Knight still reaches first
+  frame+10; WoW Classic Era's ARM64 client started as a native child and stopped before its
+  login ([evidence](evidence/2026-10-31-wow-arm64-start.md)) before 0177 moved WoW to its x64
+  client.
 - **A crashing child is isolated only in part.** A fault in any pseudo-process is a
   fault in the app's one task. Orderly `TerminateProcess` of live children works and is
   tested. Two host-fault cases end the child, not the app (`patches/madeira-unix`
@@ -180,6 +236,38 @@ Playport (S1Probe or Playport)                 PlayportJIT.appex
   and so its own free-team App ID and profile, one of the ten App IDs a free
   team may register per week. It takes no device slot.
 
+### Helper-owned RAM experiment
+
+A dev build's Settings › Developer › Probes can measure 64 MiB, 2 GiB or
+4 GiB of anonymous RAM owned by the helper and mapped directly in the app
+(`SharedMemory`, `Dev/SharedMemoryProbe.swift`). A ledger-tagged Mach memory
+entry crosses XPC as a send right; full-buffer checks in both processes
+prove aliasing and retention. On the phone, 4 GiB raised the helper's footprint,
+not the app's ([evidence](evidence/2026-10-03-helper-owned-memory.md)). This is
+not a private no-footprint entitlement or a file-backed swap area.
+
+madeira-unix 0148 offers fresh large RW guest commits to optional host hooks
+(`playport_guest_memory_backing`, and `playport_guest_memory_released` with the
+range and whether it was detached to ordinary memory). Both builds answer them
+from a donor pool, on as Auto unless Settings › Graphics › Donor memory turns it off
+([decision 0153](decisions/0153-rdr2s-settings-are-every-games-defaults.md);
+`set:donorPoolMB=off|auto`, and in a dev build `2048|4096|6144`): at Play, after
+the JIT activation, helpers that then end give purgeable objects, and each
+commit is a `vm_map` of an unused range of one at Wine's address
+(`SharedMemory/GuestPool.m`, `DonorPool.swift`, `DonorRounds.swift`;
+[plan](https://linear.app/playportdev/issue/PLA-216), step 3). Auto takes the phone's tier's
+pool ([decision 0105](decisions/0105-memory-defaults-per-phone.md): 4 GiB on a 12 GB
+phone, 1 GiB on 8 GB, none and no setting under), at most one donor's grant
+(PlayportKit `DonorPoolSizing`). During play the pool stops taking unused pages
+when the phone's spare memory or jetsam's level falls under its floor, and takes them
+again with 512 MiB of spare memory over its floor, even under level 20 %; after such a
+resume the level stop counts from the level at the resume, at most 15 %
+(`DonorPoolSizing.Growth`, 0105 as amended; `donor-pool: pressure` lines). An earlier per-allocation
+broker asked the living helper over XPC for each mapping, and a hook for FEX's
+data band (0147) moved only 30–90 MiB in Hollow Knight and Kingdom Come
+([evidence](evidence/2026-10-03-fex-helper-memory.md),
+[KCD](evidence/2026-10-03-kcd-helper-memory.md)); both were removed.
+
 ### JIT pool placement
 
 FEX writes all translated code into one pool. The pool must lie in whole
@@ -298,11 +386,13 @@ whose title needs more (PlayportKit `MemoryNeed`) before the pool is acquired.
 
 ### JIT pool use
 
-The pool never grows. PE images with native code (a full copy of each ARM64EC,
+The pool never grows. PE images with native code (a copy of each ARM64EC,
 ARM64X or ARM64 image, x18 trampolines included), guest JIT blocks (Mono's, V8's) and each pseudo-process's private
 ntdll copy take its **head**, from the bottom up; FEX's code buffers take its
-**tail**, from the top down, up to 128 MiB each while the room between them
-allows. A guest JIT region's writes are routed through the **anonymous-alias
+**tail**, from the top down, up to 64 MiB each while the room between them
+allows, less 48 MiB and 16 MiB for each other process holding a code buffer
+(`patches/madeira-unix` 0157 and 0233, decision
+[0116](decisions/0116-tail-room-for-every-process-and-the-launchers-smc-checks.md) as amended). A guest JIT region's writes are routed through the **anonymous-alias
 table** (4096 entries); an entry ends when its memory is released
 (`MEM_RELEASE`, [evidence](evidence/2026-10-12-jit-alias-release.md)), and its pool
 range stays used. A dead process's code buffers are reused, and so are its
@@ -311,7 +401,13 @@ read-write, which takes execute permission from those pages for good, so a
 freed image range is reused only by another image copy whose own writable
 pages cover every such page (`patches/madeira-unix` 0138,
 [evidence](evidence/2026-10-13-pool-head-reuse.md)); a dead copy of the same
-image is the usual fit. The head cursor never moves down, so the head stays near the
+image is the usual fit. A copy leaves out the image's trailing sections no code
+reaches, a builtin's `.rsrc` and `.reloc` (`patches/madeira-unix` 0165, decision
+[0122](decisions/0122-builtin-copies-without-rsrc-and-reloc.md)): the copy path reads the
+relocations from the PE view, and ntdll's resource functions turn a copy's base
+into the PE view's (`patches/wine-pe` 0048). ARM64 and ARM64EC builtins are linked with 16 KiB
+sections, not Wine's 64 KiB (`patches/wine-pe` 0049, decision
+[0123](decisions/0123-builtins-linked-with-16-kib-sections.md)). The head cursor never moves down, so the head stays near the
 most that processes alive at once have needed (fragmentation adds some). The ranges never become room.
 
 A pure x86-64 image (AMD64, no CHPE metadata: a game's executable and DLLs)
@@ -323,6 +419,17 @@ reverted it (its ml457/ml458 notes); both trials predate the writable backing
 of RWX sections (ml957), the likely cause, and the phone showed no regression
 ([evidence](evidence/2026-10-07-pool-x64-images.md)): Hollow Knight's head
 fell from 138 to 83 MiB, Jurassic World Evolution's from 480 to 68.
+
+Wine maps an image section from its file only when it is 16 KiB-aligned in
+memory and in the file, and reads any other section into the view, where its
+pages are anonymous memory of the process. An x86-64 image of 64 MiB or more
+whose sections are not (Rockstar's libcef, RDR2.exe) maps whole from a copy laid
+out at its RVAs in the app's `Library/Caches/images`, written once in the
+background after its first load, so its clean pages stay the file's, shared and
+outside the footprint. A copy is keyed by the file's identity with its ctime and
+checked on each use against the file at 16 sampled points (`patches/madeira-unix`
+0235 and 0238, logged `[img-cache]`,
+decision [0167](decisions/0167-large-x86-64-images-map-from-a-cache-copy.md)).
 
 - Madeira-unix 0034 counts them (`ios_jit_pool_stats`), and
   `wine_host_pool_stats_read` passes the counts to the app. While a title
@@ -368,27 +475,57 @@ fell from 138 to 83 MiB, Jurassic World Evolution's from 480 to 68.
   in an alert. A dev build's Settings can set the
   pool (*Simulated JIT memory*, `set:jitPoolSimulatedMB=184`) to drive it.
 
+### The guest window
+
+Wine places its own allocations and every x86-64 and ARM64EC image below the
+furniture ceiling, in the guest window [0x7048000000, 0x73ffff0000) above the JIT pool's
+RW alias. The band between the ceiling and FEX's band, [0x73ffff0000, 0x7c00000000), is kept for
+CEF's PartitionAlloc pools and large reservations. When the window is full:
+
+- a private allocation is placed bottom-up above the ceiling (`[va-ceiling] … placed at`);
+- an image whose caller set no upper limit is placed there too, below FEX's band
+  (`[va-ceiling] image …`, madeira-unix 0170,
+  [decision 0128](decisions/0128-an-image-maps-above-the-furniture-ceiling-when-the-window-is-full.md)).
+
+Each placement that fails logs a `[va-scan] FAILED` line. i386 images go into their process's
+4 GiB window instead.
+
+Two holds keep address space for a title's large reservations from boot, both set by its
+`madeira.cfg` keys ([decisions 0126](decisions/0126-hold-rdr2s-address-space-from-the-start.md),
+[0129](decisions/0129-the-holds-serve-only-their-own-request.md)):
+
+- `jumbo-mb` holds a gap of that size below FEX's band, for the one reservation of that size;
+- `cage-hold` holds 8 GB of the guest window at 0x7200000000, for an 8 GB ask (The Witcher 3).
+
 ### The FEX host band
 
 FEX keeps its host state in one 16 GB range, `[0x7c00000000, 0x8000000000)`,
 which ntdll reserves at start and serves only to FEX's requests (the
-`[fex-arena]` lines). Every emulator thread takes about 50 MB of it: its
-rpmalloc heap's two 16 MB spans (one for small blocks, one for medium),
-a call-return stack of 16 MB and two guard pages, and a 2 MB L1 lookup cache.
+`[fex-arena]` lines). Every emulator thread takes some of it: its rpmalloc
+heap's 1 MiB spans (`patches/rpmalloc` 0006: a small span holds sixteen
+64 KiB pages, and a medium or large page is a whole span, one for each such
+size class the thread uses; a block above 896 KiB is mapped at its own size),
+a 4 MiB call-return stack and two guard pages (`patches/fex` 0055), and a
+2 MiB L1 lookup cache; a thread that starts and touches one small and one
+medium class takes about 8 MiB
+([decision 0121](decisions/0121-a-4-mib-call-return-stack-and-1-mib-spans.md)).
 The L2 cache and its table for the 8 GB `VirtualMemSize` are off on iOS, so
 they take nothing. Call-return stacks are placed from the top of the band
 down (`patches/fex` 0010), and rpmalloc's spans from the bottom up, so the
-stacks leave no holes between 16 MB-aligned spans. Hollow Knight holds
-3.3 GB with 50 threads, and 3.5 GB with DXVK's six compiler threads on the
-Vulkan backend ([fex-band](evidence/2026-09-28-fex-band.md)).
+stacks leave no holes between span-aligned spans. With 16 MiB spans and
+stacks, Hollow Knight held 3.3 GB with 50 threads, and 3.5 GB with DXVK's six
+compiler threads on the Vulkan backend ([fex-band](evidence/2026-09-28-fex-band.md)),
+and the Rockstar launcher filled the band at 197 threads, about 83 MB each
+([evidence](evidence/2026-10-19-rockstar-physicaldrive.md)).
 
-- Madeira-unix 0038 counts the band's views (`ios_fex_band_stats`), and
+- Madeira-unix 0038 counts the band's views (`ios_fex_band_stats`), knowing a span and a
+  call-return stack by their shapes (madeira-unix 0164), and
   `wine_host_band_stats_read` passes the counts to the app. A launch logs a
   `title: band: size_mb=… used_mb=… largest_free_mb=… span_slots=… threads=…
   refused=…` line whenever the use moved by 256 MB or the thread count by 4,
   and marks one when the launch ends; `pp ui` and `pp perf` put the last one
-  in the result event as `band`. `span_slots` is the free 16 MB-aligned
-  blocks, what a new rpmalloc span needs; `refused` counts requests the band
+  in the result event as `band`. `span_slots` is the free 1 MiB-aligned
+  1 MiB blocks, what a new rpmalloc span needs; `refused` counts requests the band
   could not serve (a thread that cannot start). The first refusal, and a dev
   build at 16, 32, 48… threads and at the launch's end, write the band's map
   as `[band-map]` lines.
@@ -399,6 +536,12 @@ Vulkan backend ([fex-band](evidence/2026-09-28-fex-band.md)).
   name hook logged, the log allocated, and the nested allocation made a new
   heap or span before the first was recorded, 231 levels deep, which took
   3.7 GB of the band on Hollow Knight's second thread.
+- **Running out.** The band runs out when it refuses a request, which only FEX makes. A refused
+  pooled buffer (the IR emitter's working list, the frontend's buffer, a code buffer) logs a
+  `[band] FEX could not allocate …` line and ends its guest process with
+  `STATUS_COMMITMENT_LIMIT` (`patches/fex` 0054). The launch then ends as a JIT pool exhaustion
+  does, after the same grace, as *ran out of emulator memory* (`band=exhausted` in its result
+  line) ([decision 0120](decisions/0120-a-full-fex-band-ends-the-launch.md)).
 
 ### Known runtime limits
 
@@ -415,6 +558,7 @@ pool's use. `pp ui` and `pp perf` put the last line in the result event as
 | --- | --- | --- |
 | A W+X request that `mprotect` grants with EXEC but without WRITE (`mprotect_exec`'s fast path) | The request fails with `EACCES`, and `NtProtectVirtualMemory` returns `STATUS_ACCESS_DENIED` (madeira-unix 0036). Before 0036 it returned success with WRITE gone (the `ml999` report). On a TXM phone `mprotect` never grants EXEC, so W+X goes to the JIT-pool path, which serves it through the pool's RW and RX aliases. | `wx_dropped` |
 | x18 instructions in an image whose trampolines are out of B/BL reach (±124 MiB) of its `.text`, whose budget did not fit, or past the end of the trampoline space | Those instructions are not patched: one that runs after iOS has cleared x18 faults, and the Mach exception handler emulates it with the thread's TEB, one fault each time. The trampolines sit on the page after each image's copy, so only a `.text` larger than about 124 MiB could be out of reach. No trampoline islands are placed inside images. | `x18_images`, `x18_sites` |
+| In a native ARM64 child's image (0176's amendment, madeira-unix 0264): x18 readers in a 1 KB `.text` window the load's patcher takes as encrypted, and code reached only through an indirect branch from a function `FlushInstructionCache` patched | Not patched by design. The encrypted windows are patched when the game decrypts and flushes them; until then, and for code only an indirect branch reaches (the flush walk follows fall-through and direct branches only), an x18 read faults and the Mach exception handler emulates it, one fault each time. A window of real code the heuristic misreads as encrypted behaves the same. | `x18_sites` |
 | The anonymous-alias table's 4096 entries (guest JITs: Mono, V8) | A region with no slot ends the launch as *ran out of JIT memory* (`pool=exhausted:alias`, [JIT pool use](#jit-pool-use)). Hollow Knight peaks at 61 entries, so the table is neither grown nor turned into a map. | `alias_full` in `pool` |
 | Misaligned exclusives (`LDXR`/`LDAXR` then `STXR`/`STLXR`) and `CAS` in native ARM64EC code | The Mach exception handler emulates each one on its single thread (ml431, `signal_arm64_ios.c`). That serializes them with each other, but not with plain stores from other threads, so a split lock can tear, as it can on AMD. | `split_lock` |
 
@@ -480,7 +624,7 @@ where Y puts a setting back to its default (`PadFocus.resetFocused`). Settings
 shown one beside it; its Graphics values change with left and right, and its Downloads
 switches are PlayportKit `DownloadPreferences`, which the download queue reads.
 Downloads (`UI/DownloadsView.swift`) shows PlayportKit's `DownloadQueue`, run by
-`UI/Downloads.swift` through Steam, GOG, Epic and Files-import drivers: installs,
+`UI/Downloads.swift` through Steam, GOG, Epic, Battle.net and Files-import drivers: installs,
 updates, repairs and imports, one at a time, in an order Y changes. Jobs use the
 store/game key, not a name; Steam's newer builds are queued automatically when
 Settings allows. The queue is written to the container after every change; a launch
@@ -490,13 +634,54 @@ Each job waits for its driver's conditions (its store signed in, permitted netwo
 an unfinished import needs its source picked again); the player's Pause stays.
 A release build compiles none of `Dev/`
 ([decision 0009](decisions/0009-dev-and-release-builds.md)).
+The Battle.net store (`UI/BattleNetStore.swift`, PlayportKit `BattleNet`;
+[decision 0174](decisions/0174-battle-net-store-client.md), proposed) has no sign-in: its
+button in the Library's store column ([decision 0178](decisions/0178-library-store-column.md))
+is never dimmed, and it and All list the World of Warcraft products whose current build carries
+an x64 client (BattleNetClientKit's offer, cached six hours and asked for when the Library appears;
+[decision 0177](decisions/0177-wow-plays-its-x64-client-through-fex.md)). A product's page picks the store region (from the phone's region) and the
+locale (the phone's language as a WoW locale, enUS as fallback), shows the download size
+and the space needed (the x64 client's selection), and refuses an Install that does not fit, saying how much it needs.
+The install stages under the staging root (nothing in `C:\Games`, so no Play, until it is
+complete) and becomes `C:\Games\<product>` with a store receipt naming the x64 client
+(`_retail_\Wow.exe`, `WowClassic.exe`); the store selects the `Windows` + `x86_64` files only.
+An installed product's page (`UI/BattleNetInstalled.swift`) changes, from its facts card's
+Region and Language rows (a phone in landscape has no room for them as buttons beside Play,
+PLA-519), its store region in place (only `.build.info` is rewritten; every region's data is
+in the install) and its language as a Downloads update job that fetches only the new locale's
+data, after which Play is available again; both read what the install is in from its `.build.info`.
+Each product's tile, Home card and page backdrop show Blizzard's public art for it
+(BattleNetClientKit `BattleNetArt`, PLA-607), fetched once without a session and kept with
+the other stores' art under Caches (PlayportKit `BattleNetArtCache`).
+
+Play for a Battle.net copy follows PlayportKit `BattleNetPlay` (PLA-514): the first Play of
+each product shows the ban-risk notice ([decision 0175](decisions/0175-anti-cheat-refusal-scope.md),
+proposed, as amended by 0177: Blizzard does not support Playport, an account action is possible,
+Playport changes none of the game's files and none of its code in memory and runs Blizzard's x64
+client through a translator, and Playport stores no Battle.net credential); declining
+starts nothing, accepting is kept with the copy
+(`InstalledTitle.riskNoticeAccepted`, gone with it) and the page keeps the notice's text.
+Every Play then asks the install region's version endpoint for its current build (PLA-521):
+a newer one, or an install whose `.build.info` names no `x86_64` (made before 0177, with the
+ARM64 client), is planned (BattleNetClientKit `prepareUpdate`: the current build's x64 selection without
+the objects the store's journals name and the product folder files already on disk, in data
+files after the store's; never a reinstall), refused before it starts when it does not fit,
+else run as a Downloads update job naming no locale (shown as Updating; a language change
+shows as Changing language), after which the receipt names the x64 client and the Play goes on
+once the library has re-adopted it; a failed check is said on the
+launch screen and the installed version starts, so the game itself decides. The page's
+Check for update asks the same by hand and offers Update.
+The Play then starts the receipt's x64 client (PE machine 0x8664; any other is refused) through
+FEX on the ordinary x86-64 path ([decision 0177](decisions/0177-wow-plays-its-x64-client-through-fex.md)):
+the Vulkan backend with `-d3d12` (arm64ec vkd3d-proton), whatever the graphics settings say,
+`Config.wtf`'s `GxApi D3D12` and `GamePadEnable` written first, and no sign-in: WoW shows its own login.
 
 - **Catalogue** (`app/PlayportKit`, tested on Linux): rebuilt by *adoption*
   each time the app comes to the front, from the prefix's `C:\Games`. A folder
   with a Playport install receipt is that store's copy and build/version, even
   if its name matches the bundled cohort list (`Titles/titles.json`). Identity is
-  `(store, store game ID)` (ContentKit `StoreGameKey`), for Local, Steam, GOG and
-  Epic; library joins, downloads, art and navigation use it, never the name
+  `(store, store game ID)` (ContentKit `StoreGameKey`), for Local, Steam, GOG,
+  Epic and Battle.net (`bnet-<TACT product code>`); library joins, downloads, art and navigation use it, never the name
   ([decision 0057](decisions/0057-store-identity.md)). Files imports are Local,
   with their own receipts; store markers in imported or found files supply only
   launch hints, not store identity. Without a receipt, a folder named as a cohort
@@ -508,7 +693,7 @@ A release build compiles none of `Dev/`
   app and build, never a newer build sharing the folder; its screen no longer sets a launch's. A
   launch's screen, frame limit and Direct3D come from the game's own launch
   settings (its Game options), else the global Settings; with none, 720 rows
-  at 60 FPS, on Vulkan for i386 or detected DX12 games and DXMT otherwise
+  at 60 FPS, on Vulkan (decision 0153)
   (`LaunchSettings.defaultScreen`, `defaultFrameLimit`, `LaunchSettings.resolve`).
   Steam installs naming `REDprelauncher.exe` launch the game's nested executable
   instead; Unreal bootstraps also prefer the shipping EXE. This avoids unvalidated
@@ -525,13 +710,16 @@ A release build compiles none of `Dev/`
   ([decision 0046](decisions/0046-static-direct3d-evidence.md)). Unknown is not
   DX11; multiple detected APIs do not identify the active renderer. Adoption also
   records the selected EXE's COFF machine (`InstalledTitle.executableMachine`).
-  Launch API flags override API inference, not the i386 default; explicit game
-  and global graphics choices still win, even DXMT for i386, which cannot draw
-  ([0044](decisions/0044-vulkan-default-for-dx12.md),
-  [0047](decisions/0047-i386-titles-on-vulkan.md)).
+  With no game or global graphics choice, every game launches on Vulkan
+  ([decision 0153](decisions/0153-rdr2s-settings-are-every-games-defaults.md);
+  before it, only detected Direct3D 12, [0044](decisions/0044-vulkan-default-for-dx12.md),
+  and i386, [0047](decisions/0047-i386-titles-on-vulkan.md), did). DXMT stays a choice;
+  explicit game and global graphics choices still win, even DXMT for i386, which
+  cannot draw.
   Game options show the same inherited backend as Play. Native and no limit are a player's choice. FEX's memory
   ordering comes from a dev build's Game options over the game's profile (the
-  release app runs the profile, and the Steam API emulator), Proton's FEX
+  release app runs the profile, and every game's default Steam API mode,
+  Playport's Steam client: [decision 0153](decisions/0153-rdr2s-settings-are-every-games-defaults.md)), Proton's FEX
   settings for its Steam app ID and executable (PlayportKit `FEXProfile`,
   [decision 0021](decisions/0021-fex-ordering-per-game.md)), as `FEX_*`
   environment variables, with the host CPU features FEX cannot read on iOS
@@ -628,9 +816,11 @@ A release build compiles none of `Dev/`
   `C:\users\playport\AppData\Local\Playport\session`, written only for a
   Play). Once the pool is blessed, a Play in the same process is refused
   (`launch=refused session=spent`), and after a restart that failed the
-  game's page offers Close Playport. CS_DEBUGGED stays set after the detach,
-  so `JitProvider` cannot tell a new attach from the old one: a pool is
-  blessed once per process.
+  game's page offers Close Playport. `JitProvider` checks for a live tracer
+  (`CS_DEBUGGED` and `P_TRACED`); Built-in and StikDebug ask for a fresh attach
+  when none is attached, Another app is refused. The pool is blessed once per
+  process by the `session=spent` rule; blessing a second region with a second
+  attach has not been tried.
 
 ### Restarting after a game
 
@@ -692,7 +882,33 @@ them to UIKit, GameController and AVFAudio.
 - **Keyboard and pointer** go to Winios through its event ring:
   `winios_post_key`, `winios_post_client_pointer` (absolute 0..65535 across
   the foreground window's client area, `MOUSEEVENTF_*` flags) and
-  `winios_post_focus`.
+  `winios_post_focus`. A key goes by its virtual key; win32u's
+  `winios_drv_post_key` gives it a scan code, from `Sources/HostIO/hio_keys.c`'s
+  `playport_key_scan` first for the keys a keyboard sends with E0 (arrows, the
+  nav cluster, Print Screen, right Ctrl/Alt, Windows, menu, keypad /; posted
+  extended, `patches/madeira-unix` 0248), else from Wine's `MapVirtualKeyEx`,
+  whose US table would give the arrows the numpad's codes (PLA-340). Keypad
+  Enter shares VK_RETURN with Return, so HostIO posts it with
+  `winios_post_key_extended` (`patches/madeira-winios` 0006; KeyMap
+  `postsExtended`), and its release, also a focus loss's, goes out extended too.
+- **Text** (the text bar, PLA-267: HostIOKit `TextBar`, `UI/TextBarView.swift`, `HostIO.text`)
+  goes as characters, not keys: `winios_post_char` queues one UTF-16 unit as a press and a
+  release with `KEYEVENTF_UNICODE` (`patches/madeira-winios` 0008), and win32u's
+  `winios_drv_post_char` sends it with `wVk` 0 and the unit as `wScan` (`patches/madeira-unix`
+  0251), as `SendInput` does: the server makes it `VK_PACKET` and `TranslateMessage` posts
+  `WM_CHAR` to the focused window, whatever the keyboard layout. The bar diffs its field's
+  text (a key, a paste, AutoFill) into Backspaces and new characters; Tab, Enter and
+  Backspace go as keys. It posts them in HostIOKit `TextBarPacing`'s batches (a run of
+  characters or of keys, at most 64 inputs), each once `winios_input_pending`
+  (`patches/madeira-winios` 0009) says the ring is empty: Enter after a password goes once the
+  password is in the server's queue, and a long paste never overflows the 255-slot ring, which
+  drops what does not fit. Desktop Wine shows WoW's Email and Password fields take these
+  `VK_PACKET` characters (`docs/evidence/2026-10-30-wow-notice-and-play.md`).
+- **Nothing logs a key or a character.** A letter's virtual key is its ASCII code, so a key
+  log is the text typed: Winios's queue and drain (madeira-winios 0007) and
+  `winios_drv_post_key`'s count (madeira-unix 0250) name no key, and
+  `tools/tests/test_key_logging.py` keeps it so. The bar logs its mode, never its text or
+  length.
 - **Controllers** go into Madeira's controller snapshot
   (`Sources/WinIOS/WiniosGamepad.c`, four slots under one lock), through the
   app's writers in `Sources/HostIO/hio_pads.c` (`host_pad_set`,
@@ -708,11 +924,25 @@ them to UIKit, GameController and AVFAudio.
   Microsoft's ordinals from Wine's specs, which games that import
   `XInputGetState` and `XInputSetState` by ordinal 2 and 3 need. Rumble is not
   implemented (the capabilities report none).
+- **Pads are XInput only**, so HostIO's guest environment turns off the APIs that find them
+  as HID devices: `WINEDLLOVERRIDES=windows.gaming.input=d` (Unity picks Windows.Gaming.Input,
+  which lists no pad here, over XInput) and `SDL_JOYSTICK_RAWINPUT=0` (SDL 2's raw input driver
+  takes XInput pads only as raw input HID devices, and while it is on SDL's XInput driver
+  loads no XInput; SDL reads the variable over a game's own hint). DirectInput and SDL's HIDAPI
+  driver find no pad either and need nothing ([WoW's controller](evidence/2026-11-01-wow-controller.md)).
 - **Lifecycle** (`HostIOKit/Lifecycle.swift`):
   - focus loss goes to Wine first, while held keys are still down, then every
     held key, mouse button and pad control is released, so a game never keeps
     a key down that the player let go of while the app was away (pad controls
     are released by Winios's drain once the loss has reached the game);
+  - focus back activates the window the loss deactivated, or, when it is gone, hidden or
+    disabled, the topmost window of its process, then of any (`Sources/HostIO/hio_focus.c`
+    `host_focus_pick`, `patches/madeira-winios` 0010), through Wine's internal foreground
+    request, which any guest thread's drain may make (a plain `SetForegroundWindow` from
+    another Wine process's thread is refused, which left WoW with no foreground window and
+    all input dropped after the Passwords sheet); input posted after it waits up to 0.5 s
+    for it to land, and input while no window is the foreground makes the same restore, so
+    a tap recovers;
   - going to the background or an audio-session interruption stops the
     output unit, so the game's WASAPI clock stalls instead of running on
     unheard; leaving the foreground alone (Control Center, a notification)
@@ -726,6 +956,13 @@ them to UIKit, GameController and AVFAudio.
   its device lock, and `ios_audio_host_suspend(0)` restarts it only if a
   client still has it started
   ([madeira-unix 0012](../patches/madeira-unix/0012-audio-let-the-host-app-suspend-and-resume-the-proces.patch)).
+- **Audio producer scheduling** ([decision 0172](decisions/0172-audio-producer-runs-real-time-in-its-own-work-interval.md),
+  madeira-unix 0244–0246). The driver (`audio_null_ios.c`) gives a render
+  stream's steady GetBuffer caller a Mach time-constraint policy and a work
+  interval of its own, each GetBuffer…ReleaseBuffer one cycle; the RemoteIO
+  unit's workgroup is not joined. A starved stream plays whole callbacks or
+  none (C1). `env.MADEIRA_AUDIO_RT=0` and `env.MADEIRA_AUDIO_REFILL=0` turn
+  them off.
 - **Main thread.** Every host I/O entry point is a ring push, a few atomic
   stores or an audio unit start/stop, so the main thread may call it. Runtime
   work stays off the main thread (Apple's hang threshold is 250 ms).
@@ -733,14 +970,82 @@ them to UIKit, GameController and AVFAudio.
 HostIOKit's tests and the controller block's C test (`pp test`) check these
 decisions without a phone.
 
+### Input sources and the mixer
+
+Every input source maps through one model, HostIOKit `InputAction` (`pad:a`,
+`key:shift+0x31`, `mouse:left`, `mouse:move`, `playport:menu`, `playport:keyboard`;
+decision [0171](decisions/0171-on-screen-controls-input-mapping-and-gyro.md)), and
+HostIOKit `InputMixer` turns what the sources hold into the guest's pad slots, keys and
+pointer (`MixerOutput`), which `HostIO.send` hands to the calls above.
+
+- **Sources.**
+  - The on-screen controls (`UI/TouchControlsView.swift`, `OnScreenControls`): HostIOKit
+    `TouchControls` holds the fingers on each control of the layout and hands over its holds
+    and events (`takeOutput`). Their pad is player 1: slot 0, merged with a physical pad in
+    slot 0 by Madeira's rule (buttons combine, each trigger takes the larger value, a physical
+    stick outside XInput's dead zone wins).
+  - The touch keyboard (HostIOKit `TouchKeyboard`, `UI/TouchKeyboardView.swift`): while it
+    is open its keys are `TouchControls`' targets instead of the layout's; Shift, Ctrl and Alt
+    are sticky. Its keys reach the game with the layout Off or a controller connected too.
+  - Physical pads (`PadInput`, slots 0–3) pass through, or, with a controller map other than
+    `controller` (PlayportKit `ControllerMap`, HostIOKit `ControllerBindings`), play through
+    HostIOKit `MappedPad`: the slot rests and the pad's keys, buttons and mouse motion join the
+    controls'. The controls' pad is never mapped.
+  - Gyro aim (HostIOKit `GyroAim`, `GyroSensors.swift`): the iPhone's CoreMotion device motion
+    or a controller's `GCController.motion`, as mouse counts (coalesced to at most 125 moves a
+    second for Winios's 256-event ring) or added to slot 0's right stick and clamped.
+- **Order.** The controls' events (look-area and trackpad motion, Point & click's places
+  through the aspect-fitted picture, clicks, wheel notches) go out in order before the holds'
+  key and button edges, and a chord's modifiers go down before its key. Keys and mouse buttons
+  go through `Lifecycle`, so focus loss, the background and the in-game menu release every
+  source's. The pad side runs under HostIO's pad lock beside `GuestPadGate`, the rest on the
+  main thread. `InputClock.swift` is one `CADisplayLink` while a source needs a tick (a
+  button's repeat, a mapped stick's mouse motion); gyro aim runs on its sensors' clock.
+- **Touch** (HostIOKit `TouchRoute`, `GameSurfaceView`). A guest window before the first
+  frame or a dialog takes a finger first. While the controls show, a finger off them is
+  ignored; with none shown (Off, a controller connected) it is the left mouse button where it
+  lands. The open touch keyboard is the exception: a finger above its panel is the game's, for
+  a text field. A three-finger tap (`HostIO.menuGesture`) opens the in-game menu with any
+  layout and takes its fingers back from the controls.
+- **Layouts** (PlayportKit `Controls.swift`, `ControlLayout.swift`, format version 3): Off,
+  Gamepad, Keyboard & mouse (a look area under everything, a W A S D key stick, keys) and
+  Point & click (a pointer surface, tap to click or trackpad, the side bar's tools, a magnifier
+  from a GPU copy of the frame on screen); each control placed by an anchor, an offset and a
+  size in the safe area. They show while no extended controller is connected (Settings ›
+  Controls: Automatic, Always, Never). A game's own copy of a preset (`GameControls.layouts`,
+  saved by the layout editor: PlayportKit `LayoutEditor` and `LayoutEditorPad`,
+  `UI/LayoutEditorView.swift`) is drawn while that preset is its layout. The starting layout is
+  the game's own, else Off under Never, else the title's compatibility default (`controls`,
+  decision 0074), else Settings' Starting layout, else Gamepad. `UI/ControlsStore.swift`
+  keeps the defaults and each game's record in UserDefaults; a change applies at once.
+- **The suggestion counter.** win32u's `ios_gamepad_query` calls hio_pads.c's
+  `playport_gamepad_query` for each XInput request with the slot's answer (connected, packet
+  number, buttons); op-0 requests are state requests, which `XInputGetState` and also
+  `XInputSetState`, `XInputEnable` and the battery and DirectSound queries send
+  (`patches/madeira-unix` 0247 and 0273; `host_pad_state_reads` is their total, this game's
+  since the app restarts after each). PlayportKit `LayoutSuggestion`, sampled once a second
+  (`UI/LayoutSuggestionToast.swift`), offers Keyboard & mouse to a game starting on Gamepad
+  with Settings' Starting layout left at Suggested that made none in 20 s of play after its
+  first frame, once per game (`controls.suggestedLayoutOffered`). A dev build also logs
+  `controls: XInput in 10 s: …` every 10 s while the game makes state requests (HostIO's
+  once-a-second tick, `host_pad_xinput_summary`): how many, from which slots, the last
+  answer, packet changes and the buttons answered.
+
+HostIOKit's and PlayportKit's tests cover the machines, the mixer, the layouts, the editor and
+the suggestion on the host.
+
 ### The in-game menu
 
-Holding the controller's Home button half a second over a running game opens
-Playport's menu (`UI/InGameMenuView.swift`, decision 0034). HostIO reads Home
+Holding the controller's Home button half a second over a running game, or a
+three-finger tap anywhere on it, opens Playport's menu
+(`UI/InGameMenuView.swift`, decisions 0034, 0171). HostIO reads Home
 on every pad (its system gesture is off while a game runs) and on the dev
 build's scripted pad (`HOME`); `HostIOKit.QuickMenuControl` turns the
-snapshots into the open, the menu's presses and the close. Behind the menu
-the game is paused:
+snapshots into the open, the menu's presses and the close. Its Controls panel
+sets the game's layout, gyro aim and controller map and opens the layout editor
+and the Controller page over the paused game; its Touch keyboard row resumes with
+the keyboard open, its Type text row with the text bar open (closed again when the
+menu opens). Behind the menu the game is paused:
 
 - **Input.** Every pad source reaches the guest's slots through one gate
   (`HostIOKit.GuestPadGate`, `HostIO.publish`): while the menu is up the slots
@@ -763,13 +1068,48 @@ the game is paused:
   ([madeira-unix 0048](../patches/madeira-unix/0048-wineserver-back-off-the-retry-of-a-hold-deferred-for.patch)).
   Nothing the host's main thread needs is held by a suspended thread, as no
   thread is held inside host code.
+- **The launcher's end.** `PP_CONTROL_END_LAUNCHER` is the launch's own control, not the menu's.
+  Red Dead Redemption 2's Play sends it at the game's Social Club sign-in, or before it once the
+  app's footprint is within 1,200 MB of its limit (decision
+  [0130](decisions/0130-end-the-rockstar-launcher-at-the-games-sign-in-or-near-the-memory-limit.md),
+  amending [0125](decisions/0125-end-the-whole-rockstar-launcher-at-the-games-first-frame.md)).
+  - The root ends the launcher's tree in the job one process at a time, in one step, never the
+    game or a process under it (`app/SessionRoot/launcher_end.h`).
+  - `Launcher.exe` ends with exit code 0 and the rest with 1067 (`pp_launcher_end_code`): Rockstar's
+    Steam stub `PlayRDR2.exe` waits on the launcher and shows "Unable to launch game" for any other
+    code. The root then logs the code `Launcher.exe` exited with (decision
+    [0156](decisions/0156-end-the-rockstar-launcher-with-exit-code-0.md)).
+  - It then counts every start of the launcher's images from the job's messages
+    (`JOB_OBJECT_MSG_NEW_PROCESS`). The first restart it finds running is ended once more,
+    along with the launcher's tree.
+- **The game's own Social Club end.** `PP_CONTROL_END_GAME_SOCIAL_CLUB`, 120 s or more after the
+  sign-in near the limit, ends the `SocialClubHelper.exe` processes under RDR2.exe, and ntdll refuses
+  their later starts (`PLAYPORT_REFUSE_GAME_SC_RESTART`). Every Play of Rockstar's launcher, RDR2's and
+  the Open, runs Social Club on Rockstar's own CEF, single-process (on by default), in the stock-CEF
+  layout, in both builds (`PublisherLauncher.rockstar`'s `env.PLAYPORT_SC_LAYOUT=1`; decision
+  [0169](decisions/0169-social-club-on-rockstars-cef-in-the-stock-cef-layout.md)), and under the layout
+  neither runs unless a dev build's stored switch turns the end on (`GameSocialClubEndPolicy`). Only a
+  dev build's `env.PLAYPORT_SC_LAYOUT=0` brings back 0153's default: both on unless Settings › Graphics
+  turns them off (`GameSocialClubEnd.swift`; decisions 0133, 0138, 0141,
+  [0153](decisions/0153-rdr2s-settings-are-every-games-defaults.md)). If the game signs in again
+  after the end (a new sign-in line in its Social Club log, or a GetCurrentGameLanguage burst within
+  60 s) and the footprint plus 600 MB is under the limit less 400 MB, the app sends
+  `PP_CONTROL_ALLOW_GAME_SOCIAL_CLUB` (the root's sweep stops) and then
+  `wine_host_game_sc_allow_restarts(1)` (ntdll lets one restart go ahead, madeira-unix 0239), until
+  the next sign-in line or 90 s; without that headroom the restarts stay refused. The end may run again 120 s after
+  that sign-in, at most twice a Play (`GameSocialClubReSignIn`; decision
+  [0155](decisions/0155-allow-rdr2s-social-club-restart-after-a-re-sign-in.md), amended).
 
 The rows: Resume (also B, ≡ and Home); Screenshot, the last presented
 drawable's texture (`PacedMetalLayer.lastPresented`; DXMT's layer is not
 framebuffer-only) to Photos (`NSPhotoLibraryAddUsageDescription`), and in a
-dev build also to `Documents/Screenshots`; Performance overlay, the game
-layer's `developerHUDProperties` switched now, for this game only (the
-setting stays as Settings has it); the controller and its battery; Quit game.
+dev build also to `Documents/Screenshots`; Performance overlay, a pill over
+the game with its frame rate and frame time (`PacedMetalLayer.presentRate`,
+from each drawable's `presentedTime`; HostIOKit `PresentRate`) and the
+phone's thermal state, the same setting as Settings › Graphics and for every
+game; the controller and its battery; Quit game. Apple's Metal HUD is a dev
+build's only (Settings › Developer, on unless turned off; `Dev/MetalHUD.swift`):
+a release build sets no `MTL_HUD_ENABLED`, and `pp verify` fails one that names it.
 Quit game resumes the threads and sends `PP_CONTROL_CLOSE`: the root posts
 WM_CLOSE to the job's visible unowned top-level windows (all of them if none
 is), as closing a window does on Windows, so the game saves and exits, and it
@@ -837,7 +1177,6 @@ amended by [0088](decisions/0088-opengl-window-surfaces-and-pacing.md) and
   - There are no persistent buffer maps on i386.
   - The in-game menu's screenshot finds no frame on the KosmicKrisp path.
   - A title presenting GL and Direct3D at once is not supported.
-  - Zink keeps no disk cache; KosmicKrisp's pipeline cache serves it.
 
 ### Winios hooks
 
@@ -845,13 +1184,17 @@ amended by [0088](decisions/0088-opengl-window-surfaces-and-pacing.md) and
 They are defined by Madeira's app-side Winios driver, which Playport compiles
 into the app from staged source (`Sources/WinIOS/Winios.m`, from the Madeira
 pin with `patches/madeira-winios`: the host owns `winios_phase`, and posts
-pointer and focus events; focus changes reach the window's owner thread; the
+pointer and focus events; focus changes reach the window's owner thread, and focus back
+gives the foreground back from any thread, 0010; the
 guest's GDI windows are shown until the game's swap chain presents, from the
 window surfaces `patches/madeira-unix` 0109 gives every mode, decision 0075, and
 after it the windows made since, 0005, decision 0076).
 `Sources/WinIOS/WiniosGamepad.c`, unmodified, defines the host-controller
 snapshot `libwin32u_unix.a` reads for Wine's XInput; the app writes it through
-`Sources/HostIO/hio_pads.c` (see HostIO above).
+`Sources/HostIO/hio_pads.c` (see HostIO above). Each XInput request also
+calls hio_pads.c's `playport_gamepad_query` with the slot's answer
+(`patches/madeira-unix` 0247 and 0273): the count the suggested on-screen layout
+reads (PlayportKit `LayoutSuggestion`) and the dev log's 10-second summary.
 
 Two parts of Madeira's reference app are not used. `wineios.drv` has no build
 recipe at the pin and is not in wine's configure; audio does not need it,
@@ -1060,24 +1403,55 @@ file is never edited (PlayportKit `TitleConfig`). The runtime's own
 land in that directory for such a launch. The first title in a process fixes
 the guest's screen (`TitleScreen.configure`).
 
-**`inproc-sync` is off by default**
-([madeira-unix 0014](../patches/madeira-unix/0014-madsync-make-in-process-sync-opt-in.patch)).
-With Madeira's in-process NT sync (madsync) on, a thread blocked in madsync
-never makes the server wait that would run a system APC. iOS delivers no
-`SIGUSR1`, so the asynchronous completion that copies a named-pipe read's data
-never runs and the read returns 0 bytes. `inproc-sync = 1` turns it back on for experiments
-(wine-unix 0006 fixed its crash at start on the wine-11.18 port). It stays off
-([decision 0023](decisions/0023-in-process-sync-stays-off.md)): the server's
-round trips are under 1 % of Hollow Knight's main thread, and The Witcher 3's
-frame is GPU-bound. `pp perf`'s `server.txt` has the requests per frame.
+**The memory plan** (PLA-352, PlayportKit `MemoryPlan`). Just before Wine starts,
+after the JIT pool and the donor pool, the app tells the runtime the
+guest's RAM G and the video figure V through the environment: `MADEIRA_TOTAL_PHYS_MB`
+(ml992) and `PLAYPORT_VRAM_MB` (DXMT ml1042, patches/dxmt 0011; its formula stays the
+fallback). Both come from the phone's tier by its RAM
+([decision 0105](decisions/0105-memory-defaults-per-phone.md)): G / V 8,192 / 3,072 MiB
+on 12 GB, 6,144 / 2,048 on 8 GB, 3,072 / 1,024 on 6 GB, 2,048 / 768 on 4 GB. A limit L
+read more than 512 MiB under the tier's G (no entitlement, or before Game Mode) clamps G
+to L rounded down to a GiB (after 64 MiB of slack) and V to 3/8 of that G, rounded down
+to 512, at least 768; a limit within 512 MiB (the 8 GB phone's 6,046) keeps the row
+([decision 0106](decisions/0106-8gb-row-in-full-and-vulkan-plan-default.md)). A pool does
+not raise G. A title's `totalphys` and `vram-mb` win. The `memory plan:` app-log line has
+every input and output. On the Vulkan backend the plan's V also adds
+`dxgi.maxDeviceMemory` = V to `DXVK_CONFIG` (DXVK otherwise reports KosmicKrisp's 8 GiB
+heap) and sets `PLAYPORT_VK_BUDGET_MB`, which caps KosmicKrisp's `VK_EXT_memory_budget`
+budget at it (patches/mesa 0036; the heap's size stays Metal's working set); on by
+default (decision 0106), `vulkan-vram-plan = 0` turns both off for a title. Opt-in, off
+by default: `vram-budget-event = 1` signals DXGI's budget-change event when the ml1075
+trim moves the budget (it hung RDR2 when it never fired).
+
+### In-process sync
+
+Wine's in-process NT synchronisation (`inproc_sync`, written for the Linux
+ntsync driver) runs on **ppsync**, Playport's userspace driver
+([build/ppsync/README.md](../build/ppsync/README.md); `patches/wine-unix` 0045,
+`patches/madeira-unix` 0220; [decision 0157](decisions/0157-ppsync.md),
+proposed). Every event, mutex, semaphore and server-signalled object (process,
+thread, timer, queue, file) is waited on and signalled without a wineserver
+round trip. Objects have their own locks, and wait-all takes a global one.
+
+The server reaches a thread waiting in ppsync where Linux would signal it.
+When it queues a system APC or ends the thread, it kicks the thread: the wait
+returns, and a zero-timeout server wait runs the APC or ends the thread. When
+it suspends the thread, it freezes it: its wait is not satisfied, as
+`check_wait` refuses a suspended thread.
+
+ppsync is on by default. `inproc-sync = 0` (a title's runtime keys) or
+Settings › Developer › In-process sync turns it off, back to server waits.
+`pp perf`'s `server.txt` has the requests per frame. It replaced Madeira's
+madsync, which was off because system APCs never ran in its waits (decisions
+0023, 0142), and fastsync's event and semaphore cells (0054).
 
 ### Guest network tables
 
 There is no `nsiproxy.sys` device in the one-process runtime. `nsi.dll` falls
 back to the in-process unix table for enumeration and keyed reads (wine-pe
 0030, madeira-unix 0095). Wine's NDIS/IP providers read interface/link metadata
-and IPv4/IPv6 addresses with `getifaddrs` and ioctls; wine-unix 0019 reads both
-families' routes through a bounded Darwin routing-message decoder (cloned
+and IPv4/IPv6 addresses with `getifaddrs`; wine-unix 0019 reads both families'
+routes through a bounded Darwin routing-message decoder (cloned
 ARP/ND and host entries are skipped, as Windows lists none; a denied routing
 sysctl gives an empty table, so adapters still list without gateways). LUIDs use
 Wine's interface-index convention, and i386 calls translate owner-local guest
@@ -1086,6 +1460,14 @@ comes from these tables, as upstream's wininet answers it; the former
 unconditional LAN fallback (wine-pe 0029) is dropped from the series (PLA-71).
 Change notifications and unavailable kernel statistics remain unsupported.
 [Checks and limits](evidence/2026-10-07-nsi-adapters.md).
+
+Wine-unix 0201 reuses one iOS `AF_LINK` snapshot for one second under the
+interface-table lock: topology, flags, MTU and counters need no per-row socket,
+ioctl or `getifaddrs`, and the link rows' indices replace `if_nameindex`.
+Enumeration and keyed/name/index/LUID reads refresh before lookup, so removal
+and replacement also expire. Each family's route dump has the same TTL under
+a separate lock; empty and failed reads are cached too. IPv4/IPv6 unicast
+address reads remain uncached. [Snapshot checks and performance](evidence/2026-10-28-nsi-snapshot.md).
 
 ### Native Steam client
 
@@ -1125,7 +1507,9 @@ services ([0058](decisions/0058-store-sessions.md)).
   play. It closes the CM session unless the game's ticket broker is armed;
   then only the game's auth session/web API tickets keep it logged on
   ([0062](decisions/0062-steam-live-session.md)).
-- **For Steam games** using the Steam API emulator (the default),
+- **For Steam games** using the Steam API emulator (mode `emulated`, which a
+  title's compatibility entry or the player chooses; Playport's Steam client is
+  every game's default, decisions 0153 and 0161),
   `SteamAPISwap` puts gbe_fork's `steam_api(64).dll` (`Runtime/steamapi/`) in
   the game's folder and `SteamStub` takes SteamStub 3.1 (x64 and x86, its
   encrypted code decrypted) off its executable, each keeping the game's file
@@ -1191,7 +1575,12 @@ the trailers `Class:`, `Evidence:` and `Offered-upstream:`. The classes are:
 - `diagnostics`: logging that measures what a component does, with no
   change to what it does;
 - `ios-port`: Playport's own port to iOS of a component whose upstream runs
-  only on macOS (so far `patches/mesa`, KosmicKrisp);
+  only on macOS (`patches/mesa`, KosmicKrisp), or a change that fits a
+  component to the iOS runtime, where every Wine process is a pseudo-process
+  of one app and FEX runs inside it (also in `patches/fex`, `rpmalloc`,
+  `wine-unix`, `madeira-unix` and `wine-pe`: wine-pe 0045 keeps the runtime's
+  variables in a service's environment block, 0055 tells FEX about the images
+  loaded before it started);
 - `feature`: a capability the upstream lacks and Playport needs, such as
   KosmicKrisp's geometry shaders, which DXVK requires;
 - `madeira-port`: in `patches/wine-port`, `patches/dxmt-port`, `patches/fex-port`
@@ -1227,3 +1616,5 @@ trailers say what it changes and why, and its `Evidence:` trailer names the
 record that proved it. Where each series is
 applied is in [BUILDING.md](BUILDING.md#the-pipeline). No patch has
 been offered upstream yet ([LICENSING.md](LICENSING.md#other-projects)).
+
+The name gate permits only the two exact upstream GN tokens (the argument module and helper module) inside `patches/cef/` and `patches/chromium/`, so that commits from before Playport's CEF build was removed ([0169](decisions/0169-social-club-on-rockstars-cef-in-the-stock-cef-layout.md)) still pass `pp names COMMIT` and `pp source`; all other retired names/prefixes still fail (shared rule in `tools/checks.py`).

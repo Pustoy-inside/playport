@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+import BattleNetClientKit
 import Foundation
 import XCTest
 @testable import PlayportKit
@@ -18,6 +19,114 @@ final class CompatDefaultsTests: XCTestCase {
         XCTAssertNil(smb.settings.screen)
         XCTAssertNil(table.entry(for: "epic-buffalo"))   // ids are case-sensitive
         XCTAssertNil(table.entry(for: "app-367520"))
+    }
+
+    /// Every game is served by Playport's Steam client since decision 0153 (0115 was RDR2's alone);
+    /// RDR2's entry keeps the backend the Rockstar launcher it starts draws with.
+    func testEveryGameGetsPlayportsSteamClientAndRDR2KeepsVulkan() throws {
+        let table = try CompatDefaults.load(directory: Self.shipped)
+        let rdr2 = try XCTUnwrap(table.entry(for: "app-1174180"))
+        XCTAssertNil(rdr2.settings.steamAPI)
+        XCTAssertEqual(rdr2.settings.graphics, PublisherLauncher.rockstar.graphics)
+        XCTAssertEqual(LaunchSettings().over(LaunchSettings.overEveryGame(rdr2.settings)).steamAPI, .client)
+        XCTAssertEqual(LaunchSettings(steamAPI: .emulated).over(LaunchSettings.overEveryGame(nil)).steamAPI, .emulated)
+    }
+
+    /// Every game's runtime keys (decision 0153, from RDR2's of decisions 0126, 0142, 0152, plus
+    /// the crash-reporter refusal): the address-space holdback, a 3,072 MiB heap, the x64
+    /// critical-section stubs and FEX's batch 2; and FEX without AFP, with FPCR.FIZ from
+    /// MXCSR.DAZ (decision 0154, from RDR2's of 0142). Its fastsync semaphores went with fastsync
+    /// (decision 0157): ppsync takes every semaphore in process. Social Club's helper is told
+    /// 300 MB of available memory (decision 0168).
+    static let everyGameRuntime = "jumbo-mb=8960 env.PLAYPORT_VK_HEAP_MB=3072 "
+        + "env.MADEIRA_X64_CS_FASTPATH=1 env.MADEIRA_FEX_BATCH2=1 env.PLAYPORT_SC_BLOCK_CRASHPAD=1 "
+        + "env.FEX_HOSTFEATURES=disableafp env.MADEIRA_FEX_AFPOFF_FPCR=fiz avail-phys-cef-mb=300"
+
+    /// Each default is a madeira.cfg key at the lowest level of a launch's config (Effective.config):
+    /// a title's cohort keys, then its compatibility entry's and a person's Runtime keys override it
+    /// by key and keep the rest (decisions 0091, 0153).
+    func testEveryGamesDefaultsAreTheLowestRuntimeKeys() throws {
+        XCTAssertEqual(LaunchSettings.everyGame.runtime, Self.everyGameRuntime)
+        let every: [String: String] = ["jumbo-mb": "8960", "env.PLAYPORT_VK_HEAP_MB": "3072",
+                                       "env.MADEIRA_X64_CS_FASTPATH": "1", "env.MADEIRA_FEX_BATCH2": "1",
+                                       "env.PLAYPORT_SC_BLOCK_CRASHPAD": "1", "env.FEX_HOSTFEATURES": "disableafp",
+                                       "env.MADEIRA_FEX_AFPOFF_FPCR": "fiz", "avail-phys-cef-mb": "300"]
+        XCTAssertEqual(LaunchSettings.everyGameKeys, every)
+        let plain = LaunchSettings.resolve(game: LaunchSettings.overEveryGame(nil), global: LaunchSettings())
+        XCTAssertEqual(plain.runtime, [:])
+        XCTAssertEqual(plain.config(over: [:]), every)
+        // A cohort title's own key (The Witcher 3's address-space hold) wins over everyGame's.
+        XCTAssertEqual(plain.config(over: ["jumbo-mb": "32768", "cage-hold": "1"])["jumbo-mb"], "32768")
+        // A person's key wins over all; everyGame's other keys stay.
+        let own = LaunchSettings(runtime: "inproc-sync=0 env.PLAYPORT_VK_HEAP_MB=0 env.MADEIRA_FEX_BATCH2=0")
+            .over(LaunchSettings.overEveryGame(nil))
+        let config = LaunchSettings.resolve(game: own, global: LaunchSettings()).config(over: ["jumbo-mb": "32768"])
+        XCTAssertEqual(config, ["jumbo-mb": "32768", "env.PLAYPORT_VK_HEAP_MB": "0", "inproc-sync": "0",
+                                "env.MADEIRA_X64_CS_FASTPATH": "1", "env.MADEIRA_FEX_BATCH2": "0",
+                                "env.PLAYPORT_SC_BLOCK_CRASHPAD": "1", "env.FEX_HOSTFEATURES": "disableafp",
+                                "env.MADEIRA_FEX_AFPOFF_FPCR": "fiz", "avail-phys-cef-mb": "300"])
+        // A title's entry keeps its own runtime keys and takes everyGame's other settings.
+        let titled = LaunchSettings.overEveryGame(LaunchSettings(runtime: "jumbo-mb=4096"))
+        XCTAssertEqual(titled.runtime, "jumbo-mb=4096")
+        XCTAssertEqual(LaunchSettings.resolve(game: titled, global: LaunchSettings()).config(over: [:])["jumbo-mb"], "4096")
+        XCTAssertEqual(titled.jitPoolMB, 896)
+        XCTAssertEqual(LaunchSettings.overEveryGame(LaunchSettings(endLauncherAfterSignIn: false)).endLauncherAfterSignIn, false)
+    }
+
+    /// RDR2 is told 2,304 MiB of video memory, not 3,072 (decisions 0142 and 0153 as amended
+    /// 2026-10-30): its heap size and the plan's video figure (DXVK's DXGI, KosmicKrisp's budget) by
+    /// its entry's keys over everyGame's; every other game keeps everyGame's 3,072 heap.
+    func testRDR2IsTold2304MiBOfVideoMemory() throws {
+        let rdr2 = try XCTUnwrap(CompatDefaults.load(directory: Self.shipped).entry(for: "app-1174180"))
+        let config = LaunchSettings.resolve(game: LaunchSettings.overEveryGame(rdr2.settings), global: LaunchSettings())
+            .config(over: [:])
+        XCTAssertEqual(config["env.PLAYPORT_VK_HEAP_MB"], "2304")
+        XCTAssertEqual(config["vram-mb"], "2304")
+        XCTAssertEqual(config["jumbo-mb"], "8960")   // everyGame's other keys stay
+        let overrides = MemoryPlan.Overrides.read(value: { config[$0] }, environment: [:])
+        let plan = MemoryPlan(MemoryPlan.Inputs(limitMB: 8192, physicalMB: 11734, poolMB: 4096), overrides: overrides)
+        XCTAssertEqual(plan.videoMB, 2304)
+        XCTAssertEqual(plan.dxvkOption, "dxgi.maxDeviceMemory = 2304")
+        XCTAssertEqual(plan.vulkanEnvironment[MemoryPlan.vulkanBudgetVariable], "2304")
+        // A person's Runtime keys still win (a dev build's row).
+        let own = LaunchSettings(runtime: "vram-mb=3072 env.PLAYPORT_VK_HEAP_MB=3072")
+            .over(LaunchSettings.overEveryGame(rdr2.settings))
+        let mine = LaunchSettings.resolve(game: own, global: LaunchSettings()).config(over: [:])
+        XCTAssertEqual(mine["vram-mb"], "3072")
+        XCTAssertEqual(mine["env.PLAYPORT_VK_HEAP_MB"], "3072")
+        let plain = LaunchSettings.resolve(game: LaunchSettings.overEveryGame(nil), global: LaunchSettings()).config(over: [:])
+        XCTAssertEqual(plain["env.PLAYPORT_VK_HEAP_MB"], "3072")
+        XCTAssertNil(plain["vram-mb"])
+    }
+
+    /// Every World of Warcraft product runs FEX without AVX (patches/fex 0088): its entry's
+    /// FEX_HOSTFEATURES replaces everyGame's by key, so it names disableafp again; everyGame's
+    /// other keys stay, in the dev build's config and in the release build's runtime keys.
+    func testWorldOfWarcraftRunsWithoutAVXAndKeepsEveryGamesKeys() throws {
+        let table = try CompatDefaults.load(directory: Self.shipped)
+        for product in BattleNetProduct.allCases {
+            let wow = try XCTUnwrap(table.entry(for: "bnet-\(product.code)"), product.code)
+            let config = LaunchSettings.resolve(game: LaunchSettings.overEveryGame(wow.settings), global: LaunchSettings())
+                .config(over: [:])
+            XCTAssertEqual(config["env.FEX_HOSTFEATURES"], "disableafp,disableavx", product.code)
+            XCTAssertEqual(config["env.MADEIRA_FEX_AFPOFF_FPCR"], "fiz", product.code)
+            XCTAssertEqual(LaunchSettings.releaseRuntime(compat: wow.settings)["env.FEX_HOSTFEATURES"], "disableafp,disableavx")
+        }
+    }
+
+    /// The Witcher 3's current build gets short reservations (patches/madeira-unix 0222) and keeps
+    /// FEX's PAUSE (decision 0163 withdrew 0162's WFE); its classic branch's cohort hold (jumbo-mb=32768) stays, since the entry names no jumbo-mb.
+    func testTheWitcher3GetsShortReservationsAndKeepsItsCohortHold() throws {
+        let entry = try XCTUnwrap(CompatDefaults.load(directory: Self.shipped).entry(for: "app-292030"))
+        XCTAssertEqual(entry.settings.runtime, "short-reserve-mb=6144")
+        let game = LaunchSettings.overEveryGame(entry.settings)
+        let effective = LaunchSettings.resolve(game: game, global: LaunchSettings())
+        XCTAssertEqual(effective.config(over: [:])["short-reserve-mb"], "6144")
+        XCTAssertNil(effective.config(over: [:])["env.MADEIRA_FEX_PAUSE"])
+        XCTAssertEqual(effective.config(over: [:])["jumbo-mb"], "8960")
+        let classic = effective.config(over: ["jumbo-mb": "32768", "cage-hold": "1"])
+        XCTAssertEqual(classic["jumbo-mb"], "32768")
+        XCTAssertEqual(classic["cage-hold"], "1")
     }
 
     /// The table reaches players: no issue id or tracker address anywhere in it.
@@ -45,6 +154,9 @@ final class CompatDefaultsTests: XCTestCase {
             (#"{"titles":{"epic-A":{"settings":{"screen":"wide"},"reason":"Why."}}}"#, .badSetting("epic-A.screen")),
             (#"{"titles":{"epic-A":{"settings":{"frameLimit":-1},"reason":"Why."}}}"#, .badSetting("epic-A.frameLimit")),
             (#"{"titles":{"epic-A":{"settings":{},"reason":"Why."}}}"#, .notAnObject("epic-A.settings")),
+            (#"{"titles":{"epic-A":{"reason":"Why."}}}"#, .notAnObject("epic-A.settings")),
+            (#"{"titles":{"epic-A":{"controls":"mouse","reason":"Why."}}}"#, .badSetting("epic-A.controls")),
+            (#"{"titles":{"epic-A":{"controls":["keyboardMouse"],"reason":"Why."}}}"#, .badSetting("epic-A.controls")),
         ]
         for (json, error) in bad {
             XCTAssertThrowsError(try parse(json), json) { XCTAssertEqual($0 as? CompatDefaultsError, error, json) }
@@ -52,6 +164,29 @@ final class CompatDefaultsTests: XCTestCase {
         // Any launch setting may be a default, in the --settings JSON form.
         XCTAssertEqual(try parse(#"{"titles":{"app-1":{"settings":{"frameLimit":30,"graphics":"vulkan","arguments":"-dx9"},"reason":"Why."}}}"#)
             .entry(for: "app-1")?.settings, LaunchSettings(frameLimit: 30, graphics: .vulkan, arguments: "-dx9"))
+    }
+
+    /// An entry may set the game's starting on-screen layout (`controls`), with or without launch
+    /// settings (touch controls phase 4).
+    func testAnEntryMaySetTheStartingLayout() throws {
+        let only = try XCTUnwrap(parse(#"{"titles":{"app-1":{"controls":"keyboardMouse","reason":"Why."}}}"#).entry(for: "app-1"))
+        XCTAssertEqual(only.controls, .keyboardMouse)
+        XCTAssertEqual(only.settings, LaunchSettings())
+        let both = try XCTUnwrap(parse(#"{"titles":{"app-1":{"settings":{"frameLimit":30},"controls":"pointClick","reason":"Why."}}}"#)
+            .entry(for: "app-1"))
+        XCTAssertEqual(both.controls, .pointClick)
+        XCTAssertEqual(both.settings, LaunchSettings(frameLimit: 30))
+        XCTAssertNil(try XCTUnwrap(parse(#"{"titles":{"app-1":{"settings":{"frameLimit":30},"reason":"Why."}}}"#).entry(for: "app-1")).controls)
+    }
+
+    /// Assassin's Creed takes no controller without a third-party fix (its Options list only keyboard
+    /// layouts): it starts on Keyboard & mouse, and its launch settings are Playport's.
+    func testTheShippedTableStartsAssassinsCreedOnKeyboardAndMouse() throws {
+        let table = try CompatDefaults.load(directory: Self.shipped)
+        let ac = try XCTUnwrap(table.entry(for: "app-15100"))
+        XCTAssertEqual(ac.controls, .keyboardMouse)
+        XCTAssertEqual(ac.settings, LaunchSettings())
+        XCTAssertNil(table.entry(for: "epic-Buffalo")?.controls)
     }
 
     /// The person's own choice, then the compatibility default, then Settings, then Playport's.

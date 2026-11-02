@@ -34,6 +34,18 @@ final class KeyMapTests: XCTestCase {
         XCTAssertNil(KeyMap.virtualKey(hidUsage: 0x7F))   // Mute
     }
 
+    func testKeypadEnterIsReturnPostedExtended() {
+        XCTAssertEqual(KeyMap.virtualKey(hidUsage: 0x58), KeyMap.virtualKey(hidUsage: 0x28))
+        XCTAssertTrue(KeyMap.postsExtended(hidUsage: 0x58))
+        XCTAssertFalse(KeyMap.postsExtended(hidUsage: 0x28))
+        // Two keys on one VK are told apart by the flag; only the backslash position (0x31, 0x32) is one key.
+        var byVK: [UInt8: [Int]] = [:]
+        for u in 0...0xE7 { if let vk = KeyMap.virtualKey(hidUsage: u) { byVK[vk, default: []].append(u) } }
+        for (vk, us) in byVK where us.count > 1 && us != [0x31, 0x32] {
+            XCTAssertEqual(us.filter { !KeyMap.postsExtended(hidUsage: $0) }.count, 1, "VK \(vk): \(us)")
+        }
+    }
+
     func testNoTwoPrintableKeysShareAVK() {
         var seen: [UInt8: Int] = [:]
         for u in 0x04...0x38 where u != 0x32 {   // 0x32 (non-US #) is the backslash position on purpose
@@ -77,6 +89,16 @@ final class PointerTests: XCTestCase {
         XCTAssertEqual(m.add(dx: -0.9, dy: -1.2).map { [$0.0, $0.1] }, [0, -1])   // toward zero, sign kept
         m.reset()
         XCTAssertNil(m.add(dx: 0.9, dy: 0))
+    }
+
+    func testRelativeMotionIgnoresNonFiniteDeltasAndClampsAHugeOne() {
+        var m = RelativeMotion()
+        XCTAssertNil(m.add(dx: 0.6, dy: 0))
+        XCTAssertNil(m.add(dx: .nan, dy: 1))
+        XCTAssertNil(m.add(dx: 1, dy: .infinity))
+        XCTAssertNil(m.add(dx: -.infinity, dy: -.infinity))
+        XCTAssertEqual(m.add(dx: 0.6, dy: 0).map { [$0.0, $0.1] }, [1, 0])   // the carried 0.6 survived
+        XCTAssertEqual(m.add(dx: 1e12, dy: -1e12).map { [$0.0, $0.1] }, [Int32.max, Int32.min])
     }
 }
 
@@ -337,6 +359,20 @@ final class PadScriptTests: XCTestCase {
         XCTAssertEqual((try? PadScript.parse("100 A\n100 Q")) == nil, true)
         do { _ = try PadScript.parse("100 A\n100 Q") } catch let e as PadScript.ParseError { XCTAssertEqual(e.line, 2) } catch { XCTFail("\(error)") }
     }
+
+    /// Every committed route in tools/pad/ (what `pp pad push NAME` sends) is one the app can play.
+    func testEveryCommittedRouteParses() throws {
+        let pad = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("tools/pad")
+        let names = try FileManager.default.contentsOfDirectory(atPath: pad.path).filter { $0.hasSuffix(".txt") }.sorted()
+        XCTAssertTrue(names.contains("hk-profiles.txt") && names.contains("hk-menu-back-start.txt")
+            && names.contains("hk-slot-new-game.txt") && names.contains("hk-profiles-hold.txt") && names.contains("kcd-continue.txt"), "\(names)")
+        for name in names {
+            let s = try PadScript.parse(String(contentsOf: pad.appendingPathComponent(name), encoding: .utf8))
+            XCTAssertGreaterThan(s.totalMs, 0, name)
+        }
+    }
 }
 
 final class FramePacerTests: XCTestCase {
@@ -351,6 +387,40 @@ final class FramePacerTests: XCTestCase {
         var off = FramePacer(fps: 0)
         XCTAssertEqual(off.delay(now: 1), 0)
         XCTAssertEqual(off.delay(now: 1), 0)
+    }
+}
+
+final class PresentRateTests: XCTestCase {
+    func testSteadyFramesReadAsTheirRateAndInterval() {
+        var r = PresentRate()
+        XCTAssertEqual(r.reading(now: 5), PresentRate.Reading(fps: 0, frameMS: nil))
+        // 60 fps for two seconds: the last second's 60, at 16.7 ms.
+        for i in 0..<120 { r.presented(at: 10 + Double(i) / 60) }
+        let got = r.reading(now: 10 + 119.0 / 60 + 0.001)
+        XCTAssertEqual(got.fps, 60)
+        XCTAssertEqual(got.frameMS ?? 0, 1000.0 / 60, accuracy: 1e-6)
+    }
+
+    func testSlowFramesReadAsTheLatestIntervalAndAStallAsTheTimeSinceTheLast() {
+        var r = PresentRate()
+        // 5 fps: one frame in the last quarter second, so the frame time is the latest interval.
+        for i in 0..<10 { r.presented(at: Double(i) * 0.2) }
+        let slow = r.reading(now: 1.85)
+        XCTAssertEqual(slow.fps, 5)
+        XCTAssertEqual(slow.frameMS ?? 0, 200, accuracy: 1e-6)
+        // Nothing for 1.5 s: no frames this second, and the frame time grows with the stall.
+        let stalled = r.reading(now: 3.3)
+        XCTAssertEqual(stalled.fps, 0)
+        XCTAssertEqual(stalled.frameMS ?? 0, 1500, accuracy: 1e-6)
+    }
+
+    func testTheRingKeepsTheNewestFramesPastItsCapacity() {
+        var r = PresentRate()
+        // 300 frames at 240 fps: more than the ring holds, its newest still read.
+        for i in 0..<300 { r.presented(at: Double(i) / 240) }
+        let got = r.reading(now: 299.0 / 240 + 0.001)
+        XCTAssertEqual(got.fps, 240)
+        XCTAssertEqual(got.frameMS ?? 0, 1000.0 / 240, accuracy: 1e-6)
     }
 }
 
@@ -407,6 +477,16 @@ final class PadNavigationTests: XCTestCase {
         XCTAssertEqual(nav.update(pad { $0.ly = -0.9 }, at: 0.5), [.down])  // +y is up
     }
 
+    func testATriggerIsOnePressWithHysteresisAndNeverRepeats() {
+        var nav = PadNavigation()
+        XCTAssertEqual(nav.update(pad { $0.leftTrigger = 0.45 }, at: 0), [])
+        XCTAssertEqual(nav.update(pad { $0.leftTrigger = 0.6 }, at: 0.1), [.lt])
+        XCTAssertEqual(nav.update(pad { $0.leftTrigger = 0.35 }, at: 0.2), [])  // still held: no second press
+        XCTAssertEqual(nav.tick(at: 5), [])
+        XCTAssertEqual(nav.update(pad { $0.leftTrigger = 0.2 }, at: 0.3), [])   // let go
+        XCTAssertEqual(nav.update(pad { $0.leftTrigger = 0.9; $0.rightTrigger = 1 }, at: 0.4), [.lt, .rt])
+    }
+
     func testResetLetsEverythingGo() {
         var nav = PadNavigation()
         _ = nav.update(pad { $0.a = true; $0.up = true }, at: 0)
@@ -432,52 +512,10 @@ final class WindowKeysTests: XCTestCase {
         XCTAssertEqual(keys(.lb), ["16+", "9+", "9-", "16-"])   // Shift+Tab
     }
 
-    func testYIsBackspace() {
-        XCTAssertEqual(keys(.y), ["8+", "8-"])
-    }
-
     func testOtherButtonsSendNothing() {
+        XCTAssertEqual(keys(.y), [])
         XCTAssertEqual(keys(.menu), [])
         XCTAssertEqual(keys(.view), [])
-    }
-}
-
-final class PadMouseTests: XCTestCase {
-    private func pad(_ set: (inout PadInput) -> Void) -> PadInput {
-        var p = PadInput()
-        set(&p)
-        return p
-    }
-
-    func testTheTriggersAreTheButtonsWithHysteresis() {
-        var m = PadMouse()
-        XCTAssertEqual(m.buttons(pad { $0.rightTrigger = 0.4 }), [])
-        XCTAssertEqual(m.buttons(pad { $0.rightTrigger = 0.6 }), [Pointer.leftDown])
-        XCTAssertEqual(m.buttons(pad { $0.rightTrigger = 0.4 }), [])            // still down above 0.3
-        XCTAssertEqual(m.buttons(pad { $0.rightTrigger = 0.1 }), [Pointer.leftUp])
-        XCTAssertEqual(m.buttons(pad { $0.leftTrigger = 1 }), [Pointer.rightDown])
-        XCTAssertEqual(m.release(), [Pointer.rightUp])
-        XCTAssertEqual(m.release(), [])
-    }
-
-    func testTheRightStickMovesTheCursorDownForDown() {
-        var m = PadMouse()
-        let r = m.tick(pad { $0.rx = 0; $0.ry = -1 }, dt: 0.1)
-        XCTAssertEqual(r.dx, 0, accuracy: 0.001)
-        XCTAssertEqual(r.dy, 75, accuracy: 0.001)              // 750 points a second, all the way over
-        let slow = m.tick(pad { $0.rx = 1; $0.rightThumb = true }, dt: 0.1)
-        XCTAssertEqual(slow.dx, 22.5, accuracy: 0.001)
-        XCTAssertEqual(m.tick(pad { $0.rx = 0.1 }, dt: 0.1).dx, 0)   // inside the dead zone
-        XCTAssertFalse(PadMouse.moving(pad { $0.rx = 0.1; $0.ly = -0.1 }))
-        XCTAssertTrue(PadMouse.moving(pad { $0.rx = 0.5 }))
-    }
-
-    func testTheLeftStickScrollsInWholeSteps() {
-        var m = PadMouse()
-        var total: Int32 = 0
-        for _ in 0..<10 { total += m.tick(pad { $0.ly = 1 }, dt: 0.1).wheel }
-        XCTAssertEqual(Double(total), 960, accuracy: 40)        // 8 notches in a second
-        XCTAssertLessThan(m.tick(pad { $0.ly = -1 }, dt: 0.1).wheel, 0)
     }
 }
 
@@ -531,6 +569,35 @@ final class InGameMenuTests: XCTestCase {
         XCTAssertEqual(c.update(input { $0.a = true }, at: 0.7), [])
         _ = c.update(input { $0.home = true }, at: 1)
         XCTAssertEqual(c.update(input { $0.home = true; $0.x = true }, at: 1.6), [.open])
+    }
+
+    func testOpenedByThePlayportButtonTakesThePadsPresses() {
+        var c = QuickMenuControl()
+        c.opened()
+        XCTAssertTrue(c.isOpen)
+        XCTAssertFalse(c.needsClock)
+        XCTAssertEqual(c.update(input { $0.down = true }, at: 0), [.press(.down)])
+        XCTAssertEqual(c.update(input(), at: 0.1), [])
+        XCTAssertEqual(c.update(input { $0.home = true }, at: 0.2), [.close])
+        XCTAssertFalse(c.isOpen)
+        c.opened()
+        c.opened()   // twice is once
+        c.closed()
+        XCTAssertFalse(c.isOpen)
+    }
+
+    func testOpenedHoldingAMappedMenuButtonDoesNotTakeItAsAPress() {
+        var c = QuickMenuControl()
+        // A pad's A mapped to playport:menu (or held through a three-finger tap) opened the menu.
+        c.opened(holding: input { $0.a = true; $0.menu = true })
+        XCTAssertEqual(c.update(input { $0.a = true; $0.menu = true; $0.rx = 0.2 }, at: 0.1), [])   // stick jitter
+        XCTAssertEqual(c.update(input { $0.a = true; $0.ly = 0.1 }, at: 0.2), [])
+        XCTAssertEqual(c.update(input(), at: 0.3), [])
+        XCTAssertEqual(c.update(input { $0.a = true }, at: 0.4), [.press(.a)])        // pressed again: a press
+        c.closed()
+        c.opened(holding: input { $0.down = true })
+        XCTAssertFalse(c.needsClock)                                            // a held direction does not repeat
+        XCTAssertEqual(c.tick(at: 2), [])
     }
 
     func testTheGuestSeesNothingWhileHeldAndNotTheButtonThatClosedTheMenu() {

@@ -3,12 +3,14 @@
 committed user.reg seed, marked for top-up, with the values that keep winedbg's
 crash dialog, winemenubuilder and control.exe's add-on download off the phone;
 the Visual C++ runtime key (VC_RUNTIME), wintrust's and msisip's registration
-(register_wintrust: OID functions, trust providers, SIPs; register_msisip) and the Windows Imaging Component
+(register_wintrust: OID functions, trust providers, SIPs; register_msisip), winevulkan's Vulkan driver
+key (register_winevulkan, decision 0131) and the Windows Imaging Component
 registration (register_wic, decision 0072) in the committed system.reg seed,
 and its reading of windowscodecs' regsvr.c tables; wine.inf's AddReg sections, urlmon's
 REGINST zones, the media registrations and the i386-only modules' classes (decision 0080),
 with REQUIRED: registrations a wineboot'ed prefix has that the seed must keep, and
-REQUIRED_I386: what i386 callers read in the one 64-bit view (PLA-175)."""
+REQUIRED_I386: what i386 callers read in the one 64-bit view (PLA-175); and the shipped
+fonts registered for DirectWrite (PLA-374)."""
 import importlib.util
 from pathlib import Path
 import unittest
@@ -59,8 +61,26 @@ class VcRuntime(unittest.TestCase):
         self.assertTrue(marked)
         self.assertIn('"Installed"=dword:00000001', values)
         self.assertIn('"Major"=dword:0000000e', values)
-        self.assertIn('"Minor"=dword:0000002a', values)
+        self.assertIn('"Minor"=dword:00000033', values)
         self.assertIn('"Rbld"=dword:00000000', values)
+
+
+class Fonts(unittest.TestCase):
+    def test_system_seed_registers_each_shipped_face_where_dwrite_builds_its_collection(self):
+        # Wine's dwrite reads only this key (PLA-374); a bare file name is in %windir%\fonts,
+        # where wine_host.c link_fonts links every file of Runtime/fonts.
+        marked, values = sections((REPO / "app/registry/system.reg").read_text())[
+            "Software\\\\Microsoft\\\\Windows NT\\\\CurrentVersion\\\\Fonts"]
+        self.assertTrue(marked)
+        self.assertIn('"Tahoma (TrueType)"="tahoma.ttf"', values)
+        self.assertIn('"Tahoma Bold (TrueType)"="tahomabd.ttf"', values)
+        # win32u draws caption buttons with Marlett (defwnd.c draw_frame_caption).
+        self.assertIn('"Marlett (TrueType)"="marlett.ttf"', values)
+        spec = importlib.util.spec_from_file_location("font_stage", REPO / "build/stages/stage-artifacts.py")
+        stage = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(stage)
+        registered = {line.split("=", 1)[1].strip('"') for line in values}
+        self.assertEqual(registered, set(stage.FONTS))
 
 
 class WintrustRegistration(unittest.TestCase):
@@ -85,6 +105,13 @@ class WintrustRegistration(unittest.TestCase):
         _marked, values = system["Software\\\\Microsoft\\\\Cryptography\\\\OID\\\\EncodingType 0\\\\"
                                  "CryptSIPDllIsMyFileType2\\\\{000C10F1-0000-0000-C000-000000000046}"]
         self.assertEqual(values, ['"Dll"="MSISIP.DLL"', '"FuncName"="MsiSIPIsMyTypeOfFile"'])
+
+    def test_winevulkan_is_a_vulkan_driver_by_its_system32_manifest_marked_for_top_up(self):
+        # winevulkan's DllRegisterServer (decision 0131): what the Khronos loader reads to find it.
+        system = sections((REPO / "app/registry/system.reg").read_text())
+        marked, values = system["Software\\\\Khronos\\\\Vulkan\\\\Drivers"]
+        self.assertTrue(marked)
+        self.assertEqual(values, ['"C:\\\\windows\\\\system32\\\\winevulkan.json"=dword:00000000'])
 
     def test_indirect_data_struct_decodes_through_wintrust(self):
         system = sections((REPO / "app/registry/system.reg").read_text())
@@ -374,6 +401,10 @@ class WicSource(unittest.TestCase):
     def test_changed_msisip_registration_stops_the_generation(self):
         with self.assertRaisesRegex(SystemExit, "DllRegisterServer changed"):
             self.mod.register_msisip(self.mod.Hive(), "HRESULT WINAPI DllRegisterServer(void)\n{\n}\n")
+
+    def test_changed_winevulkan_registration_stops_the_generation(self):
+        with self.assertRaisesRegex(SystemExit, "DllRegisterServer changed"):
+            self.mod.register_winevulkan(self.mod.Hive(), "HRESULT WINAPI DllRegisterServer(void)\n{\n}\n")
 
 
 if __name__ == "__main__":

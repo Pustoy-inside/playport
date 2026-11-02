@@ -20,10 +20,9 @@
 //   block size MaxInst: Proton's global value (500; decision 0055) under a
 //              game's profile entry; the game's page (LaunchSettings.maxInst)
 //              overrides it. Every launch exports it.
-//   disk cache DiskCache: off by default until Hollow Knight's warm start
-//              stops corrupting rpmalloc (decision 0056; Proton experimental and
-//              bleeding-edge set FEX_DISKCACHE=1); the game's page
-//              (LaunchSettings.diskCache) turns it on or off. Every launch
+//   disk cache DiskCache: on by default, as Proton experimental and
+//              bleeding-edge set FEX_DISKCACHE=1 (decision 0056); the game's
+//              page (LaunchSettings.diskCache) turns it on or off. Every launch
 //              exports it; a WoW64 process keeps it off (patches/fex 0022).
 //   honoured   Multiblock in a game's profile, passed on as it is.
 //   not taken  Proton's ProfileStats, which needs the Linux stats shared memory.
@@ -93,8 +92,8 @@ public struct MemoryOrdering: Codable, Equatable, Hashable, Sendable {
 
 public enum FEXProfile {
     /// Where `proton` and `protonApps` come from.
-    public static let protonSource = "ValveSoftware/Proton bleeding-edge ae4e5bc925d7 (2026-10-05): FEX_Config.json, "
-        + "proton's fex_application_profiles; proton_11.0 5b89db940e0e has the same"
+    public static let protonSource = "ValveSoftware/Proton bleeding-edge 47c392304596 (2026-10-17): FEX_Config.json, "
+        + "proton's fex_application_profiles; experimental_11.0 7a94df49e469 and proton_11.0 bc896217ffcd have the same"
 
     /// Proton's global FEX configuration (FEX_Config.json).
     public static let proton: [String: String] = [
@@ -215,9 +214,10 @@ public enum FEXProfile {
         return config["MaxInst"].flatMap(Int.init).flatMap { validBlockSize($0) ? $0 : nil } ?? fexMaxInst
     }
 
-    /// FEX's disk cache when the game's page does not choose: off for now
-    /// (decision 0056: a warm start of Hollow Knight crashes in rpmalloc).
-    public static let defaultDiskCache = false
+    /// FEX's disk cache when the game's page does not choose: on, Proton's
+    /// default (decision 0056; the warm-start crashes were rpmalloc's one-block
+    /// pages, patches/rpmalloc 0004).
+    public static let defaultDiskCache = true
 
     /// The game's page over its profile, for a launch of `exe`.
     public static func launch(appID: UInt32?, exe: String, ordering: MemoryOrdering, maxInst: Int? = nil,

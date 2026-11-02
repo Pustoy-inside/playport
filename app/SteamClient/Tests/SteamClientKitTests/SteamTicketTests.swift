@@ -165,12 +165,14 @@ final class TicketBrokerTests: XCTestCase {
         b.cancel(one.handle)
         XCTAssertEqual(sent.all.last?.tickets.map(\.ticketCRC), [crcTwo])
         XCTAssertNil(b.status(one.handle))
-        // The play's end: an empty list, then nothing more.
+        // The play's end: an empty list, then nothing more; the ownership ticket is no longer handed out.
+        XCTAssertEqual(b.ownershipTicket?.value, ownership)
         let end = b.endPlay()
         XCTAssertEqual(end?.tickets.count, 0)
         XCTAssertEqual(end?.appIDs, [367520])
         XCTAssertNil(b.endPlay())
         XCTAssertEqual(b.create(type: .authSession, identity: "").failure, .notArmed)
+        XCTAssertNil(b.ownershipTicket)
     }
 
     func testLimits() throws {
@@ -273,7 +275,7 @@ final class TicketServiceTests: XCTestCase {
         let s = await signedIn(b)
         b.connectTokens.add([Secret([1, 2, 3])], keep: 10)
         b.traffic.setOpen(true)
-        let broker = await s.prepareTicketSession(appID: 945360)
+        let broker = await s.prepareTicketSession(appID: 945360).broker
         XCTAssertNotNil(broker)
         let played = await b.gamesPlayed
         XCTAssertEqual(played, [[945360]], "in the game for the play (decision 0062)")
@@ -303,22 +305,26 @@ final class TicketServiceTests: XCTestCase {
         let b = FakeBackend()
         let off = SteamService(backend: b, log: .silent, stateDirectory: nil)
         let none = await off.prepareTicketSession(appID: 1)
-        XCTAssertNil(none, "not signed in")
+        guard case .off = none else { return XCTFail("not signed in: \(none)") }
 
         let s = await signedIn(b)
         let noTokens = await s.prepareTicketSession(appID: 1)
-        XCTAssertNil(noTokens, "Steam gave no token in 2 s")
+        guard case .off = noTokens else { return XCTFail("Steam gave no token in 2 s: \(noTokens)") }
 
         b.connectTokens.add([Secret([1])], keep: 10)
         await b.set(ownership: .failure(SteamError.eresult(.accessDenied, context: "ClientGetAppOwnershipTicket 1")))
         let notOwned = await s.prepareTicketSession(appID: 1)
-        XCTAssertNil(notOwned)
+        guard case .notOwned = notOwned else { return XCTFail("AccessDenied is no licence: \(notOwned)") }
+        // Another refusal is not a missing licence.
+        await b.set(ownership: .failure(SteamError.eresult(.fail, context: "ClientGetAppOwnershipTicket 1")))
+        let failed = await s.prepareTicketSession(appID: 1)
+        guard case .off = failed else { return XCTFail("Fail is not AccessDenied: \(failed)") }
 
         // Without a broker the launch closes the CM, as before.
         await s.suspendForLaunch()
         let on = await b.loggedOn
         XCTAssertFalse(on.connected)
         let suspended = await s.prepareTicketSession(appID: 1)
-        XCTAssertNil(suspended)
+        XCTAssertNil(suspended.broker)
     }
 }

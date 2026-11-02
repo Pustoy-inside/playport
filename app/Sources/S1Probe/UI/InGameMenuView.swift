@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Playport's in-game menu (QuickMenu.dc.html; decision 0034, the plan's Hard
 // problem 2): a long press of the controller's Home button over a running game
-// opens it (HostIO, HostIOKit.QuickMenuControl), and the game is paused behind
-// it:
+// (HostIO, HostIOKit.QuickMenuControl), or a three-finger tap on the game
+// (HostIO.menuGesture), opens it, and the game is paused behind it:
 //
 //   - input: the guest's pads rest, and keys, touches and the mouse stop
 //     (HostIO.holdGuest; a button still down from the menu stays up for the
@@ -13,11 +13,25 @@
 //     held by the wineserver only at a safe point (in guest code, outside a
 //     server call: patches/madeira-unix 0010), and resumes them on Resume.
 //
-// Its rows: Resume (also B, ≡ and Home), Screenshot (the frame on screen to
+// Its rows: Resume (also B, ≡ and Home), Controls (a panel beside the rows,
+// QuickMenuControls.dc.html: the game's on-screen layout, the Gamepad layout's
+// d-pad and right stick (while it plays that preset with no copy of its own:
+// QuickMenuControlsRow.shown), their opacity, gyro aim's output
+// and sensitivity, and with a controller connected its controller map's mode,
+// saved for the game and applied at once; UI/TouchControlsView.swift,
+// GyroSensors.swift, ControllerMapView.swift; A on the Controller row, a tap on
+// its "Edit controller…", or choosing Custom there opens the full Controller
+// page and its ActionPicker over the paused game, InGameControllerPage, B back
+// to the panel; A on the On-screen controls row, or a tap on its "Edit
+// layout…", opens the layout editor over the paused game in the menu's place,
+// UI/LayoutEditorView.swift, Done back to the panel), Touch keyboard (back to the game with the touch keyboard open
+// over it, OnScreenControls.setKeyboard; its own close key closes it), Type text (back to the game with the text
+// bar and the iOS keyboard over it, UI/TextBarView.swift; the menu opening closes the bar),
+// Screenshot (the frame on screen to
 // Photos; a dev build also keeps a PNG in Documents/Screenshots), Performance
-// HUD (Playport's performance HUD, cycled for this game only; PerformanceHUD),
-// Controller as mouse (HostIO.setMouseMode: the right stick a cursor, RT and LT its
-// buttons, the left stick the wheel, the rest keys), the controller with its battery, and Quit game (TitleLaunch.quit: WM_CLOSE to
+// overlay (UI/PerformanceOverlay.swift, at once and for every game: the same
+// setting as Settings › Graphics), the
+// controller with its battery, and Quit game (TitleLaunch.quit: WM_CLOSE to
 // the game's windows, so it saves as when its window is closed, then the
 // restart after the game, decision 0029, returns to Home).
 
@@ -36,19 +50,20 @@ final class InGameMenu: ObservableObject {
 
     @Published private(set) var isOpen = false
     @Published private(set) var menu = QuickMenu()
-    /// Playport's performance HUD as the game shows it now (PerformanceHUD).
-    @Published private(set) var hud = HUDPreset.off
-    /// The controller as a mouse and keys (HostIO.setMouseMode), for the rest of this launch.
-    @Published private(set) var mouse = false
+    /// The performance overlay's setting.
+    @Published private(set) var overlay = PerformanceOverlay.enabled
     /// Screenshot's value: nil until one is taken, then what happened.
     @Published private(set) var shot: String?
     @Published private(set) var quitting = false
     /// The session root holds the game's threads.
     @Published private(set) var paused = false
+    /// The Controller page is up over the panel (InGameControllerPage): the game's own map, edited
+    /// while the game stays paused and the menu keeps its input (the guest's pads held).
+    @Published private(set) var editor = false
 
     private static func log(_ line: String) { HostIO.log("menu: " + line) }
 
-    /// Home held on a pad (HostIO). False when there is no game to pause yet.
+    /// Home held on a pad (HostIO), or a three-finger tap on the game (HostIO.menuGesture). False when there is no game to pause yet.
     @discardableResult
     func open() -> Bool {
         let launch = TitleLaunch.shared
@@ -63,10 +78,11 @@ final class InGameMenu: ObservableObject {
             return false
         }
         isOpen = true
-        hud = PerformanceHUD.preset
-        mouse = HostIO.shared.mouseMode
+        GameTextBar.shared.close()
         menu = QuickMenu()
+        overlay = PerformanceOverlay.enabled
         shot = nil
+        HostIO.shared.menuOpened()
         HostIO.shared.holdGuest()
         Self.log("open over \(launch.title); \(WindowInsets.shared.read())")
         HostIO.sessionControl(Int(PP_CONTROL_PAUSE), "pause") { rc, _ in
@@ -78,6 +94,40 @@ final class InGameMenu: ObservableObject {
     /// A press from a pad (HostIO) or, in a dev build, the driver.
     func press(_ b: NavButton) {
         guard isOpen, !quitting else { return }
+        if LayoutEditorSession.shared.isUp(.inGame) {
+            LayoutEditorSession.shared.press(b)
+            #if !PLAYPORT_RELEASE
+            Self.log("pad \(b.rawValue): \(LayoutEditorSession.shared.summary)")
+            #endif
+            return
+        }
+        if editor {
+            editorPress(b)
+            #if !PLAYPORT_RELEASE
+            Self.log("pad \(b.rawValue): controller page, \(editorSummary)")
+            #endif
+            return
+        }
+        if let row = menu.panel {
+            let controls = OnScreenControls.shared
+            let rows = QuickMenuControlsRow.shown(controller: controls.controllers > 0, state: controls.state)
+            switch b {
+            case .up: menu.move(down: false, rows: rows)
+            case .down: menu.move(down: true, rows: rows)
+            case .left: changeControls(row, by: -1)
+            case .right: changeControls(row, by: 1)
+            case .a where row == .controllerMap: openEditor()
+            case .a where row == .layout: openLayoutEditor()
+            case .a: changeControls(row, by: 1, wrapping: true)
+            case .b: menu.closePanel()
+            case .menu: resume()
+            default: return
+            }
+            #if !PLAYPORT_RELEASE
+            Self.log("pad \(b.rawValue): controls panel \(menu.panel?.rawValue ?? "closed"), \(OnScreenControls.shared.state.summary)")
+            #endif
+            return
+        }
         switch b {
         case .up: menu.move(down: false)
         case .down: menu.move(down: true)
@@ -96,17 +146,133 @@ final class InGameMenu: ObservableObject {
         menu.ring(item)
         switch item {
         case .resume: resume()
+        case .controls: menu.openPanel()
+        case .keyboard:
+            // Back to the game, with the touch keyboard open over it (its keys reach the game only with the menu down).
+            resume()
+            OnScreenControls.shared.setKeyboard(true)
+        case .text:
+            // Back to the game, with the text bar and the iOS keyboard over it (its typing reaches the game only with the menu down).
+            resume()
+            GameTextBar.shared.open()
         case .screenshot: screenshot()
         case .overlay: toggleOverlay()
-        case .mouse: HostIO.shared.setMouseMode(!HostIO.shared.mouseMode); mouse = HostIO.shared.mouseMode
         case .controller: PadRouter.shared.refreshControllers()
         case .quit: quit()
         }
     }
 
+    /// The Controls panel's row `row` moved `by` steps (left -1, right +1; A
+    /// goes round): saved as the game's own, and the controls change at once.
+    func changeControls(_ row: QuickMenuControlsRow, by: Int, wrapping: Bool = false) {
+        guard isOpen, !quitting, let id = TitleLaunch.shared.titleID else { return }
+        menu.openPanel(row)
+        let now = OnScreenControls.shared.state
+        var mine = ControlsStore.shared.game(id)
+        var intoEditor = false
+        switch row {
+        case .layout:
+            mine.layout = Self.step(now.layout, by: by, wrapping: wrapping)
+        case .dpad:
+            mine.dpad = Self.step(now.dpad, by: by, wrapping: wrapping)
+        case .rightStick:
+            mine.rightStick = Self.step(now.rightStick, by: by, wrapping: wrapping)
+        case .opacity:
+            let next = ControlsOpacity.step(now.opacity, by: by)
+            mine.opacity = wrapping && next == now.opacity ? ControlsOpacity.steps[0] : next
+        case .gyro:
+            mine.gyro = GyroRow.output.setting(GyroRow.output.step(ControlsStore.shared.gyro(id), by: by, wrapping: wrapping),
+                                               in: mine.gyro)
+        case .gyroSensitivity:
+            mine.gyro = GyroRow.sensitivity.setting(GyroRow.sensitivity.step(ControlsStore.shared.gyro(id), by: by, wrapping: wrapping),
+                                                    in: mine.gyro)
+        case .controllerMap:
+            // The mode only; Custom plays the game's own table (a copy of Keyboard & mouse until it is edited).
+            var map = mine.controllerMap(over: ControlsStore.shared.defaults)
+            let was = map.mode
+            map.mode = Self.step(map.mode, by: by, wrapping: wrapping)
+            mine.controllerMap = map
+            // Custom chosen: straight into its editor (owner, 2026-10-13: it changed nothing visible).
+            intoEditor = map.mode == .custom && was != .custom
+        }
+        ControlsStore.shared.setGame(id, mine)
+        Self.log("controls for \(id): layout \(mine.layout?.rawValue ?? "default") dpad \(mine.dpad?.rawValue ?? "default") "
+                 + "rightStick \(mine.rightStick?.rawValue ?? "default") opacity \(mine.opacity.map(ControlsOpacity.label) ?? "default") "
+                 + "gyro \(mine.gyro?.output?.rawValue ?? "default") sensitivity \(mine.gyro?.sensitivity.map { String($0) } ?? "default") "
+                 + "controllerMap \(mine.controllerMap?.mode.rawValue ?? "default")")
+        if intoEditor { openEditor() }
+    }
+
+    // MARK: the layout editor over the paused game
+
+    /// Edit layout… (or A on the On-screen controls row): the editor over the paused game
+    /// (UI/LayoutEditorView.swift), on the layout the game plays with. Only with the menu open,
+    /// which already holds the game's input (holdGuest: every key and button let go, and the
+    /// on-screen controls hidden, which lets their touches go: OnScreenControls.update).
+    func openLayoutEditor() {
+        guard isOpen, !quitting, !editor, let id = TitleLaunch.shared.titleID else { return }
+        menu.openPanel(.layout)
+        LayoutEditorSession.shared.open(titleID: id, title: TitleLaunch.shared.title, host: .inGame,
+                                        state: OnScreenControls.shared.state)
+    }
+
+    /// Done (or the game ending): back to the panel's On-screen controls row.
+    func layoutEditorClosed() {
+        guard isOpen else { return }
+        menu.openPanel(.layout)
+        Self.log("layout editor closed; back to the controls panel, \(OnScreenControls.shared.state.summary)")
+    }
+
+    // MARK: the Controller page over the paused game
+
+    /// Edit controller…: the game's Controller page over the panel, its ring on the mode switch.
+    func openEditor() {
+        guard isOpen, !quitting, !editor, let id = TitleLaunch.shared.titleID else { return }
+        menu.openPanel(.controllerMap)
+        PadFocus.shared.reset(start: ControllerMapView.modeID)
+        editor = true
+        Self.log("controller page open for \(id): \(ControlsStore.shared.game(id).controllerMap(over: ControlsStore.shared.defaults).summary)")
+    }
+
+    /// B on the page: back to the panel's Controller row (a picker over it closes first, as in the shell).
+    func closeEditor() {
+        guard editor else { return }
+        PadModal.shared.close()
+        editor = false
+        Self.log("controller page closed; back to the controls panel")
+    }
+
+    /// A press on the page, as the shell routes it there (AppShell.press): a picker's first, then
+    /// the page's (ControllerMapRing.pagePress), B back to the panel.
+    private func editorPress(_ b: NavButton) {
+        if PadModal.shared.isUp { return PadModal.shared.press(b) }
+        ControllerMapRing.pagePress(b) { closeEditor() }
+    }
+
+    #if !PLAYPORT_RELEASE
+    /// The page's state for the driver's log: the ringed item, a picker over it, the map.
+    var editorSummary: String {
+        "focus \(PadFocus.shared.focused ?? "none")" + (PadModal.shared.summary.map { ", \($0)" } ?? "")
+            + ", controller map \(TitleLaunch.shared.titleID.map { ControlsStore.shared.game($0).controllerMap(over: ControlsStore.shared.defaults).summary } ?? "none")"
+    }
+    #endif
+
+    /// The value `by` steps from `value` along its cases, stopping at the ends (going round with `wrapping`).
+    static func step<T: CaseIterable & Equatable>(_ value: T, by: Int, wrapping: Bool) -> T where T.AllCases == [T] {
+        let all = T.allCases
+        let i = all.firstIndex(of: value)! + by
+        return wrapping ? all[(i % all.count + all.count) % all.count] : all[max(0, min(all.count - 1, i))]
+    }
+
     /// Back to the game: its threads go on first, then its input and audio.
     func resume() {
         guard isOpen, !quitting else { return }
+        // The layout editor's work is kept, as Done keeps it.
+        if LayoutEditorSession.shared.isUp(.inGame) { LayoutEditorSession.shared.done() }
+        if editor {
+            PadModal.shared.close()
+            editor = false
+        }
         isOpen = false
         paused = false
         HostIO.sessionControl(Int(PP_CONTROL_RESUME), "resume")
@@ -122,15 +288,22 @@ final class InGameMenu: ObservableObject {
 
     /// The launch ended (TitleLaunch.end): nothing is left to resume.
     func gameEnded() {
+        if editor { PadModal.shared.close() }
+        // The game ended under the layout editor: it closes, unsaved.
+        if LayoutEditorSession.shared.isUp(.inGame) { LayoutEditorSession.shared.close() }
+        editor = false
+        GameTextBar.shared.close()
         isOpen = false
         paused = false
         quitting = false
     }
 
-    /// The HUD row: Off, FPS, Compact, Full, for this game only (Settings keep theirs).
+    /// The setting, for every game, and the overlay over this one at once.
     private func toggleOverlay() {
-        hud = PerformanceHUD.preset.next
-        PerformanceHUD.show(hud)
+        overlay.toggle()
+        UserDefaults.standard.set(overlay, forKey: PerformanceOverlay.key)
+        GameSurfaceView.current?.performance.refresh()
+        Self.log("overlay: " + (overlay ? "on" : "off"))
     }
 
     // MARK: Screenshot
@@ -167,12 +340,9 @@ final class InGameMenu: ObservableObject {
         Self.log("screenshot: " + line)
     }
 
-    /// The texture as the player sees it: Core Image reads a Metal texture
-    /// upside down, and the layer is opaque, so whatever alpha the game left
-    /// in it is not the picture's (a PNG with it came out washed grey).
-    /// A texture Core Image does not read (KosmicKrisp's swap chain images are
-    /// render targets only, with no shader read usage) is read through a plain 2D
-    /// copy of its first slice.
+    /// The texture as the player sees it (FramePicture). A texture Core Image does not read
+    /// (KosmicKrisp's swap chain images are render targets only, with no shader read usage)
+    /// is read through a plain 2D copy of its first slice.
     private static func image(of texture: any MTLTexture) -> UIImage? {
         if let image = coreImage(of: texture) { return image }
         log("screenshot: Core Image did not read \(describe(texture)); trying a 2D copy")
@@ -184,11 +354,7 @@ final class InGameMenu: ObservableObject {
     }
 
     private static func coreImage(of texture: any MTLTexture) -> UIImage? {
-        guard let ci = CIImage(mtlTexture: texture, options: [.colorSpace: CGColorSpace(name: CGColorSpace.sRGB)!]) else { return nil }
-        let context = CIContext(mtlDevice: texture.device)
-        let flipped = ci.settingAlphaOne(in: ci.extent).oriented(.downMirrored)
-        guard let cg = context.createCGImage(flipped, from: flipped.extent) else { return nil }
-        return UIImage(cgImage: cg)
+        FramePicture.image(of: texture, context: CIContext(mtlDevice: texture.device)).map { UIImage(cgImage: $0) }
     }
 
     /// Slice 0, level 0 of texture as a 2D, shader-readable texture of the same format,
@@ -241,10 +407,28 @@ final class InGameMenu: ObservableObject {
     #if !PLAYPORT_RELEASE
     /// The driver's summary line (Dev/UIDriver.swift).
     var summary: String {
-        "menu \(isOpen ? "open" : "closed"), ring \(menu.ring.rawValue), paused=\(paused) hud=\(hud.rawValue)"
+        "menu \(isOpen ? "open" : "closed"), ring \(menu.ring.rawValue)" + (menu.panel.map { " (panel \($0.rawValue))" } ?? "")
+            + (editor ? " (controller page: \(editorSummary))" : "")
+            + (LayoutEditorSession.shared.isUp(.inGame) ? " (\(LayoutEditorSession.shared.summary))" : "")
+            + ", paused=\(paused) overlay=\(overlay), controls \(OnScreenControls.shared.state.summary)"
+            + ", gyro \(TitleLaunch.shared.titleID.map { GyroText.summary(ControlsStore.shared.gyro($0)) } ?? "none")"
+            + ", controller map \(TitleLaunch.shared.titleID.map { ControlsStore.shared.game($0).controllerMap(over: ControlsStore.shared.defaults).summary } ?? "none")"
             + (shot.map { ", screenshot: \($0)" } ?? "") + (quitting ? ", quitting" : "")
     }
     #endif
+}
+
+/// A frame's texture (PacedMetalLayer.lastPresented, or a copy of part of it) as the player
+/// sees it, for the in-game menu's Screenshot and the magnifier's loupe (MagnifierOverlay):
+/// Core Image reads a Metal texture upside down, and the layer is opaque, so whatever alpha
+/// the game left in it is not the picture's (a PNG with it came out washed grey). Nil for a
+/// texture Core Image does not read.
+enum FramePicture {
+    static func image(of texture: any MTLTexture, context: CIContext) -> CGImage? {
+        guard let ci = CIImage(mtlTexture: texture, options: [.colorSpace: CGColorSpace(name: CGColorSpace.sRGB)!]) else { return nil }
+        let flipped = ci.settingAlphaOne(in: ci.extent).oriented(.downMirrored)
+        return context.createCGImage(flipped, from: flipped.extent)
+    }
 }
 
 /// The menu over the paused game (QuickMenu.dc.html): the game dimmed, a
@@ -259,6 +443,10 @@ struct InGameMenuView: View {
     @ObservedObject private var launch = TitleLaunch.shared
     @ObservedObject private var router = PadRouter.shared
     @ObservedObject private var safe = WindowInsets.shared
+    @ObservedObject private var controls = OnScreenControls.shared
+    @ObservedObject private var textBar = GameTextBar.shared
+    @ObservedObject private var store = ControlsStore.shared
+    @ObservedObject private var layoutEditor = LayoutEditorSession.shared
 
     var body: some View {
         let lead = safe.side(44, safe.insets.leading), trail = safe.side(44, safe.insets.trailing)
@@ -283,7 +471,16 @@ struct InGameMenuView: View {
             .background(PP.surface)
             .overlay(alignment: .trailing) { Rectangle().fill(PP.line).frame(width: 1) }
             .ignoresSafeArea()
-            if downloadsWaiting {
+            if let row = model.menu.panel {
+                ControlsPanel(ring: row, state: controls.state,
+                              gyro: launch.titleID.map { store.gyro($0) } ?? store.gyroDefaults,
+                              map: launch.titleID.map { store.game($0).controllerMap(over: store.defaults) } ?? store.defaults.controllerMap,
+                              rows: QuickMenuControlsRow.shown(controller: controls.controllers > 0, state: controls.state))
+                    .padding(.leading, 330 + lead - 44 + 24).padding(.top, 22)
+                    // Clear of the footer: past this the rows scroll (ControlsPanel).
+                    .padding(.bottom, safe.insets.bottom + 36 + 8)
+            }
+            if downloadsWaiting && model.menu.panel == nil {
                 HStack(spacing: 8) {
                     Circle().fill(PP.muted).frame(width: 8, height: 8)
                     Text("Downloads paused while you play")
@@ -298,16 +495,26 @@ struct InGameMenuView: View {
                 Spacer()
                 HStack {
                     Spacer()
-                    PadFooter(hints: [
+                    PadFooter(hints: model.menu.panel == nil ? [
                         PadHint(button: .a, label: "Choose") { model.press(.a) },
                         PadHint(button: .b, label: "Back to game") { model.resume() },
+                    ] : [
+                        PadHint(button: .a, label: model.menu.panel == .controllerMap ? "Edit controller…"
+                                : model.menu.panel == .layout ? "Edit layout…" : "Change") { model.press(.a) },
+                        PadHint(button: .b, label: "Back") { model.press(.b) },
                     ], leading: true)
                     .fixedSize()
                 }
                 .padding(.trailing, trail)
                 .padding(.bottom, safe.insets.bottom)
             }
+            if model.editor, let id = launch.titleID {
+                InGameControllerPage(titleID: id, title: launch.title)
+            }
         }
+        // The layout editor over the paused game, in the menu's place (UI/LayoutEditorView.swift).
+        .opacity(layoutEditor.isUp(.inGame) ? 0 : 1)
+        .overlay { if layoutEditor.isUp(.inGame) { LayoutEditorView(inGame: true) } }
         // The margins above come from the window's insets themselves: laid out over the
         // whole screen, or the note and the footer would be inset twice (the overlay
         // keeps the safe area although the game surface under it ignores it).
@@ -330,7 +537,7 @@ struct InGameMenuView: View {
                 }
             }
             .padding(.horizontal, 14)
-            .frame(height: 42)
+            .frame(height: 36)
             .background(ringed ? PP.text : .clear, in: RoundedRectangle(cornerRadius: 10))
             .contentShape(RoundedRectangle(cornerRadius: 10))
         }
@@ -340,12 +547,22 @@ struct InGameMenuView: View {
 
     private func value(_ item: QuickMenuItem) -> String? {
         switch item {
-        case .resume: nil
-        case .screenshot: model.shot ?? "Saved to Photos"
-        case .overlay: PerformanceHUDText.preset(model.hud)
-        case .mouse: model.mouse ? "On · RS cursor, RT/LT click" : "Off"
-        case .controller: QuickMenu.controller(name: router.controller?.name, battery: router.controller?.battery)
-        case .quit: model.quitting ? "Closing…" : "Saves first"
+        case .resume: return nil
+        case .controls: return controls.state.summary
+        case .keyboard: return controls.keyboard ? "Open" : nil
+        case .text: return textBar.isOpen ? "Open" : nil
+        case .screenshot: return model.shot ?? "Saved to Photos"
+        case .overlay: return model.overlay ? "On" : "Off"
+        case .controller:
+            // The dev build's scripted pad is no GameController pad, so the router has no name for it (touch controls 3c).
+            #if PLAYPORT_RELEASE
+            let scripted = false
+            #else
+            let scripted = VirtualPad.shared.connected
+            #endif
+            return QuickMenu.controller(name: router.controller?.name, battery: router.controller?.battery,
+                                        scriptedPad: scripted)
+        case .quit: return model.quitting ? "Closing…" : "Saves first"
         }
     }
 
@@ -353,4 +570,188 @@ struct InGameMenuView: View {
     private var downloadsWaiting: Bool {
         !(SteamAccountModel.current?.installs.order.isEmpty ?? true)
     }
+}
+
+/// The Controls panel beside the menu's rows (QuickMenuControls.dc.html): the
+/// game's on-screen layout, its d-pad and right stick, their opacity, and gyro
+/// aim's output and sensitivity, and, while a controller is connected, its
+/// controller map's mode. A tap does what left and right do. Rows are 36 pt;
+/// on a screen too short for all of them (seven on a 375 pt tall one) the rows
+/// scroll, and the ringed row is scrolled to.
+private struct ControlsPanel: View {
+    let ring: QuickMenuControlsRow
+    let state: ControlsState
+    /// The game's gyro aim, its own over the defaults.
+    let gyro: GyroSettings
+    /// The game's controller map, its own over the default.
+    let map: ControllerMap
+    /// The rows shown (QuickMenuControlsRow.shown).
+    let rows: [QuickMenuControlsRow]
+    private var model: InGameMenu { InGameMenu.shared }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text("Controls").font(PP.display(20))
+                Text("For this game · saved as you change them").font(.system(size: 12)).foregroundStyle(PP.muted)
+                    .lineLimit(1).minimumScaleFactor(0.8)
+            }
+            .padding(.bottom, 6)
+            ViewThatFits(in: .vertical) {
+                rowList
+                ScrollViewReader { proxy in
+                    ScrollView(.vertical, showsIndicators: false) { rowList }
+                        .onAppear { proxy.scrollTo(ring) }
+                        .onChange(of: ring) { _, r in withAnimation(.easeOut(duration: 0.12)) { proxy.scrollTo(r) } }
+                }
+            }
+        }
+        .padding(12)
+        .frame(width: 330, alignment: .leading)
+        .background(PP.surface, in: RoundedRectangle(cornerRadius: 14))
+        .overlay(RoundedRectangle(cornerRadius: 14).stroke(PP.line, lineWidth: 1))
+        .accessibilityIdentifier("menu-controls-panel")
+    }
+
+    private var rowList: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            ForEach(rows, id: \.self) { r in
+                rowView(r).id(r)
+            }
+            if !state.visible && state.layout != .off {
+                Text("Hidden while a controller is connected.").font(.system(size: 12)).foregroundStyle(PP.muted)
+                    .padding(.top, 2)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func rowView(_ r: QuickMenuControlsRow) -> some View {
+        switch r {
+        case .layout:
+            // "Edit layout…" under the title: the layout editor over the paused game (A on the row too).
+            row(.layout, subtitle: "Edit layout…", edit: { model.openLayoutEditor() }) {
+                choices(.layout, OnScreenLayout.allCases, state.layout, title: \.shortTitle, compact: true)
+            }
+        case .dpad: row(.dpad) { choices(.dpad, OnScreenDpad.allCases, state.dpad, title: \.title) }
+        case .rightStick: row(.rightStick) { choices(.rightStick, OnScreenRightStick.allCases, state.rightStick, title: \.shortTitle) }
+        case .opacity: row(.opacity) { stepper(.opacity, ControlsOpacity.label(state.opacity)) }
+        case .gyro: row(.gyro, subtitle: gyroSource) { choices(.gyro, GyroOutput.allCases, gyro.output, title: \.gyroTitle) }
+        case .gyroSensitivity: row(.gyroSensitivity) { stepper(.gyroSensitivity, GyroText.sensitivity(gyro.sensitivity)) }
+        case .controllerMap:
+            // "Edit controller…" under the title: the full page over the paused game (A on the row too).
+            row(.controllerMap, subtitle: "Edit controller…", edit: { model.openEditor() }) {
+                choices(.controllerMap, ControllerMap.Mode.allCases, map.mode, title: \.shortTitle, compact: true)
+            }
+        }
+    }
+
+    /// Under Gyro aim: the gyro it reads (QuickMenuControls.dc.html's "iPhone gyro").
+    private var gyroSource: String {
+        let use = GyroText.sourceInUse(gyro.source, device: GyroSensors.shared.device(for: gyro))
+        guard gyro.output != .off else { return "Moves the view as you turn" }
+        return use.why ?? "Always on · " + use.value + " gyro"
+    }
+
+    /// `edit`: the title and subtitle are a tap target too, the subtitle a link (the Controller row's Edit controller…).
+    private func row<V: View>(_ r: QuickMenuControlsRow, subtitle: String? = nil, edit: (() -> Void)? = nil,
+                              @ViewBuilder value: () -> V) -> some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 0) {
+                // One line: "Controller" wrapped beside its three modes (touch controls 3c).
+                Text(r.title).font(.system(size: 14, weight: .medium)).lineLimit(1).fixedSize()
+                if let subtitle {
+                    Text(subtitle + (edit == nil ? "" : " ›")).font(.system(size: 10, weight: edit == nil ? .regular : .semibold))
+                        .foregroundStyle(edit == nil ? PP.muted : PP.accent).lineLimit(1).minimumScaleFactor(0.8)
+                }
+            }
+            .frame(maxHeight: .infinity)
+            .contentShape(Rectangle())
+            .onTapGesture { edit?() }
+            .accessibilityIdentifier(edit == nil ? "menu-controls-\(r.rawValue)-title" : "menu-controls-\(r.rawValue)-edit")
+            Spacer(minLength: 8)
+            value()
+        }
+        .padding(.horizontal, 12).frame(height: 36)
+        .background(PP.raised, in: RoundedRectangle(cornerRadius: 10))
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(ring == r ? PP.accent : .clear, lineWidth: 2))
+        .accessibilityIdentifier("menu-controls-\(r.rawValue)")
+    }
+
+    /// A row's values side by side, the current one filled; a tap chooses one.
+    /// `compact`: narrower, so a long title fits beside them (the Controller row's three, the
+    /// On-screen controls row's four layouts).
+    private func choices<T: Hashable & RawRepresentable>(_ r: QuickMenuControlsRow, _ all: [T], _ current: T,
+                                                          title: KeyPath<T, String>, compact: Bool = false) -> some View
+    where T.RawValue == String {
+        HStack(spacing: 2) {
+            ForEach(all, id: \.self) { v in
+                Text(v[keyPath: title]).font(.system(size: 12, weight: .semibold))
+                    .lineLimit(1).fixedSize()   // the subtitle beside it gives way, never a value
+                    .foregroundStyle(v == current ? PP.background : PP.muted)
+                    .padding(.horizontal, compact ? 6 : 9).padding(.vertical, 5)
+                    .background(v == current ? PP.text : .clear, in: RoundedRectangle(cornerRadius: 8))
+                    .contentShape(Rectangle())
+                    .onTapGesture { model.changeControls(r, by: all.firstIndex(of: v)! - all.firstIndex(of: current)!) }
+                    .accessibilityIdentifier("menu-controls-\(r.rawValue)-\(v.rawValue)")
+            }
+        }
+        .padding(2)
+        .background(PP.background, in: RoundedRectangle(cornerRadius: 10))
+    }
+
+    /// ‹ value ›: a tap on an arrow steps the row.
+    private func stepper(_ r: QuickMenuControlsRow, _ value: String) -> some View {
+        HStack(spacing: 8) {
+            arrow(r, "‹", by: -1)
+            Text(value).font(.system(size: 14, weight: .semibold))
+            arrow(r, "›", by: 1)
+        }
+    }
+
+    private func arrow(_ r: QuickMenuControlsRow, _ s: String, by: Int) -> some View {
+        Text(s).font(.system(size: 16)).foregroundStyle(PP.muted)
+            .frame(minWidth: 18, minHeight: 30)
+            .contentShape(Rectangle())
+            .onTapGesture { model.changeControls(r, by: by) }
+    }
+}
+
+/// The Controller page over the paused game (the Controls panel's Edit controller…, or Custom
+/// chosen there): the game's own map as Game options › Controls › Controller shows it, saved at
+/// once (ControlsStore) and applied on Resume. The shell is not up while a game runs, so the page
+/// brings what the shell gives it there: the focus ring's root, the footer, and the pickers
+/// (PadModalHost, the ActionPicker among them). Its presses come from the in-game menu
+/// (InGameMenu.press: the pads stay held from the guest), B back to the panel.
+private struct InGameControllerPage: View {
+    let titleID: String
+    let title: String
+    @ObservedObject private var model = InGameMenu.shared
+    @ObservedObject private var focus = PadFocus.shared
+    @ObservedObject private var modal = PadModal.shared
+    @ObservedObject private var safe = WindowInsets.shared
+
+    var body: some View {
+        VStack(spacing: 0) {
+            ControllerMapView(target: .game(titleID), context: title)
+            // A picker draws its own footer; hidden, not removed, so the page keeps its height (as the shell's).
+            PadFooter(hints: ControllerMapRing.hints { model.closeEditor() })
+                .opacity(modal.isUp ? 0 : 1)
+                .padding(.bottom, AppShell.footerBottom)
+        }
+        // The game surface ignores the safe area, so the window's insets are given back here
+        // (WindowInsets); the footer sits low, in the home indicator's inset, as in the shell.
+        .safeAreaPadding(EdgeInsets(top: safe.insets.top, leading: safe.insets.leading, bottom: 0, trailing: safe.insets.trailing))
+        .background(PP.background)
+        .padFocusRoot()
+        .overlay {
+            PadModalHost().safeAreaPadding(safe.insets).animation(.easeOut(duration: 0.15), value: modal.isUp)
+        }
+        .accessibilityIdentifier("in-game-controller-page")
+    }
+}
+
+private extension GyroOutput {
+    /// The panel's short word for it: "Stick", so Off, Mouse and Stick fit beside the gyro's source.
+    var gyroTitle: String { self == .rightStick ? "Stick" : GyroText.output(self) }
 }

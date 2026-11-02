@@ -36,9 +36,12 @@ under $PLAYPORT_RUN, default $PLAYPORT_BUILD/run):
   DXMT_PE_ROOT        dxmt-patched/pe    stages/dxmt-patched.sh pe (P5-dxmt-pe); the
                                          same patched tree as P5-dxmt's unix objects
   VULKAN_PE_ROOT      vulkan-pe/pe       stages/vulkan-pe.sh (P6-vulkan-pe): DXVK and vkd3d-proton
+  VULKAN_LOADER_ROOT  vulkan-pe/loader   stages/vulkan-pe.sh loader (P6-vulkan-loader): the Khronos
+                                         Vulkan-Loader and winevulkan.json
   STEAMAPI_ROOT       steamapi/pe        stages/steamapi.sh (P8-steamapi): gbe_fork's steam_api DLLs
   session             session            stages/session-root.sh (P9-session, P9-url-opener): the session
                                          root and the URL opener
+  steamclient         steamclient        stages/steamclient.sh (P9-steamclient): Playport's steamclient64.dll and steamclient.dll
   idevice             idevice            stages/idevice.sh (P10-idevice): idevice's C FFI, one object
   registry            app/registry (committed; app/tools/prefix-registry.py, P7-reg)
   ca-bundle           $PLAYPORT_BUILD/cache/ca-bundle-<pin>
@@ -80,8 +83,10 @@ ROOTS = {
     "dxmt": Path(os.environ.get("DXMT_COMBINED_ROOT", RUN / "dxmt-combined")),
     "dxmt-pe": Path(os.environ.get("DXMT_PE_ROOT", RUN / "dxmt-patched" / "pe")),
     "vulkan-pe": Path(os.environ.get("VULKAN_PE_ROOT", RUN / "vulkan-pe" / "pe")),
+    "vulkan-loader": Path(os.environ.get("VULKAN_LOADER_ROOT", RUN / "vulkan-pe" / "loader")),
     "steamapi": Path(os.environ.get("STEAMAPI_ROOT", RUN / "steamapi" / "pe")),
     "session": RUN / "session",
+    "steamclient": RUN / "steamclient",
     "idevice": RUN / "idevice",
     "registry": PKG / "registry",
     "ca-bundle": BUILD / "cache" / f"ca-bundle-{pin('ca-bundle')}",
@@ -108,17 +113,19 @@ HEADER = """\
 #   P4-server reconstructed base + Madeira build/wineserver/build.sh via build/stages/unix-gaps.sh wineserver (patches/madeira-unix real-suspend-safepoint, patches/wine-unix server-ios-*)
 #   P4-crypto GnuTLS 3.8.9 / GMP 6.3.0 / Nettle 3.10.1 from Madeira's tracked tarballs via build/stages/unix.sh gnutls; nettle/hogweed hashes depend on UNIX_ROOT
 #   nls       wine pin nls/ (tracked data files): the set Madeira app/Madeira/nls ships, plus every Windows ANSI code page (PLA-233)
-#   fonts     wine pin fonts/{tahoma,tahomabd}.ttf (tracked prebuilts, not regenerated with FontForge); architecture-neutral GDI fallback faces
+#   fonts     wine pin fonts/{tahoma,tahomabd,marlett}.ttf (tracked prebuilts, not regenerated with FontForge); architecture-neutral GDI fallback faces, and the symbol face win32u draws caption buttons and other frame controls with
 #   winsxs    wine pin dlls/<module>/*.manifest for the modules with a WINE_MANIFEST resource (tracked data files, the side-by-side assemblies wineboot's fakedll.c registers); wine_host.c link_winsxs installs them for x86 and arm64 into drive_c/windows/winsxs with links into the i386 and arm64ec sets
 #   etc       wine pin dlls/ws2_32/{hosts,networks,protocol,services} (tracked data files, the ones ws2_32.dll carries as the resources wine.inf [EtcFiles] installs); wine_host.c copies the ones a prefix lacks into drive_c/windows/system32/drivers/etc
 #   P5-dxmt   DXMT pin (3Shain/dxmt) + patches/dxmt-port + patches/dxmt unix slice (build/stages/dxmt-patched.sh unix: build/stages/dxmt-base.sh unix + the hand-ported AIR helpers in build/air-helpers) + LLVM 15.0.7 iOS static libs, combined by build/stages/dxmt-combined.sh as Madeira build/dxmt-ios/README.md does
 #   P5-dxmt-pe  the same patched tree's PE DLLs (build/stages/dxmt-patched.sh pe, llvm-mingw 20260922); must match P5-dxmt's unix slot table (150 winemetal unix slots; newLibraryWithSource at 144)
 #   P5-winios Madeira pin app/Madeira/Winios/ (the reference's app-side Winios display driver); Winios.m + patches/madeira-winios; WiniosGamepad.c, the controller snapshot Wine's xinput1_*.dll (P2) read through libwin32u_unix.a
 #   P5-dxshim Madeira pin app/Madeira/IOSDisplayShim.{h,m}, unmodified: the macdrv_functions table DXMT's winemetal unix side looks up for a CAMetalLayer
-#   P6-vulkan-pe DXVK at its pin, unmodified, and vkd3d-proton at its pin + patches/vkd3d-proton, for arm64ec (build/stages/vulkan-pe.sh, llvm-mingw 20260922), marked Wine builtins; staged under Runtime/vulkan/, which a launch set to Vulkan puts first on WINEDLLPATH (decision 0014)
+#   P6-vulkan-pe DXVK at its pin, unmodified, and vkd3d-proton at its pin + patches/vkd3d-proton, for arm64ec, DXVK's Direct3D 9 to 11 and dxgi for i386, and vkd3d-proton with DXVK's dxgi for aarch64 (a native ARM64 child, decision 0170) (build/stages/vulkan-pe.sh, llvm-mingw 20260922), marked Wine builtins; staged under Runtime/vulkan/, which a launch set to Vulkan puts first on WINEDLLPATH (decision 0014)
+#   P6-vulkan-loader the Khronos Vulkan-Loader (Apache-2.0) at the vulkan-loader pin with the vulkan-headers pin, unmodified, for arm64ec and aarch64 (build/stages/vulkan-pe.sh loader, llvm-mingw 20260922), marked a Wine builtin, and the wine pin's dlls/winevulkan/winevulkan.json (the ICD manifest winevulkan's DllRegisterServer writes); staged under Runtime/vulkan-loader/, which a play with khronosVulkanLoader links over system32 (and sysarm64) (decision 0131)
 #   P6-gst    winegstreamer's unix side (wine pin + patches/wine-port + patches/wine-unix) prelinked with the static plugin set from the pins.lock gstreamer iOS release (build/stages/gstreamer.sh); one object, one exported symbol
 #   P8-steamapi gbe_fork (LGPL-3.0) at the gbe pin + patches/gbe: its regular steam_api for x86-64 and i386 with its static dependencies (build/stages/steamapi.sh, llvm-mingw 20260922); native DLLs under Runtime/steamapi/, which the app copies into a game's folder in place of the game's own (SteamClientKit SteamAPISwap)
 #   P9-session app/SessionRoot/playport-session.c (Playport's own) compiled by build/stages/session-root.sh (llvm-mingw 20260922) as a freestanding x86-64 program: the one Wine main process of an app run, which starts every title as its child (decision 0027); in arm64ec-windows so the prefix's system32 has it
+#   P9-steamclient app/SteamClientShim/steamclient.c (Playport's own; its generated slot table from the Steamworks SDK headers pinned as gbe's sdk/) compiled by build/stages/steamclient.sh (llvm-mingw 20260922) as freestanding x86-64 and i386 DLLs (i386 with compiler-rt's builtins): Playport's Steam client for a game's genuine steam_api (decision 0115), which the app copies to the prefix's C:\Program Files (x86)\Steam\ for a play in client mode
 #   P9-url-opener app/UrlOpener/playport-url-opener.c (Playport's own) compiled by build/stages/session-root.sh (llvm-mingw 20260922) as a freestanding x86-64 program: the prefix's http and https handler, which hands a URL a game opens to the host app (decision 0064); in arm64ec-windows so the prefix's system32 has it
 #   P10-idevice idevice (MIT) at the idevice pin, its C FFI with the features the app's restart uses, built for aarch64-apple-ios with the pins.lock Rust (build/stages/idevice.sh) and prelinked into one object that exports four calls (app/Sources/Relaunch); its crates are in the run's idevice/crates.tsv
 #   P7-reg    app/registry/{system,user}.reg (committed): app/tools/prefix-registry.py applies the WINE_REGISTRY scripts of the staged arm64ec-windows DLLs as wineboot's register_fake_dll would; wine_host.c appends the sections a prefix lacks before the wineserver starts
@@ -139,7 +146,10 @@ NLS = ["c_1252.nls", "c_20127.nls", "c_28591.nls", "c_437.nls", "l_intl.nls", "l
 NLS += ["c_874.nls", "c_932.nls", "c_936.nls", "c_949.nls", "c_950.nls", "c_1250.nls", "c_1251.nls",
         "c_1253.nls", "c_1254.nls", "c_1255.nls", "c_1256.nls", "c_1257.nls", "c_1258.nls"]
 
-FONTS = ["tahoma.ttf", "tahomabd.ttf"]
+# Marlett: win32u draws every window's caption buttons and its menus' magic bitmaps with it
+# (dlls/win32u/defwnd.c draw_frame_caption, menu.c), user32 its DrawFrameControl captions
+# (uitools.c); without it they fell back to another face: "0", "1", "r".
+FONTS = ["tahoma.ttf", "tahomabd.ttf", "marlett.ttf"]
 
 ETC = ["hosts", "networks", "protocol", "services"]
 
@@ -207,6 +217,10 @@ NOT_SHIPPED = {"winetest.exe"}
 # DXVK's and vkd3d-proton's DLLs (build/stages/vulkan-pe.sh).
 VULKAN_PE = ["d3d8.dll", "d3d9.dll", "d3d10core.dll", "d3d11.dll", "dxgi.dll", "d3d12.dll", "d3d12core.dll"]
 VULKAN_PE_I386 = ["d3d9.dll", "d3d10core.dll", "d3d11.dll", "dxgi.dll"]
+# vkd3d-proton and DXVK's dxgi for a native ARM64 child (decision 0170), linked over sysarm64.
+VULKAN_PE_AARCH64 = ["d3d12.dll", "d3d12core.dll", "dxgi.dll"]
+# The Khronos Vulkan loader and the ICD manifest it finds winevulkan by (build/stages/vulkan-pe.sh loader).
+VULKAN_LOADER = ["vulkan-1.dll", "winevulkan.json"]
 
 def wine_mono_files():
     """Every file of the unpacked Wine Mono tree (build/stages/wine-mono.sh), relative to
@@ -308,10 +322,20 @@ def record():
     # DXVK's Direct3D 9 to 11 for an i386 (WoW64) title, over Wine's wined3d ones.
     for name in VULKAN_PE_I386:
         add("resource", f"Runtime/vulkan/i386-windows/{name}", "vulkan-pe", f"i386-windows/{name}", "P6-vulkan-pe")
+    # vkd3d-proton and DXVK's dxgi for a native ARM64 child, over Wine's and DXMT's aarch64 ones.
+    for name in VULKAN_PE_AARCH64:
+        add("resource", f"Runtime/vulkan/aarch64-windows/{name}", "vulkan-pe", f"aarch64-windows/{name}", "P6-vulkan-pe")
+    # The Khronos Vulkan loader and winevulkan's ICD manifest (decision 0131), under Runtime/vulkan-loader/.
+    for arch in ("arm64ec", "aarch64"):
+        for name in VULKAN_LOADER:
+            add("resource", f"Runtime/vulkan-loader/{arch}-windows/{name}", "vulkan-loader", f"{arch}-windows/{name}",
+                "P6-vulkan-loader")
     for arch, name in STEAMAPI:
         add("resource", f"Runtime/steamapi/{arch}-windows/{name}", "steamapi", f"{arch}-windows/{name}", "P8-steamapi")
     add("resource", "Runtime/arm64ec-windows/playport-session.exe", "session", "playport-session.exe", "P9-session")
     add("resource", "Runtime/arm64ec-windows/playport-url-opener.exe", "session", "playport-url-opener.exe", "P9-url-opener")
+    add("resource", "Runtime/steamclient/x86_64-windows/steamclient64.dll", "steamclient", "steamclient64.dll", "P9-steamclient")
+    add("resource", "Runtime/steamclient/i386-windows/steamclient.dll", "steamclient", "steamclient.dll", "P9-steamclient")
     for name in NLS:
         add("resource", f"Runtime/nls/{name}", "unix", f"wine/nls/{name}", "nls")
     for name in FONTS:
@@ -377,7 +401,7 @@ def stage():
 
 # The release package's links into app/: everything xtool.yml and Package.swift
 # name except the two files it gets its own copies of and Runtime/.
-RELEASE_LINKS = ["Sources", "Staged", "Icon", "HostIOKit", "ContentKit", "GOGClient", "EpicClient", "PlayportKit", "SteamClient", "PlayportJIT",
+RELEASE_LINKS = ["Sources", "Staged", "Icon", "HostIOKit", "ContentKit", "GOGClient", "EpicClient", "BattleNetClient", "PlayportKit", "SteamClient", "PlayportJIT",
                  "PlayportJIT-Info.plist", "S1Probe.entitlements"]
 
 

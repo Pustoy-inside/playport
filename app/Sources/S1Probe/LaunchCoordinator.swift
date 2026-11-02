@@ -40,6 +40,7 @@
 // launch from its start to the game's first frame, in both variants.
 
 import Foundation
+import os
 import HostIOKit
 import PlayportKit
 import EpicClientKit
@@ -58,7 +59,8 @@ enum LaunchCoordinator {
         /// Which layer runs the game's Direct3D (LaunchSettings).
         var graphics: GraphicsBackend = .default
         /// The game's Graphics options (LaunchSettings.graphicsEnvironment; dev builds only,
-        /// decision 0060), over the backend's own environment.
+        /// decision 0060), or a publisher launcher's own (PublisherLauncher.graphicsEnvironment),
+        /// over the backend's own environment.
         var graphicsEnvironment: [String: String] = [:]
         /// FEX's memory ordering for the game (FEXProfile.launch); nil leaves FEX's own defaults.
         var fex: FEXProfile.Launch? = nil
@@ -81,6 +83,22 @@ enum LaunchCoordinator {
         /// The title's own prerequisite installers (decision 0079), each run before the
         /// game when one of its ids has not run in the prefix.
         var prerequisites: [Prerequisite] = []
+        /// Start Windows services (services.exe, Wine's SCM) before the prerequisites and the
+        /// title (LaunchSettings.windowsServices, decision 0107).
+        var windowsServices = false
+        /// The Khronos Vulkan loader in place of Wine's vulkan-1.dll, linked into system32 after
+        /// the backend's set (LaunchSettings.khronosVulkanLoader, decision 0131).
+        var khronosVulkanLoader = false
+        /// The game's own pool from its compatibility entry (LaunchSettings.jitPoolMB, decision
+        /// 0108), granted when the memory limit allows; nil for the default.
+        var gamePoolMB: Int? = nil
+        /// The game's sign-in through the publisher launcher the Play starts: the session root
+        /// ends the launcher once it comes, or before it near the memory limit (decision 0130;
+        /// LaunchSettings.endLauncherAfterSignIn); nil leaves the launcher to the title.
+        var endLauncher: GameSignIn? = nil
+        /// How long the title goes on after it ran the pool out before the launch ends (decisions
+        /// 0022, 0030); a publisher's launcher Open carries its own (decision 0112).
+        var exhaustionGrace: TimeInterval = JitPool.exhaustionGrace
         /// Whether a prerequisite that ran may end the launch before the game, for Playport's
         /// restart and the same Play in the new process (decision 0084), when the pool after
         /// them leaves the game too little room (decision 0094); false starts the game in this
@@ -112,6 +130,9 @@ enum LaunchCoordinator {
         /// The play's auth session and web API tickets (decision 0062), armed after
         /// Play; nil leaves the emulator's made-up ones.
         var tickets: SteamTicketBroker? = nil
+        /// False when Steam refused the app's ownership ticket with AccessDenied: the
+        /// account has no licence for it, and Playport's Steam client answers so.
+        var owned: Bool = true
     }
 
     enum Step: Equatable {
@@ -141,6 +162,9 @@ enum LaunchCoordinator {
             /// The JIT pool ran out (JitPool.Use.exhaustion) before the title ended,
             /// whatever its exit code: its own outcome, not a crash or a failed start.
             case outOfJitMemory(JitPool.Exhaustion)
+            /// FEX's host band refused a request (FexBand.Use.exhausted) before the title ended,
+            /// whatever its exit code; a pool that also ran out is reported as that (decision 0120).
+            case outOfEmulatorMemory
             /// The title's prerequisites ran and the game did not start: Playport restarts
             /// and the new process starts it, as the same Play (decision 0084).
             case prerequisitesRan
@@ -176,7 +200,7 @@ enum LaunchCoordinator {
         do {
             let state = try SteamAPISwap.ensure(s.mode, in: s.root, emulator: runtime.appendingPathComponent("steamapi", isDirectory: true),
                                                 settings: settings ?? .init(appID: s.appID))
-            log("steamapi: \(s.mode.rawValue): \(state.rawValue)" + (s.mode == .emulated ? " (\(fields))" : ""))
+            log("steamapi: \(s.mode.rawValue): \(state.rawValue)" + (s.mode != .original ? " (\(fields))" : ""))
             if s.mode == .emulated {
                 if let ticket = s.ticket {
                     let n = try SteamAPISwap.writeTicket(ticket, in: s.root)
@@ -185,14 +209,16 @@ enum LaunchCoordinator {
                     log("ticket: none; the emulator makes up its own")
                 }
             }
-            // The emulator's unix calls reach the play's broker, or none (SteamTicketHost).
+            // The emulator's unix calls reach the play's broker, or none (SteamTicketHost); Playport's
+            // Steam client's reach its own provider (SteamClientHost, decision 0115).
             SteamTicketHost.arm(s.mode == .emulated ? s.tickets : nil)
+            SteamClientHost.arm(s.mode == .client ? prepareSteamClient(s, settings: settings, runtime: runtime) : nil)
             if s.mode == .emulated {
                 log(s.tickets != nil ? "ticket: auth session and web API tickets armed; the CM session stays logged on for them"
                                      : "ticket: auth session and web API tickets off; the emulator makes up its own")
             }
             var stub = "none"
-            if s.mode == .emulated {
+            if s.mode.removesSteamStub {
                 for site in try SteamStub.remove(in: s.root) {
                     log("steamstub: \(site.path): \(site.info.label), " + (site.info.unsupported ?? (site.removed ? "removed" : "kept")))
                     stub = site.removed ? "removed" : "unsupported"
@@ -210,6 +236,35 @@ enum LaunchCoordinator {
             RunEvents.emit("steamapi", ["mode": s.mode.rawValue, "error": "\(error)"])
             #endif
         }
+    }
+
+    /// The prefix's Steam client for a play in client mode (decision 0115): Playport's
+    /// steamclient64.dll and steamclient.dll in `C:\Program Files (x86)\Steam\`, as Steam installs
+    /// both (an i386 game's steam_api.dll loads the second, an x86-64 one's steam_api64.dll the
+    /// first, whatever the title's executable), and the `Valve\Steam` keys a genuine steam_api reads
+    /// to find them (top-ups, written before wineserver starts; the session root writes
+    /// ActiveProcess's pid once it runs). Returns what the client answers with.
+    private static func prepareSteamClient(_ s: SteamAPI, settings: SteamAPISwap.Settings?, runtime: URL) -> SteamClientHost.Play {
+        let prefix = WineHostRuntime.shared.prefixURL
+        let folder = prefix.appendingPathComponent("drive_c/Program Files (x86)/Steam", isDirectory: true)
+        do {
+            for (arch, name) in [("x86_64", "steamclient64.dll"), ("i386", "steamclient.dll")] {
+                let shim = try Data(contentsOf: runtime.appendingPathComponent("steamclient/\(arch)-windows/\(name)"))
+                let dest = folder.appendingPathComponent(name)
+                if (try? Data(contentsOf: dest)) != shim {
+                    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+                    try shim.write(to: dest, options: .atomic)
+                    log("steamclient: Playport's \(name) (\(shim.count) bytes) placed in C:\\Program Files (x86)\\Steam")
+                }
+            }
+            try PrefixRegistryFile(prefix: prefix).add(SteamClientKeys.values)
+            log("steamclient: Valve\\Steam keys topped up in the prefix")
+        } catch {
+            log("steamclient: not placed (\(error)); the game's steam_api finds no Steam client")
+        }
+        return SteamClientHost.Play(appID: s.appID, steamID: settings?.steamID, personaName: settings?.personaName,
+                                    language: settings?.language ?? "english", tickets: s.tickets, owned: s.owned,
+                                    appTicket: s.ticket)
     }
 
     /// Takes the encrypted app ticket out of the game's emulator settings
@@ -346,12 +401,32 @@ enum LaunchCoordinator {
             log("graphics: \(r.graphics.rawValue) is not in this build")
             return Outcome(kind: .refused, line: "launch=refused graphics=\(r.graphics.rawValue) reason=not-in-this-build")
         }
-        if let overlay = r.graphics.runtimeOverlay {
-            setenv("PLAYPORT_DLL_OVERLAY", overlay, 1)
+        guard !r.khronosVulkanLoader || Manifest.hasRuntimeDirectory(GraphicsBackend.khronosVulkanLoaderOverlay) else {
+            log("vulkan loader: Khronos is not in this build")
+            return Outcome(kind: .refused, line: "launch=refused vulkan-loader=khronos reason=not-in-this-build")
+        }
+        // The backend's set, then the Khronos loader's, over the runtime's (wine_host.c, dll_overlay.h).
+        if let overlays = GraphicsBackend.runtimeOverlays(graphics: r.graphics, khronosVulkanLoader: r.khronosVulkanLoader) {
+            setenv("PLAYPORT_DLL_OVERLAY", overlays, 1)
         } else {
             unsetenv("PLAYPORT_DLL_OVERLAY")
         }
-        log("graphics: \(r.graphics.rawValue)")
+        // Decisions 0138, 0153, 0169: ntdll refuses RDR2's later Social Club helper starts, only
+        // with the end of the game's own Social Club, which the Social Club layout leaves off.
+        let endGameSocialClub = GameSocialClubEnd.enabled(config: r.config)
+        let refuseGameSocialClubRestart = GameSocialClubEnd.refusesRestarts(ends: endGameSocialClub)
+        if r.endLauncher != nil && !endGameSocialClub {
+            log(GameSocialClubEnd.socialClubLayout(config: r.config)
+                ? "launcher: the game's own Social Club is not ended under the Social Club layout (decision 0169)"
+                : "launcher: the game's own Social Club is not ended (Settings)")
+        }
+        if r.endLauncher != nil && refuseGameSocialClubRestart {
+            setenv(GameSocialClubEnd.refuseRestartVariable, "1", 1)
+            log("launcher: the game's Social Club helper starts after the first are refused (decision 0138)")
+        } else {
+            unsetenv(GameSocialClubEnd.refuseRestartVariable)
+        }
+        log("graphics: \(r.graphics.rawValue); vulkan loader: \(r.khronosVulkanLoader ? "Khronos" : "Wine's")")
 
         if r.config.isEmpty {
             // Undo an earlier launch's title config: this one reads the shared file.
@@ -406,7 +481,7 @@ enum LaunchCoordinator {
         }
 
         log("display: \(TitleScreen.summary)")
-        Fastsync.apply(log: log)
+        InprocSync.apply(log: log)
         ThermalLog.start()
         HostIO.prepareRuntime(log: WineHostRuntime.appendLog)
         if HostIO.surfaceReady.wait(timeout: .now() + 15) == .timedOut {
@@ -415,16 +490,40 @@ enum LaunchCoordinator {
         // Every byte of the pool counts against the limit from the bless on. Read
         // again: Game Mode may have raised the limit since the Play.
         memory = MemoryLimit.read()
-        let poolMB = r.poolMB ?? MemoryLimit.poolMB(memory)
+        let sized = MemoryLimit.poolMB(memory, gameMB: r.gamePoolMB)
+        let poolMB = r.poolMB ?? sized.mb
         log("jit pool: \(poolMB) MiB for a memory limit of \(memory.effectiveMB.map { "\($0) MB" } ?? "not reported")"
-            + (memory.simulatedPoolMB != nil ? " (simulated pool)" : ""))
+            + (memory.simulatedPoolMB != nil ? " (simulated pool)" : "")
+            + (r.poolMB == nil && memory.simulatedPoolMB == nil && sized.mb > JitPool.minimumMB ? " (the game's)" : "")
+            + (r.poolMB == nil ? sized.note.map { "; \($0)" } ?? "" : ""))
         mark("surface ready; asking for JIT")
         #if !PLAYPORT_RELEASE
         Diagnostics.loadBeforeRuntime()
         #endif
         step(.waitingForJit(until: Date().addingTimeInterval(r.jitWait)))
         if let value = HostCPU.exportDisableSwitches() { log("host-cpu: FEX_HOSTFEATURES \(value) for every process (absent: \(HostCPU.summary))") }
-        let started = runtime.start(poolMB: poolMB, wait: r.jitWait) { step(.startingRuntime) }
+        // The guest's RAM and the video budget from the phone's tier, clamped to the limit read
+        // here (PlayportKit MemoryPlan, decision 0105), after the donor pool, just before Wine starts; the launch's
+        // madeira.cfg (its title keys over the shared file) and environment may override it.
+        var plan: MemoryPlan?
+        let started = runtime.start(poolMB: poolMB, wait: r.jitWait, pooled: { step(.startingRuntime) }) { donorMB in
+            let now = MemoryLimit.read()
+            guard let limit = now.effectiveMB else {
+                log("memory plan: no limit reported; the runtime's own readings hold")
+                return
+            }
+            let docs = getenv("MADEIRA_DOCS_DIR").map { URL(fileURLWithPath: String(cString: $0)) }
+                ?? runtime.prefixURL.appendingPathComponent("Documents", isDirectory: true)
+            let overrides = MemoryPlan.Overrides.read(value: { MadeiraConfig.value($0, directory: docs) },
+                                                      environment: ProcessInfo.processInfo.environment)
+            let p = MemoryPlan(MemoryPlan.Inputs(limitMB: limit, physicalMB: now.physicalMB, poolMB: donorMB),
+                               overrides: overrides)
+            let env = p.environment
+            for name in env.keys.sorted() { setenv(name, env[name]!, 1) }
+            log("memory plan: " + p.logLine + (now.simulatedMB != nil ? " (simulated limit)" : "")
+                + " env=" + (env.isEmpty ? "none" : env.keys.sorted().map { "\($0)=\(env[$0]!)" }.joined(separator: ",")))
+            plan = p
+        }
         log("runtime: \(started.detail), activation \(String(format: "%.2f", started.activationSeconds)) s")
         mark("runtime started")
         guard started.ok else {
@@ -442,10 +541,22 @@ enum LaunchCoordinator {
         }
         backend.merge(Diagnostics.launchEnvironment(exe: r.exe, dir: dir, graphics: r.graphics, log: log)) { own, _ in own }
         #endif
+        // DXVK would report Metal's whole working set as video memory, and KosmicKrisp budget
+        // most of the limit: both take the plan's instead (MemoryPlan.dxvkOption and
+        // vulkanEnvironment; on by default, decision 0106; `vulkan-vram-plan = 0` turns it off).
+        if r.graphics == .vulkan, let p = plan, let option = p.dxvkOption {
+            backend["DXVK_CONFIG"] = backend["DXVK_CONFIG"].map { $0 + ";" + option } ?? option
+            backend.merge(p.vulkanEnvironment) { _, planned in planned }
+            log("memory plan: DXVK_CONFIG \(option); "
+                + p.vulkanEnvironment.keys.sorted().map { "\($0)=\(p.vulkanEnvironment[$0]!)" }.joined(separator: " "))
+        }
         let environment = applyEnvironment(backend: backend, steamAppID: r.steamAppID, fex: r.fex)
         PacedMetalLayer.onFirstFrame {
             mark("first frame")
             step(.drawing)
+            #if !PLAYPORT_RELEASE
+            DonorPool.reportFirstFrame()
+            #endif
         }
         // The guest's windows give way when a frame is on screen, not when a drawable is taken.
         PacedMetalLayer.onFirstPresent { GuestWindows.gamePresents() }
@@ -458,7 +569,20 @@ enum LaunchCoordinator {
             mark(up ? "dialog shown" : "dialog closed")
             MainActor.assumeIsolated { HostIO.shared.dialogOverGame(up) }
         }
-        let pool = PoolLog()
+        let pool = PoolLog(grace: r.exhaustionGrace)
+        log("pool: a title still running \(Int(r.exhaustionGrace)) s after it runs out of JIT memory ends this launch")
+        if r.windowsServices {
+            let t0 = Date()
+            let rc = runtime.startServices()
+            log(rc == 0 ? String(format: "services: services.exe runs for this play (%.2f s)", Date().timeIntervalSince(t0))
+                        : "services: services.exe not started (\(rc)); the title starts without Windows services")
+        }
+        // Playport's Steam client (decision 0115): the session root stands for Steam's process.
+        if let s = r.steamAPI, s.mode == .client {
+            let rc = runtime.steamClient(accountID: SteamClientHost.accountID)
+            log(rc == 0 ? "steamclient: the session root is the prefix's running Steam client"
+                        : "steamclient: ActiveProcess not written (\(rc)); the game's steam_api finds no running Steam")
+        }
         var ran = 0
         if let ended = runPrerequisites(r, environment: environment, pool: pool, ran: &ran, step: step, mark: mark) {
             PacedMetalLayer.onFirstFrame { }
@@ -500,10 +624,18 @@ enum LaunchCoordinator {
 
         let t0 = Date()
         step(.running(since: t0))
+        let launcher = r.endLauncher.map { s in
+            LauncherEnd(signIn: s, profile: runtime.prefixURL.appendingPathComponent("drive_c/users/playport"),
+                        endGameSocialClub: endGameSocialClub,
+                        refuseGameSocialClubRestart: refuseGameSocialClubRestart)
+        }
+        var sampled = Date.distantPast
         while true {
-            // In 2 s slices, so the pool's use is logged as it grows.
-            let w = runtime.wait(ms: 2_000)
+            // In 2 s slices, so the pool's use is logged as it grows; in 1 s slices while a
+            // launcher end reads the footprint (decision 0130), the pool still every 2 s.
+            let w = runtime.wait(ms: launcher?.readsFootprint == true ? 1_000 : 2_000)
             let elapsed = Date().timeIntervalSince(t0)
+            if w.rc == 1, let l = launcher { l.slice(elapsed: elapsed) }
             if w.rc == 0 {
                 let exit = UInt32(bitPattern: w.code)
                 return pool.end(Outcome(kind: .exited(exit), line: "exit=\(String(format: "0x%08x", exit)) after_s=\(Int(elapsed))"),
@@ -512,10 +644,13 @@ enum LaunchCoordinator {
             if w.rc < 0 {
                 return pool.end(Outcome(kind: .failed, line: "launch=failed wait=\(w.rc)"), mark: mark)
             }
-            pool.sample()
-            if let t = pool.exhaustedAt, Date().timeIntervalSince(t) >= PoolLog.grace {
-                // The restart that follows the launch ends it (decisions 0022, 0030).
-                log("pool: the game is still running \(Int(PoolLog.grace)) s after it ran out of JIT memory; the restart ends it")
+            if Date().timeIntervalSince(sampled) >= 1.9 {
+                sampled = Date()
+                pool.sample()
+            }
+            if let t = pool.exhaustedAt, Date().timeIntervalSince(t) >= pool.grace {
+                // The restart that follows the launch ends it (decisions 0022, 0030, 0112).
+                log("pool: the game is still running \(Int(pool.grace)) s after it ran out of \(pool.exhaustedWhat); the restart ends it")
                 return pool.end(Outcome(kind: .failed, line: "still-running after_s=\(Int(elapsed))"), mark: mark)
             }
         }
@@ -639,6 +774,193 @@ enum LaunchCoordinator {
         return nil
     }
 
+    /// The publisher launcher's end once the game has signed in (decision 0130, amending 0125).
+    /// The game's log as the title started is the baseline (GameSignIn.Watch); every wait slice
+    /// reads it again, and at this Play's first sign-in line it sends PP_CONTROL_END_LAUNCHER,
+    /// once: the root ends the launcher's whole tree in one step (Launcher.exe,
+    /// RockstarErrorHandler.exe and the launcher's SocialClubHelper.exe processes), never the game
+    /// or a process under it, and logs each, and every start of one of those images after it
+    /// (`session: … [launcher]` lines). Until the end, and for 10 s after it, every slice also
+    /// reads the app's footprint (phys_footprint, the counter of the runtime's `[xp]` fpMB): one
+    /// within LauncherEndTrigger.beforeSignInHeadroomMB of the limit ends the tree before the sign-in (decision 0140), and
+    /// one within nearMB is logged. A sign-in after such an end is still logged. Only the fixed
+    /// line text is matched; nothing of the log is logged.
+    ///
+    /// A dev build's Settings › Developer › End the game's Social Club (decision 0133, amending
+    /// 0130) also sends PP_CONTROL_END_GAME_SOCIAL_CLUB once, 120 s or more after the sign-in (decision
+    /// 0141), at the first slice whose footprint is within LauncherEndTrigger.headroomMB of the limit (the game starts its
+    /// own helpers only after its sign-in): the root ends the game's own SocialClubHelper.exe
+    /// processes, never the game. The slices read the footprint until then.
+    ///
+    /// With ntdll refusing the helper's restarts (decision 0138), the slices then watch for the
+    /// game signing in again (decision 0155, GameSocialClubReSignIn): a new sign-in line in its
+    /// log, or a GetCurrentGameLanguage burst. At one they send the root
+    /// PP_CONTROL_ALLOW_GAME_SOCIAL_CLUB (its sweep stops) and then allow ntdll's restarts, until
+    /// the next sign-in line or 90 s; the end may then run again 120 s after that sign-in, at
+    /// most twice a Play. An allow needs headroom (0155 as amended): without it the restarts stay
+    /// refused. A run with no re-sign-in logs nothing of it.
+    private final class LauncherEnd {
+        let file: URL
+        let watch: GameSignIn.Watch
+        let endGameSocialClub: Bool
+        private var endedAt: Date?
+        private var signedIn = false
+        private var signedInAt: TimeInterval?
+        private var gameSocialClubEnded = false
+        /// This Play's sign-in lines in the game's log, as last read.
+        private var signIns = 0
+        /// The re-sign-in watch after the end; nil unless ntdll refuses the helper's restarts.
+        private var reSignIn: GameSocialClubReSignIn?
+
+        init(signIn: GameSignIn, profile: URL, endGameSocialClub: Bool, refuseGameSocialClubRestart: Bool) {
+            self.endGameSocialClub = endGameSocialClub
+            reSignIn = refuseGameSocialClubRestart ? GameSocialClubReSignIn() : nil
+            file = signIn.file(profile: profile)
+            let baseline = try? Data(contentsOf: file)
+            watch = GameSignIn.Watch(signIn: signIn, baseline: baseline)
+            let limit = MemoryLimit.read().limitMB
+            log("launcher: ends at the game's sign-in, or when the footprint reaches the limit less "
+                + "\(LauncherEndTrigger.beforeSignInHeadroomMB) MB (now \(limit.map { "\(LauncherEndTrigger.beforeSignInThresholdMB(limitMB: $0)) MB" } ?? "no limit"); "
+                + "decisions 0130, 0140); its log "
+                + (baseline.map { "holds \($0.count) bytes of an earlier start" } ?? "is not there yet"))
+            if endGameSocialClub { log("launcher: the game's own Social Club ends too, \(Int(LauncherEndTrigger.gameSocialClubAfterSignInS)) s "
+                                         + "or more after its sign-in, when the footprint reaches the limit less "
+                                         + "\(LauncherEndTrigger.headroomMB) MB (decisions 0133, 0141, 0153)") }
+        }
+
+        /// Whether the wait slices read the footprint: until the end and for 10 s after it.
+        var readsFootprint: Bool {
+            (endedAt.map { Date().timeIntervalSince($0) < 10 } ?? true)
+                || (endGameSocialClub && (!gameSocialClubEnded || reSignIn?.reEndSignInAt != nil))
+        }
+
+        /// The sign-in an end of the game's Social Club counts 0141's 120 s from: the first, or
+        /// after a re-sign-in the new one (decision 0155); nil while none may run.
+        private var gameSocialClubSignInAt: TimeInterval? {
+            gameSocialClubEnded ? reSignIn?.reEndSignInAt : signedInAt
+        }
+
+        /// One wait slice: the sign-in, then the footprint, then the end if either calls for it.
+        func slice(elapsed: TimeInterval) {
+            watchSignIn(elapsed: elapsed)
+            watchReSignIn(elapsed: elapsed)
+            guard readsFootprint else { return }
+            let m = MemoryLimit.read()
+            let ended = endedAt != nil
+            if endGameSocialClub, let anchor = gameSocialClubSignInAt, let limit = m.limitMB,
+               LauncherEndTrigger.endsGameSocialClub(sinceSignInS: elapsed - anchor,
+                                                     footprintMB: m.footprintMB, limitMB: limit) {
+                endGameSocialClubNow(footprintMB: m.footprintMB, limitMB: limit, elapsed: elapsed)
+            }
+            if LauncherEndTrigger.near(footprintMB: m.footprintMB, limitMB: m.limitMB), let limit = m.limitMB {
+                log(String(format: "launcher: footprint %d MB of the %d MB limit at +%.1f s", m.footprintMB, limit, elapsed)
+                    + (ended ? ", after the end" : ", the end at \(LauncherEndTrigger.beforeSignInThresholdMB(limitMB: limit)) MB"))
+            }
+            guard !ended, let trigger = LauncherEndTrigger.check(signedIn: signedIn, footprintMB: m.footprintMB,
+                                                                limitMB: m.limitMB) else { return }
+            end(trigger, footprintMB: m.footprintMB, elapsed: elapsed)
+        }
+
+        /// Asks the root to end the launcher's tree, once.
+        private func end(_ trigger: LauncherEndTrigger, footprintMB: Int, elapsed: TimeInterval) {
+            endedAt = Date()
+            switch trigger {
+            case .signedIn:
+                log(String(format: "launcher: the game signed in; ending the launcher at +%.1f s (footprint %d MB)",
+                           elapsed, footprintMB))
+            case .memory(let footprint, let limit):
+                log(String(format: "launcher: the footprint reached %d MB of the %d MB limit before the game's sign-in; "
+                           + "ending the launcher at +%.1f s to free its memory", footprint, limit, elapsed))
+                log("launcher: why: iOS would end the app within \(LauncherEndTrigger.beforeSignInHeadroomMB) MB; "
+                    + "without the launcher the game may not sign in (decision 0140)")
+            }
+            var n: UInt32 = 0
+            let rc = wine_host_session_control(Int32(PP_CONTROL_END_LAUNCHER), 0, 5_000, &n)
+            log(rc == 0 ? "launcher: the session root ended \(n) of its processes"
+                        : "launcher: the session root did not end it (\(rc))")
+            #if !PLAYPORT_RELEASE
+            RunEvents.emit("launcher", ["state": "ended", "trigger": trigger == .signedIn ? "signed-in" : "memory",
+                                        "after_s": Int(elapsed), "footprint_mb": footprintMB, "rc": Int(rc), "ended": Int(n)])
+            #endif
+        }
+
+        /// Asks the root to end the game's own Social Club helpers, once (decision 0133).
+        private func endGameSocialClubNow(footprintMB footprint: Int, limitMB: Int, elapsed: TimeInterval) {
+            gameSocialClubEnded = true
+            _ = GameSocialClubEnd.takeLanguageCalls()   // a burst counts only from the end on
+            log(String(format: "launcher: the footprint reached %d MB of the %d MB limit after the sign-in; ending the "
+                       + "game's own Social Club at +%.1f s (decisions 0133, 0153)", footprint, limitMB, elapsed))
+            var n: UInt32 = 0
+            let rc = wine_host_session_control(Int32(PP_CONTROL_END_GAME_SOCIAL_CLUB), 0, 5_000, &n)
+            log(rc == 0 ? "launcher: the session root ended \(n) of the game's Social Club processes"
+                        : "launcher: the session root did not end the game's Social Club (\(rc))")
+            if let data = try? Data(contentsOf: file) { signIns = watch.signIns(data) }
+            if reSignIn?.ended(at: elapsed, signIns: signIns) == true { log("[game-sc] re-ended after re-sign-in") }
+            #if !PLAYPORT_RELEASE
+            RunEvents.emit("launcher", ["state": "game-social-club-ended", "after_s": Int(elapsed),
+                                        "footprint_mb": footprint, "rc": Int(rc), "ended": Int(n)])
+            #endif
+        }
+
+        /// Logs this Play's first sign-in line of the game, once; after the end of its Social Club,
+        /// counts the lines for the re-sign-in watch.
+        private func watchSignIn(elapsed: TimeInterval) {
+            guard !signedIn || reSignIn?.watching == true, let data = try? Data(contentsOf: file) else { return }
+            signIns = watch.signIns(data)
+            guard !signedIn, signIns > 0 else { return }
+            signedIn = true
+            signedInAt = elapsed
+            log(String(format: "launcher: the game signed in at +%.1f s", elapsed))
+            #if !PLAYPORT_RELEASE
+            RunEvents.emit("launcher", ["state": "signed-in", "after_s": Int(elapsed)])
+            #endif
+        }
+
+        /// After the end of the game's Social Club: a re-sign-in allows its restarts, the root's
+        /// sweep stopped first so a helper started in between is not ended (decision 0155).
+        private func watchReSignIn(elapsed: TimeInterval) {
+            guard var r = reSignIn, r.watching else { return }
+            defer { reSignIn = r }
+            let m = MemoryLimit.read()
+            switch r.slice(at: elapsed, signIns: signIns, languageCalls: GameSocialClubEnd.takeLanguageCalls(),
+                           footprintMB: m.footprintMB, limitMB: m.limitMB) {
+            case nil:
+                return
+            case .noHeadroom(let detector, let footprint):
+                log("[game-sc] re-sign-in after end (\(detector.rawValue))")
+                log("[game-sc] re-sign-in after end: no headroom (\(footprint) MB), restart stays refused")
+                #if !PLAYPORT_RELEASE
+                RunEvents.emit("launcher", ["state": "game-social-club-no-headroom", "after_s": Int(elapsed),
+                                            "detector": detector.rawValue, "footprint_mb": footprint])
+                #endif
+            case .allow(let detector):
+                log("[game-sc] re-sign-in after end (\(detector.rawValue))")
+                var n: UInt32 = 0
+                let rc = wine_host_session_control(Int32(PP_CONTROL_ALLOW_GAME_SOCIAL_CLUB), 0, 5_000, &n)
+                guard rc == 0, n == 1 else {
+                    r.allowFailed()
+                    log("[game-sc] re-sign-in after end: the session root did not stop its sweep (\(rc), \(n)); "
+                        + "restarts stay refused")
+                    return
+                }
+                wine_host_game_sc_allow_restarts(1)
+                log("[game-sc] re-sign-in after end: allowing restart")
+                #if !PLAYPORT_RELEASE
+                RunEvents.emit("launcher", ["state": "game-social-club-allowed", "after_s": Int(elapsed),
+                                            "detector": detector.rawValue, "allow": r.allows])
+                #endif
+            case .noAllowLeft(let detector):
+                log("[game-sc] re-sign-in after end (\(detector.rawValue)): no allow left "
+                    + "(\(GameSocialClubReSignIn.maxAllows) used); restarts stay refused")
+            case .refuseAgain(let signedIn):
+                wine_host_game_sc_allow_restarts(0)
+                log(signedIn ? "[game-sc] signed in again (socialclub.log): restarts refused again"
+                             : "[game-sc] no new sign-in line \(Int(GameSocialClubReSignIn.allowCapS)) s after the allow: "
+                               + "restarts refused again")
+            }
+        }
+    }
+
     /// The pool's use during a launch: a `title: pool:` line (and a dev build's
     /// `pool` event) whenever it moved enough (JitPool.Use.worthLogging), and at
     /// the end a `pool:` mark, the use the result event reports. A pool that ran
@@ -646,17 +968,30 @@ enum LaunchCoordinator {
     /// (RuntimeLimits) go the same way, as `limits:` lines whenever a count moved
     /// and a `limits:` mark at the end; reaching one does not change the outcome.
     /// So does the FEX arena's use (FexBand), as `band:` lines and a `band:` mark;
-    /// a dev build also writes the arena's map into the log at the end.
+    /// a dev build also writes the arena's map into the log at the end, and memory by
+    /// pseudo-process (`[proc-mem]` lines) as it moves, near the limit as it climbs
+    /// (FootprintJumpSampler) and at the end. An arena
+    /// that refused a request ends the launch as a pool that ran out does, after the
+    /// same grace, and turns the outcome into `.outOfEmulatorMemory` (decision 0120).
     private final class PoolLog {
-        /// How long a title that ran the pool out gets to end on its own.
-        static let grace: TimeInterval = 10
+        /// How long a title that ran the pool out gets to end on its own (Request.exhaustionGrace).
+        let grace: TimeInterval
         private var last: JitPool.Use?
         private var lastLimits: RuntimeLimits.Counts?
         private var lastBand: FexBand.Use?
         /// The thread count / 16 of the last map a dev build dumped.
         private var bandMapBucket: UInt64 = 0
-        /// When a reading first showed the pool run out.
+        /// When a reading first showed the pool, or the arena, run out.
         private(set) var exhaustedAt: Date?
+        /// What ran out first, for the log line at the grace's end.
+        private(set) var exhaustedWhat = "JIT memory"
+
+        #if !PLAYPORT_RELEASE
+        /// A dev build's samples near the limit, from the launch's start to its end (PLA-476).
+        private let footprintSampler = FootprintJumpSampler.start()
+        #endif
+
+        init(grace: TimeInterval) { self.grace = grace }
 
         static func read() -> JitPool.Use? {
             var s = wine_host_pool_stats()
@@ -665,7 +1000,7 @@ enum LaunchCoordinator {
                                tailLive: s.tail_live, aliasLive: s.alias_live, aliasSlots: s.alias_slots,
                                aliasCap: s.alias_cap, images: s.images, childCopies: s.child_copies,
                                childBytes: s.child_bytes, headExhausted: s.head_exhausted, tailRefused: s.tail_refused,
-                               tailFatal: s.tail_fatal, aliasFull: s.alias_full)
+                               tailFatal: s.tail_fatal, aliasFull: s.alias_full, headTrimmed: s.head_trimmed)
         }
 
         static func readLimits() -> RuntimeLimits.Counts? {
@@ -685,6 +1020,13 @@ enum LaunchCoordinator {
 
         private func sampleBand() {
             guard let band = Self.readBand(), band.worthLogging(after: lastBand) else { return }
+            if band.exhausted, lastBand?.exhausted != true {
+                LaunchCoordinator.log("band: ran out of emulator memory (\(band.refused) refused)")
+                if exhaustedAt == nil {
+                    exhaustedAt = Date()
+                    exhaustedWhat = "emulator memory"
+                }
+            }
             lastBand = band
             LaunchCoordinator.log(band.line)
             #if !PLAYPORT_RELEASE
@@ -706,9 +1048,30 @@ enum LaunchCoordinator {
             #endif
         }
 
+        /// The samples since the last `[proc-mem]` walk (a dev build's).
+        private var processMemorySamples = 0
+        /// The runtime's finished teardowns at the last sample (wine_host_process_teardowns).
+        private var processTeardowns: UInt32 = 0
+
         func sample() {
             sampleLimits()
             sampleBand()
+            #if !PLAYPORT_RELEASE
+            // Memory by pseudo-process (PLA-414), every other sample (about 4 s); the runtime
+            // prints it only when a process came, went or moved by 32 MiB. A teardown that
+            // finished since the last sample gets a forced walk at once, so its effect on each
+            // process shows next to its `[proc-end]` line (PLA-476).
+            let teardowns = wine_host_process_teardowns()
+            processMemorySamples += 1
+            if teardowns != processTeardowns {
+                processTeardowns = teardowns
+                processMemorySamples = 0
+                wine_host_process_memory_log("after teardown \(teardowns)", 1)
+            } else if processMemorySamples >= 2 {
+                processMemorySamples = 0
+                wine_host_process_memory_log("sample", 0)
+            }
+            #endif
             guard let use = Self.read(), use.worthLogging(after: last) else { return }
             if let e = use.exhaustion, exhaustedAt == nil {
                 exhaustedAt = Date()
@@ -723,18 +1086,25 @@ enum LaunchCoordinator {
 
         func end(_ outcome: Outcome, mark: (String) -> Void) -> Outcome {
             if let limits = Self.readLimits() { mark(limits.line) }
-            if let band = Self.readBand() { mark(band.line) }
+            let band = Self.readBand()
+            if let band { mark(band.line) }
             #if !PLAYPORT_RELEASE
+            footprintSampler.stop()
             wine_host_band_dump("launch end")
+            wine_host_process_memory_log("launch end", 1)
             #endif
-            guard let use = Self.read() else { return outcome }
+            var o = outcome
+            if band?.exhausted == true, outcome.kind != .prerequisitesRan {
+                o.kind = .outOfEmulatorMemory
+                o.line = FexBand.resultField + " " + outcome.line
+            }
+            guard let use = Self.read() else { return o }
             last = use
             mark(use.line)
-            var o = outcome
             o.poolMB = Int(use.size >> 20)
             guard let e = use.exhaustion else { return o }
             o.kind = .outOfJitMemory(e)
-            o.line = JitPool.resultField(e) + " " + outcome.line
+            o.line = JitPool.resultField(e) + " " + o.line
             return o
         }
     }

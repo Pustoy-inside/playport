@@ -10,13 +10,21 @@
 // - Graphics: what every game launches with unless its Game options change
 //   it (LaunchSettingsStore.global): resolution, frame rate limit and
 //   Direct3D, changed with left and right, each "Default · X" while it follows
-//   Playport's default; and the Metal HUD.
+//   Playport's default; and the performance overlay (UI/PerformanceOverlay.swift).
 // - Downloads: PlayportKit DownloadPreferences (the download queue reads
 //   them) and Steam Cloud's switch (SteamAccountModel.cloudKey).
-// - Controllers: every controller connected, with its battery (PadRouter).
+// - Controls: when the on-screen controls show, every game's starting layout
+//   (`controls.startingLayout`; Suggested for the game, else a layout), their
+//   opacity, the Gamepad layout's d-pad and right stick, and haptics
+//   (PlayportKit ControlsDefaults; UI/TouchControlsView.swift), gyro aim's
+//   defaults (UI/GyroAimView.swift, the `gyro.*` keys), every
+//   controller connected, with its battery and whether it has a gyro (PadRouter),
+//   and the Controller page for every game's default controller map
+//   (UI/ControllerMapView.swift, `controls.controllerMap`, `controls.lookSpeed`).
 // - Storage: free space and each game's size; A opens the game's page. Steamworks Shared
 //   (Steam's redistributables) with its size and Remove, and the emulator cache with Clear.
 // - Setup check: JIT, LocalDevVPN and memory (SetupCheckSettings.swift).
+// - Launchers, dev builds only for now: each publisher's launcher with Open (LaunchersSettings.swift).
 // - About: the build, the copyright and the licences (LicencesView.swift),
 //   whose pages show in its place; B on one of their rows goes back a page.
 // - Developer, dev builds only (Dev/DeveloperSettings.swift, decision 0009).
@@ -66,7 +74,12 @@ struct SettingsView: View {
             if let s = SettingsSection.named(name), SettingsSection.shown.contains(s) {
                 navigation.settingsSection = s
                 try? await Task.sleep(for: .milliseconds(200))
-                focus.ring(s.navItem)
+                // `gyro`: Controls, at its Gyro aim rows; `controller`: its Controller page.
+                if name == "controller" {
+                    navigation.pageSection = nil
+                    return navigation.openSettingsControllerMap()
+                }
+                focus.ring(name == "gyro" ? "set:" + GyroDefaultsRows.id(.output) : s.navItem)
             }
             navigation.pageSection = nil
         }
@@ -76,20 +89,34 @@ struct SettingsView: View {
         VStack(alignment: .leading, spacing: 3) {
             Text("Settings").font(PP.display(26)).foregroundStyle(PP.text)
                 .padding(.horizontal, 14).padding(.bottom, 10)
-            ForEach(SettingsSection.shown, id: \.self) { s in
-                let on = navigation.settingsSection == s
-                Text(s.title)
-                    .font(.system(size: 15, weight: on ? .semibold : .medium))
-                    .foregroundStyle(on ? PP.background : PP.soft)
-                    .padding(.horizontal, 14)
-                    .frame(maxWidth: .infinity, minHeight: 37, alignment: .leading)
-                    .background(on ? PP.text : .clear, in: RoundedRectangle(cornerRadius: 10))
-                    .padItem(s.navItem, hint: "Open", cornerRadius: 10) {
-                        navigation.settingsSection = s
-                        SettingsRing.enter()
+            // The list scrolls when the sections outgrow the height (a landscape phone
+            // with the developer section); the ring keeps its entry in view.
+            ScrollViewReader { proxy in
+                ScrollView(.vertical, showsIndicators: false) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        ForEach(SettingsSection.shown, id: \.self) { s in
+                            let on = navigation.settingsSection == s
+                            Text(s.title)
+                                .font(.system(size: 15, weight: on ? .semibold : .medium))
+                                .foregroundStyle(on ? PP.background : PP.soft)
+                                .padding(.horizontal, 14)
+                                .frame(maxWidth: .infinity, minHeight: 37, alignment: .leading)
+                                .background(on ? PP.text : .clear, in: RoundedRectangle(cornerRadius: 10))
+                                .padItem(s.navItem, hint: "Open", cornerRadius: 10) {
+                                    navigation.settingsSection = s
+                                    SettingsRing.enter()
+                                }
+                                .id(s.navItem)
+                        }
                     }
+                    // Room for the ring, 6 pt outside a row, which the scroll view would clip.
+                    .padding(8).padding(.bottom, 12)
+                }
+                .padding(-8)
+                .onChange(of: navigation.settingsSection) { _, s in
+                    withAnimation(.easeOut(duration: 0.12)) { proxy.scrollTo(s.navItem) }
+                }
             }
-            Spacer(minLength: 0)
         }
     }
 
@@ -147,9 +174,10 @@ struct SettingsView: View {
             EpicAccountSettings()
         case .graphics: GraphicsSettings()
         case .downloads: DownloadSettings()
-        case .controllers: ControllerSettings()
+        case .controls: ControlsSettings()
         case .storage: StorageSettings()
         case .setup: SetupCheckSettings()
+        case .launchers: LaunchersSettings()
         case .about:
             if let page = navigation.licences.last { LicencePageView(page: page) } else { AboutSettings() }
         case .developer:
@@ -258,10 +286,12 @@ struct SettingsSwitchRow: View {
 
 private struct GraphicsSettings: View {
     @ObservedObject private var launchSettings = LaunchSettingsStore.shared
-    @AppStorage(MetalHUD.key) private var metalHUD = false
-    @AppStorage(HUDSettings.presetKey) private var hudPreset = HUDPreset.off.rawValue
-    @AppStorage(HUDSettings.positionKey) private var hudPosition = HUDPosition.topLeft.rawValue
-    @AppStorage(HUDSettings.itemsKey) private var hudItems = HUDSettings.list(HUDSettings.defaultCustom)
+    @AppStorage(PerformanceOverlay.key) private var performanceOverlay = false
+    // On unless turned off (decision 0153; GameSocialClubEnd).
+    @AppStorage(GameSocialClubEnd.key) private var endGameSocialClub = true
+    @AppStorage(GameSocialClubEnd.refuseRestartKey) private var refuseGameSocialClubRestart = true
+    /// Read only to redraw the donor row when it changes; DonorPool.setting reads it (Auto when unset).
+    @AppStorage(DonorPool.key) private var donorPoolStored = DonorPoolSizing.Setting.autoStored
 
     var body: some View {
         SettingsNote(text: "What every game uses unless you change it on the game's page.")
@@ -288,37 +318,52 @@ private struct GraphicsSettings: View {
                  name: LaunchSettingsText.frameLimit, value: global.frameLimit)
         let backends = SettingSteps(values: GraphicsBackend.allCases.filter { Manifest.has($0) || $0 == launchSettings.global.graphics },
                                     defaultValue: GraphicsBackend.default)
-        valueRow("graphics", "Direct3D", "Vulkan is experimental", backends,
+        valueRow("graphics", "Direct3D", "Vulkan, or DXMT for Direct3D 10 and 11", backends,
                  name: LaunchSettingsText.graphics, value: global.graphics)
-        Group {
-            let presets = SettingSteps(values: HUDPreset.allCases, defaultValue: HUDPreset.off)
-            valueRow("hud", "Performance HUD", "What Playport shows over a game", presets, name: PerformanceHUDText.preset,
-                     value: Binding(get: { HUDPreset(rawValue: hudPreset) }, set: { hudPreset = ($0 ?? .off).rawValue }))
-            if HUDPreset(rawValue: hudPreset) ?? .off != .off {
-                let corners = SettingSteps(values: HUDPosition.allCases, defaultValue: HUDPosition.topLeft)
-                valueRow("hudPosition", "HUD position", "Where on the screen", corners, name: PerformanceHUDText.position,
-                         value: Binding(get: { HUDPosition(rawValue: hudPosition) },
-                                        set: { hudPosition = ($0 ?? .topLeft).rawValue }))
-            }
-            if HUDPreset(rawValue: hudPreset) == .custom {
-                ForEach(HUDItem.allCases, id: \.self) { item in
-                    SettingsSwitchRow(id: "hud-\(item.rawValue)", title: PerformanceHUDText.item(item),
-                                      on: Binding(get: { HUDSettings.items(hudItems).contains(item) }, set: { on in
-                                          var set = HUDSettings.items(hudItems)
-                                          if on { set.insert(item) } else { set.remove(item) }
-                                          hudItems = HUDSettings.list(set)
-                                      }))
-                }
-            }
-            SettingsNote(text: PerformanceHUDText.footer)
-        }
-        SettingsSwitchRow(id: "metalHUD", title: "Apple Metal HUD", subtitle: "Apple's own figures over a game",
-                          on: $metalHUD)
+        SettingsSwitchRow(id: "performanceOverlay", title: "Performance overlay",
+                          subtitle: "Frame rate, frame time and the phone's temperature over a game",
+                          on: $performanceOverlay)
+        memoryRows
         SettingsNote(text: "From each game's next start. 720p at 60 fps keeps the phone cool enough to hold its "
                      + "frame rate; Native is the screen's full resolution, and Off runs a game as fast as the screen "
                      + "allows. Another aspect ratio than the phone's shows the game with bars at its sides or above and below; "
                      + "16:9 helps a game that shows only black on a screen as wide as the phone's. "
                      + LaunchSettingsText.upscalerFooter + " " + LaunchSettingsText.graphicsFooter)
+    }
+
+    /// Every game's memory defaults (decision 0153): the donor pool, on phones with a tier pool
+    /// (DonorPoolSizing.offered), and the end of a game's own Social Club after its sign-in.
+    @ViewBuilder
+    private var memoryRows: some View {
+        if DonorPoolSizing.offered(physicalMB: Int(ProcessInfo.processInfo.physicalMemory >> 20)) {
+            // Through DonorPool.setting: the driver's set: may store "auto" or "off" as a string.
+            let _ = donorPoolStored
+            let current = DonorPool.setting
+            let options = Self.donorOptions
+            PadRow(id: "set:donorPool", title: "Donor memory", subtitle: "Memory from helpers that then end, for the game",
+                   value: options.first { $0.0 == current }?.1 ?? "\(current.stored) MB (fixed)", accessory: .chevron, hint: "Change") {
+                PadModal.shared.picker(title: "Donor memory", context: "Settings · Graphics",
+                                       note: "Auto takes the phone's default pool before the game starts and stops on low "
+                                           + "memory; any failure plays on ordinary memory. From each game's next start.",
+                                       options: options.map { PadOption(id: "\($0.0.stored)", label: $0.1) },
+                                       selected: "\(current.stored)") { donorPoolStored = Int($0) ?? 0 }
+            }
+        }
+        SettingsSwitchRow(id: "endGameSocialClub", title: "End a game's own Social Club",
+                          subtitle: "Rockstar's: after its sign-in, near the memory limit; never the game",
+                          on: $endGameSocialClub)
+        SettingsSwitchRow(id: "refuseGameSocialClubRestart", title: "Refuse its restarts",
+                          subtitle: "With the end on: the game's later Social Club starts fail",
+                          on: $refuseGameSocialClubRestart)
+    }
+
+    /// Off and Auto; a dev build also offers the fixed sizes to experiment with.
+    private static var donorOptions: [(DonorPoolSizing.Setting, String)] {
+        var options: [(DonorPoolSizing.Setting, String)] = [(.off, "Off"), (.auto, "Auto")]
+        #if !PLAYPORT_RELEASE
+        options += DonorPoolSizing.fixedSizesMB.map { (.fixed($0), MemoryNeed.format(mb: $0) + " (fixed)") }
+        #endif
+        return options
     }
 
     private func valueRow<T: Equatable & Sendable>(_ id: String, _ title: String, _ subtitle: String, _ steps: SettingSteps<T>,
@@ -334,10 +379,10 @@ private struct DownloadSettings: View {
     @AppStorage(DownloadPreferences.autoUpdateKey) private var autoUpdate = true
     @AppStorage(DownloadPreferences.cellularKey) private var cellular = false
     @AppStorage(DownloadPreferences.dimKey) private var dim = true
-    @AppStorage(DownloadPreferences.backgroundKey) private var background = false
-    @ObservedObject private var drive = ExternalStorage.shared
     @AppStorage(SteamAccountModel.cloudKey) private var steamCloud = true
     @ObservedObject private var network = NetworkPath.shared
+    @AppStorage(DownloadPreferences.backgroundKey) private var background = false
+    @ObservedObject private var drive = ExternalStorage.shared
     @ObservedObject private var launchSettings = LaunchSettingsStore.shared
 
     var body: some View {
@@ -381,21 +426,75 @@ private struct DownloadSettings: View {
     }
 }
 
-// MARK: Controllers
+// MARK: Controls
 
-private struct ControllerSettings: View {
+private struct ControlsSettings: View {
     @ObservedObject private var router = PadRouter.shared
+    @ObservedObject private var store = ControlsStore.shared
+    @AppStorage(ControlsDefaults.showKey) private var show = ControlsShow.automatic.rawValue
+    @AppStorage(ControlsDefaults.opacityKey) private var opacity = ControlsOpacity.defaultValue
+    @AppStorage(ControlsDefaults.hapticsKey) private var haptics = true
+    @AppStorage(ControlsDefaults.dpadKey) private var dpad = OnScreenDpad.off.rawValue
+    @AppStorage(ControlsDefaults.rightStickKey) private var rightStick = OnScreenRightStick.off.rawValue
+    /// A layout's name, or "" for Suggested for the game.
+    @AppStorage(ControlsDefaults.startingLayoutKey) private var startingLayout = ""
 
     var body: some View {
-        SettingsNote(text: "Connect a controller in iOS Settings › Bluetooth. Playport and its games use the one you "
-                     + "pressed last.")
+        Color.clear.frame(height: 42)
+        let shows = ControlsShow.allCases
+        let current = ControlsShow(rawValue: show) ?? .automatic
+        PadValueRow(id: "set:controlsShow", title: "On-screen controls", subtitle: Self.showSubtitle(current),
+                    values: shows.map(\.title), index: shows.firstIndex(of: current) ?? 0) { show = shows[$0].rawValue }
+        // Every game's layout unless it has its own or a compatibility default (SettingsControls.dc.html).
+        let starts = OnScreenLayout.startingChoices
+        PadValueRow(id: "set:controlsStartingLayout", title: "Starting layout", subtitle: "Each game can pick its own",
+                    values: starts.map(OnScreenLayout.startingTitle),
+                    index: starts.firstIndex(of: OnScreenLayout(rawValue: startingLayout)) ?? 0) {
+            startingLayout = starts[$0]?.rawValue ?? ""
+        }
+        let steps = ControlsOpacity.steps
+        PadValueRow(id: "set:controlsOpacity", title: "Opacity", subtitle: "How much of the game shows through",
+                    values: steps.map(ControlsOpacity.label),
+                    index: steps.firstIndex(of: ControlsOpacity.step(opacity, by: 0)) ?? 0) { opacity = steps[$0] }
+        let dpads = OnScreenDpad.allCases
+        PadValueRow(id: "set:controlsDpad", title: "D-pad", subtitle: "Above the left stick",
+                    values: dpads.map(\.title),
+                    index: dpads.firstIndex(of: OnScreenDpad(rawValue: dpad) ?? .off) ?? 0) { dpad = dpads[$0].rawValue }
+        let sticks = OnScreenRightStick.allCases
+        PadValueRow(id: "set:controlsRightStick", title: "Right stick", subtitle: "Where it goes beside A/B/X/Y",
+                    values: sticks.map(\.title),
+                    index: sticks.firstIndex(of: OnScreenRightStick(rawValue: rightStick) ?? .off) ?? 0) {
+            rightStick = sticks[$0].rawValue
+        }
+        SettingsSwitchRow(id: "controlsHaptics", title: "A tap you can feel", subtitle: "Haptics when a control is pressed",
+                          on: $haptics)
+        SettingsNote(text: "Each game can turn them off or change these in the in-game menu's Controls; a "
+                     + "three-finger tap on the game opens that menu, as holding a controller's Home button does. Connect a controller in iOS "
+                     + "Settings › Bluetooth. Playport and its games use the one you pressed last.")
         if router.controllers.isEmpty {
             SettingsInfoRow(id: "controller:none", title: "No controller", subtitle: "Touch works everywhere meanwhile")
         }
         ForEach(Array(router.controllers.enumerated()), id: \.offset) { i, c in
-            SettingsInfoRow(id: "controller:\(i)", title: c.name, subtitle: i == 0 ? "In use" : nil, value: battery(c))
+            SettingsInfoRow(id: "controller:\(i)", title: c.name,
+                            subtitle: ([i == 0 ? "In use" : nil, c.gyro ? "has a gyro" : nil].compactMap { $0 }
+                                .joined(separator: " · ")).nilIfEmpty,
+                            value: battery(c))
         }
+        // The Controller page for every game (UI/ControllerMapView.swift).
+        PadRow(id: ControllerMapView.settingsRowID, title: "Controller", subtitle: "What a controller does in every game",
+               value: store.defaults.controllerMap.mode.title, accessory: .chevron, hint: "Open") {
+            AppNavigation.shared.openSettingsControllerMap()
+        }
+        GyroDefaultsRows()
         Color.clear.frame(height: 0).onAppear { router.refreshControllers() }
+    }
+
+    private static func showSubtitle(_ s: ControlsShow) -> String {
+        switch s {
+        case .automatic: "Shown while no controller is connected"
+        case .always: "Shown with a controller too"
+        case .never: "Off unless a game turns them on"
+        }
     }
 
     private func battery(_ c: PadRouter.Controller) -> String {
@@ -444,7 +543,8 @@ private struct StorageSettings: View {
                 }
             }
         }
-        // FEX's disk cache (decision 0056): its size, and the one way to clear it (decision 0012).
+        // FEX's disk cache (decision 0056) and the runtime's image copies (decision 0167): their
+        // size, and the one way to clear them (decision 0012).
         PadRow(id: "set:emulator-cache", title: "Emulator cache",
                subtitle: "Speeds up later starts; cleared past 5 GB or when space is low",
                value: cacheBytes.map(ByteCount.format) ?? "…", hint: launch.running ? "" : "Clear") {
@@ -458,8 +558,23 @@ private struct StorageSettings: View {
                 clearing = false
             }
         }
+        // The graphics backends' shader caches (PLA-279): their size, and the one way to clear them.
+        PadRow(id: "set:shader-cache", title: "Shader cache",
+               subtitle: "Speeds up later starts; Mesa's part is capped at 1 GB",
+               value: shaderBytes.map(ByteCount.format) ?? "…", hint: launch.running ? "" : "Clear") {
+            guard !launch.running, !clearingShaders else { return }
+            clearingShaders = true
+            Task {
+                shaderBytes = await Task.detached(priority: .userInitiated) { () -> UInt64 in
+                    ShaderCache.clear()
+                    return ShaderCache.size()
+                }.value
+                clearingShaders = false
+            }
+        }
         .task {
             cacheBytes = await Task.detached(priority: .utility) { EmulatorCache.size() }.value
+            shaderBytes = await Task.detached(priority: .utility) { ShaderCache.size() }.value
             sharedBytes = await library.steamworksSharedBytes()
         }
     }
@@ -467,6 +582,8 @@ private struct StorageSettings: View {
     @ObservedObject private var launch = TitleLaunch.shared
     @State private var cacheBytes: UInt64?
     @State private var clearing = false
+    @State private var shaderBytes: UInt64?
+    @State private var clearingShaders = false
     @State private var sharedBytes: UInt64?
     @State private var removingShared = false
 }
@@ -492,7 +609,7 @@ private struct AboutSettings: View {
                      + "with ABSOLUTELY NO WARRANTY.")
     }
 
-    /// The owner's name for this build ("Dishnur 18"), which ci/build-request.json's build number keeps in step.
+    /// The owner's name for this build ("Dishnur 19"), which ci/build-request.json's build number keeps in step.
     private static var buildName: String? {
         (Bundle.main.infoDictionary?["PlayportBuildName"] as? String)?.nilIfEmpty
     }

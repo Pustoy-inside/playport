@@ -22,7 +22,8 @@ file) to `$PLAYPORT_BUILD/sync/watch-<sha8>/`. It lists, oldest first:
 
 - **Madeira's own commits** past the pin that touch a path the build
   compiles or stages (`MADEIRA_BUILT` in `tools/sync.py`: `build/ntdll-unix`,
-  `build/wineserver`, `build/win32u-unix`, `build/madsync`,
+  `build/wineserver`, `build/win32u-unix`, `build/madsync` (no longer built:
+  ppsync grew from it, so a madsync fix may be worth porting),
   `build/madeira_cfg.h`, the GnuTLS and FreeType builds, Winios) or a file
   `patches/madeira-unix` or `patches/madeira-winios` patches. The rest are
   counted, not listed.
@@ -50,6 +51,17 @@ sort the commits by its rules, pick the wanted ones onto `patches/wine-valve`,
 and move the row (a Hollow Knight play gates it). When Valve has rewritten the
 branch, a commit is new if its subject is not among the pin's.
 
+The watch report's "Component pins" section shows how far each other upstream
+has gone: for `wine`, `wine-valve`, `fex`, `rpmalloc`, `dxmt`, `mesa`, `dxvk`
+and `vkd3d-proton`, the tracked branch's tip and the newest release tag (named
+as `wine-11.20`, `FEX-2610`, `mesa-26.3.0`, `v3.1.1`) from `git ls-remote`, and
+the commits between the pin and each, counted in the row's mirror under
+`$PLAYPORT_BUILD/sync/mirrors` (the watch keeps those for `wine`, `fex`,
+`rpmalloc`, `dxmt` and `wine-valve`; the others are not cloned for this, so
+their counts stay open). An upstream it cannot reach is a line in the report,
+not a failure. It is a prompt for a move ([below](#moving-a-component-pin)),
+never one itself.
+
 ## Porting a Madeira fix
 
 A wanted commit becomes a Playport patch on the frozen base, re-exported,
@@ -66,8 +78,9 @@ never hand-edited ([0053](decisions/0053-carrying-model.md)):
   `Class:`, `Evidence:` and `Offered-upstream:`. Keep the original author.
 - Branch `madeira-main` holds Madeira `bbbf8d0` re-ported onto Playport's
   bases (2026-10-06); its patches are often the shortest route. Fastsync came
-  that way: `patches/wine-unix` 0015–0017 and `patches/madeira-unix` 0081
-  ([evidence](evidence/2026-10-06-fastsync-on-8c050d0.md)).
+  that way, as `patches/wine-unix` 0015–0017 and `patches/madeira-unix` 0081
+  ([evidence](evidence/2026-10-06-fastsync-on-8c050d0.md)), until ppsync
+  replaced it (decision 0157).
 - Build, `pp test`, and the device gate on both cohort titles, as for any
   patch.
 
@@ -106,7 +119,19 @@ and `flags.txt` lists each patch whose range-diff changed with no person
 resolving it (a 3-way merge or a recorded resolution): check those hunks
 against both sides, since git can misplace an auto-merged hunk. A clean
 patch is kept as it is; the others are written again with their `Rebased:` or
-`Picked:` trailer set to `resolved` when the move needed a resolution. The
+`Picked:` trailer set to `resolved` when the move needed a resolution.
+
+Before it finishes, the run applies the written series as the build does
+(`git am -3` onto the new commit, in `verify/`) and compares each patch's tree
+with its pick's. A clean patch kept as it is still carries the old line
+numbers, and when its context occurs twice `git apply` takes the match nearest
+them, which after an upstream shift can be the other function (fex-port 0033,
+wine-port 0033 and wine-unix 0035 in the 2026-10 moves); the pick's merge
+followed the lines. Neither the range-diff nor `flags.txt` shows this, so such
+a patch is re-exported from its pick (trailer unchanged) and named in the
+output; a patch that still differs stops the run with its name. Since
+patch-ids leave line numbers out, `ensure_series` also keeps a hash of the
+diffs a tree was applied from and re-applies when they change. The
 run never commits: review `git diff`, then build and play as for any pin move.
 A pin that is a gitlink of the moved one (FEX's `External/rpmalloc` is the
 `rpmalloc` row) is named when the new commit moves it; it is a run of its own

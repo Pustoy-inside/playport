@@ -6,17 +6,27 @@
  * rendered; the mock completes every commit at once. What this checks is the
  * driver's CPU side: that every pipeline compiles (NIR validation runs in a
  * debug build), that every MSL library is fully translated (the mock exits 3
- * otherwise) and that recording the draws does not crash or assert.
+ * otherwise) and that recording the draws does not crash or assert. First,
+ * which instances get a discrete device type, that PLAYPORT_VK_BUDGET_MB
+ * caps the heap's budget and not its size, and that PLAYPORT_VK_HEAP_MB
+ * reports a smaller heap that allocations may still pass.
  *
  *    kk-host-test DRIVER.so SPV_DIR
  *
  * SPV_DIR holds the SPIR-V the test script compiled from shaders/.
  */
+#define _GNU_SOURCE /* memmem */
 #include <dirent.h>
+#include <pthread.h>
+#include <stddef.h>
 #include <dlfcn.h>
+#include <signal.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/wait.h>
+#include <unistd.h>
 #include <vulkan/vulkan.h>
 
 #define CHECK(x)                                                               \
@@ -32,6 +42,8 @@ static PFN_vkGetInstanceProcAddr gipa;
 static VkInstance inst;
 static VkDevice dev;
 static const char *spv_dir;
+/* How main made dev, for check_gpl's device of its own */
+static const VkDeviceCreateInfo *device_info;
 
 #define IPROC(name) PFN_##name name = (PFN_##name)gipa(inst, #name)
 #define DPROC(name) PFN_##name name = (PFN_##name)gipa(inst, #name)
@@ -75,9 +87,73 @@ msl_vertex_stores(int first, int last)
    return false;
 }
 
-static VkShaderModule load_module(const char *name);
-static VkShaderModule
-load_module(const char *name)
+/* Whether the mock's MSL libraries a and b are the same bytes. */
+static bool
+msl_same(int a, int b)
+{
+   const char *dir = getenv("KK_MOCK_MSL_DIR");
+   static char text[2][1 << 20];
+   size_t n[2] = {0, 0};
+   const int index[2] = {a, b};
+   for (int i = 0; i < 2; i++) {
+      char path[4096];
+      snprintf(path, sizeof(path), "%s/%04d.metal", dir ? dir : ".", index[i]);
+      FILE *f = fopen(path, "r");
+      if (!f)
+         return false;
+      n[i] = fread(text[i], 1, sizeof(text[i]), f);
+      fclose(f);
+   }
+   return n[0] == n[1] && memcmp(text[0], text[1], n[0]) == 0;
+}
+
+/* Whether any MSL library among [first, last) of the mock contains text. */
+static bool
+msl_contains(int first, int last, const char *text)
+{
+   const char *dir = getenv("KK_MOCK_MSL_DIR");
+   for (int i = first; dir && i < last; ++i) {
+      char path[4096];
+      snprintf(path, sizeof(path), "%s/%04d.metal", dir, i);
+      FILE *f = fopen(path, "r");
+      if (!f)
+         continue;
+      static char src[1 << 20];
+      size_t n = fread(src, 1, sizeof(src) - 1, f);
+      fclose(f);
+      src[n] = 0;
+      if (strstr(src, text))
+         return true;
+   }
+   return false;
+}
+
+/* How many times text occurs in the MSL libraries [first, last) of the
+ * mock. */
+static int
+msl_count_text(int first, int last, const char *text)
+{
+   const char *dir = getenv("KK_MOCK_MSL_DIR");
+   int count = 0;
+   for (int i = first; dir && i < last; ++i) {
+      char path[4096];
+      snprintf(path, sizeof(path), "%s/%04d.metal", dir, i);
+      FILE *f = fopen(path, "r");
+      if (!f)
+         continue;
+      static char src[1 << 20];
+      size_t n = fread(src, 1, sizeof(src) - 1, f);
+      fclose(f);
+      src[n] = 0;
+      for (const char *p = strstr(src, text); p; p = strstr(p + 1, text))
+         ++count;
+   }
+   return count;
+}
+
+/* SPV_DIR's name.spv, for a VkShaderModuleCreateInfo; free pCode */
+static VkShaderModuleCreateInfo
+read_spv(const char *name)
 {
    char path[4096];
    snprintf(path, sizeof(path), "%s/%s.spv", spv_dir, name);
@@ -93,18 +169,81 @@ load_module(const char *name)
    if (fread(code, 1, n, f) != (size_t)n)
       exit(1);
    fclose(f);
-
-   DPROC(vkCreateShaderModule);
-   VkShaderModuleCreateInfo ci = {
+   return (VkShaderModuleCreateInfo){
       .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
       .codeSize = n,
       .pCode = code,
    };
+}
+
+static VkShaderModule load_module(const char *name);
+static VkShaderModule
+load_module(const char *name)
+{
+   DPROC(vkCreateShaderModule);
+   VkShaderModuleCreateInfo ci = read_spv(name);
+   uint32_t *code = (uint32_t *)ci.pCode;
    VkShaderModule m;
    CHECK(vkCreateShaderModule(dev, &ci, NULL, &m));
    free(code);
    return m;
 }
+
+/* Whether this run asks for VK_EXT_graphics_pipeline_library (PLA-424):
+ * MESA_KK_EXPERIMENTAL names gpl. */
+static bool
+gpl_wanted(void)
+{
+   const char *e = getenv("MESA_KK_EXPERIMENTAL");
+   return e && strstr(e, "gpl");
+}
+
+/* Whether this run asks for MSL 4.1 (PLA-437): MESA_KK_EXPERIMENTAL names
+ * msl41. */
+static bool
+msl41_wanted(void)
+{
+   const char *e = getenv("MESA_KK_EXPERIMENTAL");
+   return e && strstr(e, "msl41");
+}
+
+/* Whether this run hides float controls 2 and NaN and Inf preservation
+ * (PLA-72): MESA_KK_EXPERIMENTAL names no_fp_preserve. */
+static bool
+no_fp_preserve_wanted(void)
+{
+   const char *e = getenv("MESA_KK_EXPERIMENTAL");
+   return e && strstr(e, "no_fp_preserve");
+}
+
+/* Whether this run asks for VK_EXT_shader_module_identifier (PLA-431):
+ * MESA_KK_EXPERIMENTAL names module_identifier. */
+static bool
+module_identifier_wanted(void)
+{
+   const char *e = getenv("MESA_KK_EXPERIMENTAL");
+   return e && strstr(e, "module_identifier");
+}
+
+static bool
+has_device_extension(VkPhysicalDevice pd, const char *name)
+{
+   IPROC(vkEnumerateDeviceExtensionProperties);
+   uint32_t n = 0;
+   CHECK(vkEnumerateDeviceExtensionProperties(pd, NULL, &n, NULL));
+   VkExtensionProperties *p = calloc(n, sizeof(*p));
+   CHECK(vkEnumerateDeviceExtensionProperties(pd, NULL, &n, p));
+   bool found = false;
+   for (uint32_t i = 0; i < n; i++)
+      found |= !strcmp(p[i].extensionName, name);
+   free(p);
+   return found;
+}
+
+static int check_gpl(VkPhysicalDevice pd, VkQueue queue, VkCommandPool pool,
+                     VkBuffer buf);
+static int check_module_identifier(VkPhysicalDevice pd, VkQueue queue,
+                                   VkCommandPool pool, VkBuffer buf);
 
 struct pipe_desc {
    const char *name;
@@ -118,6 +257,11 @@ struct pipe_desc {
    bool xfb;
    bool discard;
    uint32_t rast_stream;
+   /* 0 is VK_SAMPLE_COUNT_1_BIT */
+   VkSampleCountFlagBits samples;
+   bool no_attachments;
+   /* pSampleMask's word; 0 for none */
+   VkSampleMask sample_mask;
 };
 
 static VkPipeline
@@ -193,7 +337,8 @@ make_pipeline(const struct pipe_desc *d, VkPipelineLayout layout)
    };
    VkPipelineMultisampleStateCreateInfo ms = {
       .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
-      .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
+      .rasterizationSamples = d->samples ? d->samples : VK_SAMPLE_COUNT_1_BIT,
+      .pSampleMask = d->sample_mask ? &d->sample_mask : NULL,
    };
    VkPipelineColorBlendAttachmentState att = {.colorWriteMask = 0xf};
    VkPipelineColorBlendStateCreateInfo cb = {
@@ -211,7 +356,7 @@ make_pipeline(const struct pipe_desc *d, VkPipelineLayout layout)
    VkFormat color = VK_FORMAT_R8G8B8A8_UNORM;
    VkPipelineRenderingCreateInfo rinfo = {
       .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
-      .colorAttachmentCount = 1,
+      .colorAttachmentCount = d->no_attachments ? 0 : 1,
       .pColorAttachmentFormats = &color,
    };
    VkGraphicsPipelineCreateInfo ci = {
@@ -225,7 +370,7 @@ make_pipeline(const struct pipe_desc *d, VkPipelineLayout layout)
       .pViewportState = &vp,
       .pRasterizationState = &rs,
       .pMultisampleState = &ms,
-      .pColorBlendState = &cb,
+      .pColorBlendState = d->no_attachments ? NULL : &cb,
       .pDynamicState = &dyn,
       .layout = layout,
    };
@@ -253,6 +398,1659 @@ find_memory(VkPhysicalDevice pd, uint32_t bits)
    return 0;
 }
 
+/* VK_EXT_memory_priority and VK_EXT_pageable_device_local_memory (PLA-431),
+ * on a device of its own: exposed, with their features, only when
+ * MESA_KK_EXPERIMENTAL names memory_priority, and without them the device has
+ * no vkSetDeviceMemoryPriorityEXT. With them, as DXVK and vkd3d-proton use
+ * them: an allocation with a priority, then vkSetDeviceMemoryPriorityEXT on
+ * it twice, through the device's dispatch. It runs after the checks that
+ * fork and before this process submits, so this process's first [kk-mem]
+ * line (MESA_KK_DEBUG=memory) counts 1 allocation and 2 calls. */
+static int
+check_memory_priority(const VkInstanceCreateInfo *ici)
+{
+   const char *experimental = getenv("MESA_KK_EXPERIMENTAL");
+   const bool wanted = experimental && strstr(experimental, "memory_priority");
+   VkInstance i;
+   CHECK(((PFN_vkCreateInstance)gipa(NULL, "vkCreateInstance"))(ici, NULL, &i));
+   uint32_t count = 1;
+   VkPhysicalDevice pd;
+   CHECK(((PFN_vkEnumeratePhysicalDevices)gipa(i, "vkEnumeratePhysicalDevices"))(
+      i, &count, &pd));
+   PFN_vkEnumerateDeviceExtensionProperties enumerate =
+      (PFN_vkEnumerateDeviceExtensionProperties)gipa(
+         i, "vkEnumerateDeviceExtensionProperties");
+   uint32_t n = 0;
+   CHECK(enumerate(pd, NULL, &n, NULL));
+   VkExtensionProperties *props = calloc(n, sizeof(*props));
+   CHECK(enumerate(pd, NULL, &n, props));
+   bool priority_ext = false, pageable_ext = false;
+   for (uint32_t e = 0; e < n; e++) {
+      priority_ext |= !strcmp(props[e].extensionName, "VK_EXT_memory_priority");
+      pageable_ext |=
+         !strcmp(props[e].extensionName, "VK_EXT_pageable_device_local_memory");
+   }
+   free(props);
+   VkPhysicalDeviceMemoryPriorityFeaturesEXT priority_feat = {
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PRIORITY_FEATURES_EXT,
+   };
+   VkPhysicalDevicePageableDeviceLocalMemoryFeaturesEXT pageable_feat = {
+      .sType =
+         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PAGEABLE_DEVICE_LOCAL_MEMORY_FEATURES_EXT,
+      .pNext = &priority_feat,
+   };
+   VkPhysicalDeviceFeatures2 f2 = {
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+      .pNext = &pageable_feat,
+   };
+   ((PFN_vkGetPhysicalDeviceFeatures2)gipa(i, "vkGetPhysicalDeviceFeatures2"))(
+      pd, &f2);
+   if (priority_ext != wanted || pageable_ext != wanted ||
+       priority_feat.memoryPriority != wanted ||
+       pageable_feat.pageableDeviceLocalMemory != wanted) {
+      fprintf(stderr, "VK_EXT_memory_priority %d, "
+                      "VK_EXT_pageable_device_local_memory %d, memoryPriority %d, "
+                      "pageableDeviceLocalMemory %d with MESA_KK_EXPERIMENTAL=%s\n",
+              priority_ext, pageable_ext, priority_feat.memoryPriority,
+              pageable_feat.pageableDeviceLocalMemory,
+              experimental ? experimental : "");
+      return 1;
+   }
+
+   float prio = 1.0f;
+   VkDeviceQueueCreateInfo qci = {
+      .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
+      .queueCount = 1,
+      .pQueuePriorities = &prio,
+   };
+   const char *exts[] = {"VK_EXT_memory_priority",
+                         "VK_EXT_pageable_device_local_memory"};
+   VkDeviceCreateInfo dci = {
+      .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
+      .pNext = wanted ? &f2 : NULL,
+      .queueCreateInfoCount = 1,
+      .pQueueCreateInfos = &qci,
+      .enabledExtensionCount = wanted ? 2 : 0,
+      .ppEnabledExtensionNames = exts,
+   };
+   VkDevice d;
+   CHECK(((PFN_vkCreateDevice)gipa(i, "vkCreateDevice"))(pd, &dci, NULL, &d));
+   PFN_vkSetDeviceMemoryPriorityEXT set_priority =
+      (PFN_vkSetDeviceMemoryPriorityEXT)((PFN_vkGetDeviceProcAddr)gipa(
+         i, "vkGetDeviceProcAddr"))(d, "vkSetDeviceMemoryPriorityEXT");
+   if (!set_priority != !wanted) {
+      fprintf(stderr, "memory_priority: vkSetDeviceMemoryPriorityEXT %s\n",
+              set_priority ? "without the extensions" : "missing");
+      return 1;
+   }
+   if (wanted) {
+      PFN_vkAllocateMemory alloc =
+         (PFN_vkAllocateMemory)gipa(i, "vkAllocateMemory");
+      PFN_vkFreeMemory release = (PFN_vkFreeMemory)gipa(i, "vkFreeMemory");
+      VkMemoryPriorityAllocateInfoEXT priority = {
+         .sType = VK_STRUCTURE_TYPE_MEMORY_PRIORITY_ALLOCATE_INFO_EXT,
+         .priority = 1.0f,
+      };
+      VkMemoryAllocateInfo mai = {
+         .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+         .pNext = &priority,
+         .allocationSize = 65536,
+         .memoryTypeIndex = 0,
+      };
+      VkDeviceMemory mem;
+      CHECK(alloc(d, &mai, NULL, &mem));
+      set_priority(d, mem, 0.0f);
+      set_priority(d, mem, 0.5f);
+      release(d, mem, NULL);
+      printf("ok memory_priority: an allocation with priority 1.0, then "
+             "vkSetDeviceMemoryPriorityEXT 0.0 and 0.5\n");
+   }
+   ((PFN_vkDestroyDevice)gipa(i, "vkDestroyDevice"))(d, NULL);
+   ((PFN_vkDestroyInstance)gipa(i, "vkDestroyInstance"))(i, NULL);
+   return 0;
+}
+
+/* Heap 0's size and VK_EXT_memory_budget budget in MiB, from a fresh
+ * instance (the driver reads PLAYPORT_VK_BUDGET_MB when it enumerates). */
+static void
+heap_and_budget(const VkInstanceCreateInfo *ici, uint64_t *size_MB,
+                uint64_t *budget_MB)
+{
+   VkInstance i;
+   CHECK(((PFN_vkCreateInstance)gipa(NULL, "vkCreateInstance"))(ici, NULL, &i));
+   uint32_t count = 1;
+   VkPhysicalDevice pd;
+   CHECK(((PFN_vkEnumeratePhysicalDevices)gipa(i, "vkEnumeratePhysicalDevices"))(
+      i, &count, &pd));
+   VkPhysicalDeviceMemoryBudgetPropertiesEXT budget = {
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT,
+   };
+   VkPhysicalDeviceMemoryProperties2 mp = {
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2,
+      .pNext = &budget,
+   };
+   ((PFN_vkGetPhysicalDeviceMemoryProperties2)gipa(
+      i, "vkGetPhysicalDeviceMemoryProperties2"))(pd, &mp);
+   *size_MB = mp.memoryProperties.memoryHeaps[0].size >> 20;
+   *budget_MB = budget.heapBudget[0] >> 20;
+   ((PFN_vkDestroyInstance)gipa(i, "vkDestroyInstance"))(i, NULL);
+}
+
+/* patches/mesa 0036: PLAYPORT_VK_BUDGET_MB caps heap 0's budget and leaves
+ * its size; unset, or under 256, it changes nothing. */
+static int
+check_budget_cap(const VkInstanceCreateInfo *ici)
+{
+   uint64_t size, budget, cap_size, cap_budget, low_size, low_budget;
+   unsetenv("PLAYPORT_VK_BUDGET_MB");
+   heap_and_budget(ici, &size, &budget);
+   setenv("PLAYPORT_VK_BUDGET_MB", "1536", 1);
+   heap_and_budget(ici, &cap_size, &cap_budget);
+   setenv("PLAYPORT_VK_BUDGET_MB", "100", 1);
+   heap_and_budget(ici, &low_size, &low_budget);
+   unsetenv("PLAYPORT_VK_BUDGET_MB");
+   printf("memory: heap 0 %llu MiB, budget %llu MiB; capped at 1536: heap "
+          "%llu MiB, budget %llu MiB; 100 (ignored): budget %llu MiB\n",
+          (unsigned long long)size, (unsigned long long)budget,
+          (unsigned long long)cap_size, (unsigned long long)cap_budget,
+          (unsigned long long)low_budget);
+   if (size != 5120 || cap_size != size || low_size != size) {
+      fprintf(stderr, "the budget cap changed heap 0's size\n");
+      return 1;
+   }
+   /* The uncapped budget follows the host's free memory, which moves
+    * between instances: compare only well clear of the cap. */
+   if (budget < 2048 || low_budget < 2048) {
+      fprintf(stderr, "this host's budget (%llu MiB) is too close to the cap "
+              "to check it\n", (unsigned long long)budget);
+      return 1;
+   }
+   if (cap_budget != 1536) {
+      fprintf(stderr, "PLAYPORT_VK_BUDGET_MB=1536 gave a %llu MiB budget\n",
+              (unsigned long long)cap_budget);
+      return 1;
+   }
+   return 0;
+}
+
+/* patches/mesa 0064: PLAYPORT_VK_HEAP_MB reports heap 0's size as that
+ * value and keeps the budget at or under it; under 256 or at the working set
+ * or over it changes nothing. Allocations past the reported size still
+ * succeed: two of 192 MiB under a 256 MiB heap. */
+static int
+check_heap_cap(const VkInstanceCreateInfo *ici)
+{
+   uint64_t size, budget, low_size, high_size, both_size, both_budget, unused;
+   unsetenv("PLAYPORT_VK_BUDGET_MB");
+   setenv("PLAYPORT_VK_HEAP_MB", "1536", 1);
+   heap_and_budget(ici, &size, &budget);
+   setenv("PLAYPORT_VK_HEAP_MB", "100", 1);
+   heap_and_budget(ici, &low_size, &unused);
+   setenv("PLAYPORT_VK_HEAP_MB", "5120", 1);
+   heap_and_budget(ici, &high_size, &unused);
+   setenv("PLAYPORT_VK_HEAP_MB", "3072", 1);
+   setenv("PLAYPORT_VK_BUDGET_MB", "1024", 1);
+   heap_and_budget(ici, &both_size, &both_budget);
+   unsetenv("PLAYPORT_VK_BUDGET_MB");
+   printf("memory: heap at 1536: heap %llu MiB, budget %llu MiB; 100 and "
+          "5120 (ignored): heap %llu, %llu MiB; heap 3072 budget 1024: "
+          "heap %llu MiB, budget %llu MiB\n",
+          (unsigned long long)size, (unsigned long long)budget,
+          (unsigned long long)low_size, (unsigned long long)high_size,
+          (unsigned long long)both_size, (unsigned long long)both_budget);
+   if (size != 1536 || budget > 1536 || low_size != 5120 ||
+       high_size != 5120 || both_size != 3072 || both_budget != 1024) {
+      fprintf(stderr, "PLAYPORT_VK_HEAP_MB did not set heap 0 as expected\n");
+      return 1;
+   }
+
+   setenv("PLAYPORT_VK_HEAP_MB", "256", 1);
+   VkInstance i;
+   CHECK(((PFN_vkCreateInstance)gipa(NULL, "vkCreateInstance"))(ici, NULL, &i));
+   unsetenv("PLAYPORT_VK_HEAP_MB");
+   uint32_t count = 1;
+   VkPhysicalDevice pd;
+   CHECK(((PFN_vkEnumeratePhysicalDevices)gipa(i, "vkEnumeratePhysicalDevices"))(
+      i, &count, &pd));
+   float prio = 1.0f;
+   VkDeviceQueueCreateInfo qci = {
+      .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
+      .queueCount = 1,
+      .pQueuePriorities = &prio,
+   };
+   VkDeviceCreateInfo dci = {
+      .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
+      .queueCreateInfoCount = 1,
+      .pQueueCreateInfos = &qci,
+   };
+   VkDevice d;
+   CHECK(((PFN_vkCreateDevice)gipa(i, "vkCreateDevice"))(pd, &dci, NULL, &d));
+   PFN_vkAllocateMemory alloc = (PFN_vkAllocateMemory)gipa(i, "vkAllocateMemory");
+   PFN_vkFreeMemory release = (PFN_vkFreeMemory)gipa(i, "vkFreeMemory");
+   VkMemoryAllocateInfo mai = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+                               .allocationSize = 192ull << 20,
+                               .memoryTypeIndex = 0};
+   VkDeviceMemory a, b;
+   CHECK(alloc(d, &mai, NULL, &a));
+   CHECK(alloc(d, &mai, NULL, &b));
+   release(d, a, NULL);
+   release(d, b, NULL);
+   ((PFN_vkDestroyDevice)gipa(i, "vkDestroyDevice"))(d, NULL);
+   ((PFN_vkDestroyInstance)gipa(i, "vkDestroyInstance"))(i, NULL);
+   printf("ok heap-cap: 384 MiB allocated under a 256 MiB heap\n");
+   return 0;
+}
+
+/* patches/mesa 0080: MESA_KK_DEBUG=gpu sums the completed command buffers'
+ * GPU time into [kk-gpu] lines, and the queue's end logs the last interval.
+ * The mock gives each command buffer 2 ms, back to back, so three submits of
+ * a buffer copy (no shader to build) are gpu=6.0 ms and busy=6.0 ms over cbs=3. The driver reads
+ * MESA_KK_DEBUG once per process: the device lives in a child, which this
+ * process runs before it touches the driver, and whose stderr it reads. */
+static void
+gpu_log_child(void)
+{
+   setenv("MESA_KK_DEBUG", "gpu", 1);
+   VkApplicationInfo app = {.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
+                            .apiVersion = VK_API_VERSION_1_3};
+   VkInstanceCreateInfo ici = {.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
+                               .pApplicationInfo = &app};
+   CHECK(((PFN_vkCreateInstance)gipa(NULL, "vkCreateInstance"))(&ici, NULL, &inst));
+   uint32_t count = 1;
+   VkPhysicalDevice pd;
+   IPROC(vkEnumeratePhysicalDevices);
+   CHECK(vkEnumeratePhysicalDevices(inst, &count, &pd));
+   float prio = 1.0f;
+   VkDeviceQueueCreateInfo qci = {
+      .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
+      .queueCount = 1,
+      .pQueuePriorities = &prio,
+   };
+   VkDeviceCreateInfo dci = {
+      .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
+      .queueCreateInfoCount = 1,
+      .pQueueCreateInfos = &qci,
+   };
+   IPROC(vkCreateDevice);
+   CHECK(vkCreateDevice(pd, &dci, NULL, &dev));
+   DPROC(vkGetDeviceQueue);
+   DPROC(vkCreateBuffer);
+   DPROC(vkGetBufferMemoryRequirements);
+   DPROC(vkAllocateMemory);
+   DPROC(vkBindBufferMemory);
+   DPROC(vkCreateCommandPool);
+   DPROC(vkAllocateCommandBuffers);
+   DPROC(vkBeginCommandBuffer);
+   DPROC(vkEndCommandBuffer);
+   DPROC(vkCmdCopyBuffer);
+   DPROC(vkQueueSubmit);
+   DPROC(vkQueueWaitIdle);
+   DPROC(vkDestroyCommandPool);
+   DPROC(vkDestroyBuffer);
+   DPROC(vkFreeMemory);
+   DPROC(vkDestroyDevice);
+   VkQueue queue;
+   vkGetDeviceQueue(dev, 0, 0, &queue);
+
+   VkBufferCreateInfo bci = {
+      .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+      .size = 4096,
+      .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+   };
+   VkBuffer buf;
+   CHECK(vkCreateBuffer(dev, &bci, NULL, &buf));
+   VkMemoryRequirements req;
+   vkGetBufferMemoryRequirements(dev, buf, &req);
+   VkMemoryAllocateInfo mai = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+                               .allocationSize = req.size,
+                               .memoryTypeIndex = __builtin_ctz(req.memoryTypeBits)};
+   VkDeviceMemory mem;
+   CHECK(vkAllocateMemory(dev, &mai, NULL, &mem));
+   CHECK(vkBindBufferMemory(dev, buf, mem, 0));
+
+   VkCommandPoolCreateInfo cpci = {
+      .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+      .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
+   };
+   VkCommandPool cpool;
+   CHECK(vkCreateCommandPool(dev, &cpci, NULL, &cpool));
+   VkCommandBufferAllocateInfo cbai = {
+      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+      .commandPool = cpool,
+      .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+      .commandBufferCount = 1,
+   };
+   VkCommandBuffer cmd;
+   CHECK(vkAllocateCommandBuffers(dev, &cbai, &cmd));
+   for (int n = 0; n < 3; n++) {
+      VkCommandBufferBeginInfo bi = {
+         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+         .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+      };
+      CHECK(vkBeginCommandBuffer(cmd, &bi));
+      VkBufferCopy region = {.srcOffset = 0, .dstOffset = 2048, .size = 1024};
+      vkCmdCopyBuffer(cmd, buf, buf, 1, &region);
+      CHECK(vkEndCommandBuffer(cmd));
+      VkSubmitInfo si = {
+         .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+         .commandBufferCount = 1,
+         .pCommandBuffers = &cmd,
+      };
+      CHECK(vkQueueSubmit(queue, 1, &si, VK_NULL_HANDLE));
+      CHECK(vkQueueWaitIdle(queue));
+   }
+   vkDestroyCommandPool(dev, cpool, NULL);
+   vkDestroyBuffer(dev, buf, NULL);
+   vkFreeMemory(dev, mem, NULL);
+   vkDestroyDevice(dev, NULL);
+   _exit(0);
+}
+
+static int
+check_gpu_log(void)
+{
+   int fds[2];
+   if (pipe(fds))
+      return 1;
+   pid_t child = fork();
+   if (child == 0) {
+      close(fds[0]);
+      dup2(fds[1], 2);
+      gpu_log_child();
+   }
+   close(fds[1]);
+   static char log[1 << 16];
+   size_t len = 0;
+   for (ssize_t r; len < sizeof(log) - 1 && (r = read(fds[0], log + len, sizeof(log) - 1 - len)) > 0;)
+      len += r;
+   log[len] = 0;
+   close(fds[0]);
+   int status = 0;
+   if (child < 0 || waitpid(child, &status, 0) != child || !WIFEXITED(status) ||
+       WEXITSTATUS(status) != 0) {
+      fprintf(stderr, "MESA_KK_DEBUG=gpu child: status %#x\n%s", status, log);
+      return 1;
+   }
+   const char *line = strstr(log, "[kk-gpu] ");
+   const char *final = line ? strstr(line, " final: ") : NULL;
+   const char *gpu = final ? strstr(final, " gpu=6.0 ms busy=6.0 ms ") : NULL;
+   const char *cbs = gpu ? strstr(gpu, " cbs=3 ") : NULL;
+   if (!cbs) {
+      fprintf(stderr, "MESA_KK_DEBUG=gpu: no final [kk-gpu] line with gpu=6.0 "
+              "ms busy=6.0 ms cbs=3 in:\n%s", log);
+      return 1;
+   }
+   const char *end = strchr(line, '\n');
+   printf("ok gpu-log: %.*s\n", end ? (int)(end - line) : (int)strlen(line), line);
+   return 0;
+}
+
+/* patches/mesa 0113 (PLA-72): one command buffer of six passes without
+ * draws, in a child with MESA_KK_DEBUG and MESA_KK_EXPERIMENTAL as given and
+ * the mock's encoder trace on, whose stderr pass_rules_log reads. RGBA8
+ * colour and D32_SFLOAT_S8_UINT depth/stencil, 64x64, every pass on all of
+ * them; C clear, L load, x don't care, S store:
+ *   P1 colour C/S (clear-only)
+ *   P2 colour L/S, depth and stencil C/S (clear-only)
+ *   P3 all L/S
+ *   P4 colour L/S, depth and stencil C/S (clear-only)
+ *   a buffer copy (a compute encoder)
+ *   P5 colour L/S, depth C/S, stencil L/S (clear-only)
+ *   a barrier into the vertex shader, outside a pass
+ *   P6 all L/S on a 32x32 area (not the whole framebuffer) */
+static void
+pass_rules_child(const char *debug, const char *experimental)
+{
+   /* What the test script's runs record or change stays theirs */
+   unsetenv("KK_MOCK_MSL_DIR");
+   unsetenv("KK_MOCK_MSL_VERSIONS");
+   unsetenv("KK_MOCK_INTERRUPT_BUILDS");
+   unsetenv("MESA_KK_DUMP_MSL_MIN_KB");
+   setenv("MESA_SHADER_CACHE_DISABLE", "true", 1);
+   setenv("KK_MOCK_TRACE_ENCODERS", "1", 1);
+   if (debug)
+      setenv("MESA_KK_DEBUG", debug, 1);
+   else
+      unsetenv("MESA_KK_DEBUG");
+   if (experimental)
+      setenv("MESA_KK_EXPERIMENTAL", experimental, 1);
+   else
+      unsetenv("MESA_KK_EXPERIMENTAL");
+
+   VkApplicationInfo app = {.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
+                            .apiVersion = VK_API_VERSION_1_3};
+   VkInstanceCreateInfo ici = {.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
+                               .pApplicationInfo = &app};
+   CHECK(((PFN_vkCreateInstance)gipa(NULL, "vkCreateInstance"))(&ici, NULL, &inst));
+   uint32_t count = 1;
+   VkPhysicalDevice pd;
+   IPROC(vkEnumeratePhysicalDevices);
+   CHECK(vkEnumeratePhysicalDevices(inst, &count, &pd));
+   float prio = 1.0f;
+   VkDeviceQueueCreateInfo qci = {
+      .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
+      .queueCount = 1,
+      .pQueuePriorities = &prio,
+   };
+   VkPhysicalDeviceVulkan13Features v13 = {
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
+      .synchronization2 = VK_TRUE,
+      .dynamicRendering = VK_TRUE,
+   };
+   VkDeviceCreateInfo dci = {
+      .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
+      .pNext = &v13,
+      .queueCreateInfoCount = 1,
+      .pQueueCreateInfos = &qci,
+   };
+   IPROC(vkCreateDevice);
+   CHECK(vkCreateDevice(pd, &dci, NULL, &dev));
+   DPROC(vkGetDeviceQueue);
+   DPROC(vkCreateImage);
+   DPROC(vkGetImageMemoryRequirements);
+   DPROC(vkBindImageMemory);
+   DPROC(vkCreateImageView);
+   DPROC(vkCreateBuffer);
+   DPROC(vkGetBufferMemoryRequirements);
+   DPROC(vkBindBufferMemory);
+   DPROC(vkAllocateMemory);
+   DPROC(vkCreateCommandPool);
+   DPROC(vkAllocateCommandBuffers);
+   DPROC(vkBeginCommandBuffer);
+   DPROC(vkEndCommandBuffer);
+   DPROC(vkCmdBeginRendering);
+   DPROC(vkCmdEndRendering);
+   DPROC(vkCmdCopyBuffer);
+   DPROC(vkCmdPipelineBarrier2);
+   DPROC(vkQueueSubmit);
+   DPROC(vkQueueWaitIdle);
+   DPROC(vkDestroyDevice);
+   VkQueue queue;
+   vkGetDeviceQueue(dev, 0, 0, &queue);
+
+   const VkFormat formats[2] = {VK_FORMAT_R8G8B8A8_UNORM,
+                                VK_FORMAT_D32_SFLOAT_S8_UINT};
+   VkImageView views[2];
+   for (unsigned i = 0; i < 2; i++) {
+      VkImageCreateInfo ci = {
+         .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+         .imageType = VK_IMAGE_TYPE_2D,
+         .format = formats[i],
+         .extent = {64, 64, 1},
+         .mipLevels = 1,
+         .arrayLayers = 1,
+         .samples = VK_SAMPLE_COUNT_1_BIT,
+         .tiling = VK_IMAGE_TILING_OPTIMAL,
+         .usage = i ? VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT
+                    : VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+      };
+      VkImage image;
+      CHECK(vkCreateImage(dev, &ci, NULL, &image));
+      VkMemoryRequirements mr;
+      vkGetImageMemoryRequirements(dev, image, &mr);
+      VkMemoryAllocateInfo mai = {
+         .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+         .allocationSize = mr.size,
+         .memoryTypeIndex = __builtin_ctz(mr.memoryTypeBits),
+      };
+      VkDeviceMemory mem;
+      CHECK(vkAllocateMemory(dev, &mai, NULL, &mem));
+      CHECK(vkBindImageMemory(dev, image, mem, 0));
+      VkImageViewCreateInfo vci = {
+         .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+         .image = image,
+         .viewType = VK_IMAGE_VIEW_TYPE_2D,
+         .format = formats[i],
+         .subresourceRange = {i ? VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT
+                                : VK_IMAGE_ASPECT_COLOR_BIT,
+                              0, 1, 0, 1},
+      };
+      CHECK(vkCreateImageView(dev, &vci, NULL, &views[i]));
+   }
+   VkBufferCreateInfo bci = {
+      .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+      .size = 4096,
+      .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+   };
+   VkBuffer buf;
+   CHECK(vkCreateBuffer(dev, &bci, NULL, &buf));
+   VkMemoryRequirements req;
+   vkGetBufferMemoryRequirements(dev, buf, &req);
+   VkMemoryAllocateInfo mai = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+                               .allocationSize = req.size,
+                               .memoryTypeIndex = __builtin_ctz(req.memoryTypeBits)};
+   VkDeviceMemory mem;
+   CHECK(vkAllocateMemory(dev, &mai, NULL, &mem));
+   CHECK(vkBindBufferMemory(dev, buf, mem, 0));
+
+   VkCommandPoolCreateInfo cpci = {.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
+   VkCommandPool cpool;
+   CHECK(vkCreateCommandPool(dev, &cpci, NULL, &cpool));
+   VkCommandBufferAllocateInfo cbai = {
+      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+      .commandPool = cpool,
+      .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+      .commandBufferCount = 1,
+   };
+   VkCommandBuffer cmd;
+   CHECK(vkAllocateCommandBuffers(dev, &cbai, &cmd));
+   VkCommandBufferBeginInfo bi = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+   CHECK(vkBeginCommandBuffer(cmd, &bi));
+
+   static const struct {
+      bool depth;
+      VkAttachmentLoadOp load[3]; /* colour, depth, stencil */
+      uint32_t size;
+      bool copy_after, barrier_after;
+   } passes[] = {
+      {false, {VK_ATTACHMENT_LOAD_OP_CLEAR}, 64, false, false},
+      {true, {VK_ATTACHMENT_LOAD_OP_LOAD, VK_ATTACHMENT_LOAD_OP_CLEAR, VK_ATTACHMENT_LOAD_OP_CLEAR}, 64, false, false},
+      {true, {VK_ATTACHMENT_LOAD_OP_LOAD, VK_ATTACHMENT_LOAD_OP_LOAD, VK_ATTACHMENT_LOAD_OP_LOAD}, 64, false, false},
+      {true, {VK_ATTACHMENT_LOAD_OP_LOAD, VK_ATTACHMENT_LOAD_OP_CLEAR, VK_ATTACHMENT_LOAD_OP_CLEAR}, 64, true, false},
+      {true, {VK_ATTACHMENT_LOAD_OP_LOAD, VK_ATTACHMENT_LOAD_OP_CLEAR, VK_ATTACHMENT_LOAD_OP_LOAD}, 64, false, true},
+      {true, {VK_ATTACHMENT_LOAD_OP_LOAD, VK_ATTACHMENT_LOAD_OP_LOAD, VK_ATTACHMENT_LOAD_OP_LOAD}, 32, false, false},
+   };
+   for (unsigned p = 0; p < sizeof(passes) / sizeof(passes[0]); p++) {
+      VkRenderingAttachmentInfo att[3];
+      for (unsigned a = 0; a < 3; a++)
+         att[a] = (VkRenderingAttachmentInfo){
+            .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+            .imageView = views[a ? 1 : 0],
+            .imageLayout = a ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL
+                             : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            .loadOp = passes[p].load[a],
+            .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+            .clearValue.depthStencil = {1.0f, 0},
+         };
+      VkRenderingInfo ri = {
+         .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
+         .renderArea = {{0, 0}, {passes[p].size, passes[p].size}},
+         .layerCount = 1,
+         .colorAttachmentCount = 1,
+         .pColorAttachments = &att[0],
+         .pDepthAttachment = passes[p].depth ? &att[1] : NULL,
+         .pStencilAttachment = passes[p].depth ? &att[2] : NULL,
+      };
+      vkCmdBeginRendering(cmd, &ri);
+      vkCmdEndRendering(cmd);
+      if (passes[p].copy_after) {
+         VkBufferCopy region = {.srcOffset = 0, .dstOffset = 2048, .size = 1024};
+         vkCmdCopyBuffer(cmd, buf, buf, 1, &region);
+      }
+      if (passes[p].barrier_after) {
+         VkMemoryBarrier2 mb = {
+            .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
+            .srcStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+            .srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
+            .dstStageMask = VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT,
+            .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT,
+         };
+         VkDependencyInfo di = {
+            .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+            .memoryBarrierCount = 1,
+            .pMemoryBarriers = &mb,
+         };
+         vkCmdPipelineBarrier2(cmd, &di);
+      }
+   }
+   CHECK(vkEndCommandBuffer(cmd));
+   VkSubmitInfo si = {
+      .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+      .commandBufferCount = 1,
+      .pCommandBuffers = &cmd,
+   };
+   CHECK(vkQueueSubmit(queue, 1, &si, VK_NULL_HANDLE));
+   CHECK(vkQueueWaitIdle(queue));
+   vkDestroyDevice(dev, NULL);
+   _exit(0);
+}
+
+/* Runs pass_rules_child with these variables; its stderr in log. */
+static int
+pass_rules_log(const char *debug, const char *experimental, char *log,
+               size_t size)
+{
+   int fds[2];
+   if (pipe(fds))
+      return 1;
+   pid_t child = fork();
+   if (child == 0) {
+      close(fds[0]);
+      dup2(fds[1], 2);
+      pass_rules_child(debug, experimental);
+   }
+   close(fds[1]);
+   size_t len = 0;
+   for (ssize_t r; len < size - 1 && (r = read(fds[0], log + len, size - 1 - len)) > 0;)
+      len += r;
+   log[len] = 0;
+   close(fds[0]);
+   int status = 0;
+   if (child < 0 || waitpid(child, &status, 0) != child || !WIFEXITED(status) ||
+       WEXITSTATUS(status) != 0) {
+      fprintf(stderr, "pass rules child (MESA_KK_DEBUG=%s MESA_KK_EXPERIMENTAL=%s): "
+              "status %#x\n%s", debug ? debug : "", experimental ? experimental : "",
+              status, log);
+      return 1;
+   }
+   return 0;
+}
+
+/* How many lines of log hold text */
+static unsigned
+log_lines_with(const char *log, const char *text)
+{
+   unsigned n = 0;
+   for (const char *l = log; l && *l;) {
+      const char *e = strchr(l, '\n');
+      size_t len = e ? (size_t)(e - l) : strlen(l);
+      const char *hit = strstr(l, text);
+      n += hit && hit < l + len;
+      l = e ? e + 1 : NULL;
+   }
+   return n;
+}
+
+/* The mock's encoder trace: its "kk-mock-enc: " lines, without the prefix,
+ * those that begin with only (all for NULL, all but the store actions for
+ * ""), one per line */
+static void
+encoder_trace(const char *log, const char *only, char *out, size_t size)
+{
+   size_t len = 0;
+   out[0] = 0;
+   for (const char *l = strstr(log, "kk-mock-enc: "); l;
+        l = strstr(l + 1, "kk-mock-enc: ")) {
+      const char *t = l + strlen("kk-mock-enc: ");
+      const char *e = strchr(t, '\n');
+      size_t n = e ? (size_t)(e - t) : strlen(t);
+      if (only && *only && strncmp(t, only, strlen(only)))
+         continue;
+      if (only && !*only && memmem(t, n, "-store ", 7))
+         continue;
+      if (len + n + 2 < size) {
+         memcpy(out + len, t, n);
+         len += n;
+         out[len++] = '\n';
+         out[len] = 0;
+      }
+   }
+}
+
+/* The store-action lines of a trace */
+static void
+encoder_stores(const char *trace, char *out, size_t size)
+{
+   size_t len = 0;
+   out[0] = 0;
+   for (const char *l = trace; l && *l;) {
+      const char *e = strchr(l, '\n');
+      size_t n = e ? (size_t)(e - l) + 1 : strlen(l);
+      if (memmem(l, n, "-store ", 7) && len + n + 1 < size) {
+         memcpy(out + len, l, n);
+         len += n;
+         out[len] = 0;
+      }
+      l = e ? e + 1 : NULL;
+   }
+}
+
+/* MESA_KK_DEBUG=passes counts what the six passes record, and the final
+ * [kk-passes] line has them; without it nothing is counted and every
+ * encoder ends on an all-stages barrier, every depth and stencil store a
+ * Store. */
+static int
+check_pass_rules(void)
+{
+   static char log[1 << 16], trace[1 << 14];
+   if (pass_rules_log(NULL, NULL, log, sizeof(log)))
+      return 1;
+   encoder_trace(log, NULL, trace, sizeof(trace));
+   if (strstr(log, "[kk-passes]") ||
+       log_lines_with(trace, "render") != 6 || log_lines_with(trace, "compute") != 1 ||
+       log_lines_with(trace, "producer-barrier after=0x7c00001f before-queue=0x7c00001f") != 7 ||
+       log_lines_with(trace, "producer-barrier") != 7 ||
+       log_lines_with(trace, "consumer-barrier") != 0 ||
+       log_lines_with(trace, "depth-store action=1") != 5 ||
+       log_lines_with(trace, "stencil-store action=1") != 5 ||
+       log_lines_with(trace, "-store action=0") != 0) {
+      fprintf(stderr, "pass rules, no flags: not 6 render and 1 compute encoders, "
+              "7 all-stages end barriers and every store a Store:\n%s", trace);
+      return 1;
+   }
+   static char default_trace[1 << 14];
+   memcpy(default_trace, trace, sizeof(trace));
+
+   if (pass_rules_log("passes", NULL, log, sizeof(log)))
+      return 1;
+   const char *line = strstr(log, "[kk-passes] ");
+   const char *final = line ? strstr(line, " final: ") : NULL;
+   static const char *const want[] = {
+      " cbs=1 ", " passes=6 ", " render-enc=6 ", " compute-enc=1 ", " draws=0 ",
+      " empty-render-enc=6 ", " clear-only=4 ", " end-barriers=7 ",
+      " pipeline-barriers=1 ", " in-render=0 ", " splits=0 ", " in-compute=0 ",
+      " idle=1 ", " compute-splits=0 ", " fold-cand=3 ", " merge-cand=1 ",
+      " dead-ds-direct=2 ", " dead-ds-later=1 ",
+   };
+   const char *end = final ? strchr(final, '\n') : NULL;
+   for (unsigned i = 0; final && i < sizeof(want) / sizeof(want[0]); i++) {
+      const char *hit = strstr(final, want[i]);
+      if (!hit || (end && hit > end)) {
+         fprintf(stderr, "MESA_KK_DEBUG=passes: no%s in the final [kk-passes] line:\n%.*s\n",
+                 want[i], end ? (int)(end - line) : (int)strlen(line), line);
+         return 1;
+      }
+   }
+   encoder_trace(log, NULL, trace, sizeof(trace));
+   if (!final || strcmp(trace, default_trace)) {
+      fprintf(stderr, "MESA_KK_DEBUG=passes: no final [kk-passes] line, or not the "
+              "encoders, barriers and stores made without it:\n%s", log);
+      return 1;
+   }
+   printf("ok pass-rules: %.*s\n", end ? (int)(end - line) : (int)strlen(line), line);
+
+   /* patches/mesa 0114: MESA_KK_EXPERIMENTAL=narrow_barriers ends each
+    * render encoder on a barrier that leaves the vertex stage free (the
+    * compute one stays whole); the command buffer's first render encoder and
+    * the one after the barrier into the vertex shader wait for the queue's
+    * earlier work before their vertex stage. The stores are unchanged. */
+   if (pass_rules_log("passes", "narrow_barriers", log, sizeof(log)))
+      return 1;
+   static const char narrow_want[] =
+      "render\nconsumer-barrier after-queue=0x7c00001f before=0x1\n"
+      "producer-barrier after=0x7c00001f before-queue=0x7c00001e\nend\n"
+      "render\nproducer-barrier after=0x7c00001f before-queue=0x7c00001e\nend\n"
+      "render\nproducer-barrier after=0x7c00001f before-queue=0x7c00001e\nend\n"
+      "render\nproducer-barrier after=0x7c00001f before-queue=0x7c00001e\nend\n"
+      "compute\nproducer-barrier after=0x7c00001f before-queue=0x7c00001f\nend\n"
+      "render\nproducer-barrier after=0x7c00001f before-queue=0x7c00001e\nend\n"
+      "render\nconsumer-barrier after-queue=0x7c00001f before=0x1\n"
+      "producer-barrier after=0x7c00001f before-queue=0x7c00001e\nend\n";
+   static char stores[1 << 14], default_stores[1 << 14];
+   encoder_trace(log, NULL, trace, sizeof(trace));
+   encoder_stores(trace, stores, sizeof(stores));
+   encoder_stores(default_trace, default_stores, sizeof(default_stores));
+   encoder_trace(log, "", trace, sizeof(trace));
+   line = strstr(log, "[kk-passes] ");
+   final = line ? strstr(line, " final: ") : NULL;
+   if (strcmp(trace, narrow_want) || strcmp(stores, default_stores) || !final ||
+       !strstr(final, " narrow-ends=6 ") || !strstr(final, " vertex-waits=2 ")) {
+      fprintf(stderr, "MESA_KK_EXPERIMENTAL=narrow_barriers: not the narrowed end "
+              "barriers, the two vertex waits and the same stores:\n%s", log);
+      return 1;
+   }
+   printf("ok pass-rules narrow_barriers: 6 render encoder ends leave the vertex "
+          "stage free, 2 vertex waits\n");
+
+   /* patches/mesa 0115: with MESA_KK_EXPERIMENTAL=ds_dont_care P2 to P5 leave
+    * their encoder open at their end; only P3's depth and stencil stores,
+    * which P4 clears whole with no encoder between, become DontCare. P4's
+    * end waits for the copy, P5's for P6, which loads; everything else is
+    * the trace made without the flag. */
+   if (pass_rules_log("passes", "ds_dont_care", log, sizeof(log)))
+      return 1;
+   encoder_trace(log, NULL, trace, sizeof(trace));
+   const char *second = strstr(trace, "depth-store ");
+   second = second ? strstr(second + 1, "depth-store ") : NULL;
+   bool p3 = second && !strncmp(second, "depth-store action=0\n", 21) &&
+             !strncmp(second + 21, "stencil-store action=0\n", 23);
+   unsigned dont_care = log_lines_with(trace, "-store action=0");
+   for (char *a; (a = strstr(trace, "-store action=0"));)
+      a[strlen("-store action=")] = '1';
+   line = strstr(log, "[kk-passes] ");
+   final = line ? strstr(line, " final: ") : NULL;
+   if (!p3 || dont_care != 2 || strcmp(trace, default_trace) || !final ||
+       !strstr(final, " deferred-ends=4 ") || !strstr(final, " ds-dont-care=2 ")) {
+      fprintf(stderr, "MESA_KK_EXPERIMENTAL=ds_dont_care: not DontCare for P3's "
+              "depth and stencil only, 4 deferred ends and the trace made "
+              "without it otherwise:\n%s", log);
+      return 1;
+   }
+   printf("ok pass-rules ds_dont_care: P3's depth and stencil stores DontCare, "
+          "4 deferred ends\n");
+   return 0;
+}
+
+/* The device type a fresh instance with these application and engine names
+ * sees. */
+static VkPhysicalDeviceType
+device_type_for(const char *app_name, const char *engine_name)
+{
+   VkApplicationInfo app = {.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
+                            .pApplicationName = app_name,
+                            .pEngineName = engine_name,
+                            .apiVersion = VK_API_VERSION_1_1};
+   VkInstanceCreateInfo ici = {.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
+                               .pApplicationInfo = &app};
+   VkInstance i;
+   CHECK(((PFN_vkCreateInstance)gipa(NULL, "vkCreateInstance"))(&ici, NULL, &i));
+   uint32_t count = 1;
+   VkPhysicalDevice pd;
+   CHECK(((PFN_vkEnumeratePhysicalDevices)gipa(i, "vkEnumeratePhysicalDevices"))(
+      i, &count, &pd));
+   VkPhysicalDeviceProperties props;
+   ((PFN_vkGetPhysicalDeviceProperties)gipa(i, "vkGetPhysicalDeviceProperties"))(
+      pd, &props);
+   ((PFN_vkDestroyInstance)gipa(i, "vkDestroyInstance"))(i, NULL);
+   return props.deviceType;
+}
+
+/* patches/mesa 0043: Red Dead Redemption 2's renderer (application "Red Dead
+ * Redemption 2", engine "SGA") gets a discrete device type; any other
+ * instance, the DXVK and vkd3d-proton ones in its process included, keeps the
+ * integrated one, and so does the renderer under
+ * MESA_KK_DEBUG=integrated_device. The driver reads MESA_KK_DEBUG once per
+ * process, so that case runs in a child, before this process makes an
+ * instance. */
+static int
+check_device_type(void)
+{
+   pid_t child = fork();
+   if (child == 0) {
+      setenv("MESA_KK_DEBUG", "integrated_device", 1);
+      _exit(device_type_for("Red Dead Redemption 2", "SGA") ==
+                  VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU
+               ? 0
+               : 1);
+   }
+   int status = 0;
+   if (child < 0 || waitpid(child, &status, 0) != child ||
+       !WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+      fprintf(stderr, "MESA_KK_DEBUG=integrated_device: the renderer did not "
+              "get the integrated device type\n");
+      return 1;
+   }
+
+   static const struct {
+      const char *app, *engine;
+      VkPhysicalDeviceType type;
+   } cases[] = {
+      {"Red Dead Redemption 2", "SGA", VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU},
+      {"RDR2.exe", "DXVK", VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU},
+      {"RDR2.exe", "vkd3d", VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU},
+      {"Red Dead Redemption 2", NULL, VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU},
+      {"Red Dead Redemption", "SGA", VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU},
+      {NULL, NULL, VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU},
+   };
+   for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+      VkPhysicalDeviceType type = device_type_for(cases[i].app, cases[i].engine);
+      if (type != cases[i].type) {
+         fprintf(stderr, "application %s, engine %s: device type %d, not %d\n",
+                 cases[i].app ? cases[i].app : "(none)",
+                 cases[i].engine ? cases[i].engine : "(none)", type,
+                 cases[i].type);
+         return 1;
+      }
+   }
+   printf("ok device-type\n");
+   return 0;
+}
+
+/* Linear images of the shapes Red Dead Redemption 2's Vulkan renderer
+ * creates on an integrated GPU without asking for their format properties:
+ * 2D ones KosmicKrisp supports, 2D colour attachments, 2D arrays, 3D storage
+ * images (2D array compatible) and a mipmapped one; KosmicKrisp reports
+ * none but the first (no linear attachments, 3D, layers or levels). They are
+ * bound at their alignment in one allocation, viewed, copied from and to a
+ * buffer, and the attachments cleared in a render pass. The mock aborts on
+ * a linear Metal texture MTLBuffer cannot make (patches/mesa 0041 gives
+ * those a texture of Metal's own layout). Each one's subresource layout has
+ * to fit the memory it asked for, and the 2D ones' to stay as it was. */
+/* A timestamp pool of 5000 queries (two counter heaps) made, reset, written
+ * and destroyed on its own instance and device, in a child: the driver reads
+ * MESA_KK_GPU_CAPTURE_FRAME once per instance. KK_MOCK_REFUSE_COUNTER_HEAP
+ * makes the mock abort at a counter heap, as Metal's capture refuses one. */
+static void
+timestamp_pool_child(const char *capture_frame)
+{
+   if (capture_frame)
+      setenv("MESA_KK_GPU_CAPTURE_FRAME", capture_frame, 1);
+   setenv("KK_MOCK_REFUSE_COUNTER_HEAP", "1", 1);
+
+   VkApplicationInfo app = {.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
+                            .apiVersion = VK_API_VERSION_1_3};
+   VkInstanceCreateInfo ici = {.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
+                               .pApplicationInfo = &app};
+   CHECK(((PFN_vkCreateInstance)gipa(NULL, "vkCreateInstance"))(&ici,
+                                                                NULL, &inst));
+   uint32_t count = 1;
+   VkPhysicalDevice pd;
+   IPROC(vkEnumeratePhysicalDevices);
+   CHECK(vkEnumeratePhysicalDevices(inst, &count, &pd));
+   float prio = 1.0f;
+   VkDeviceQueueCreateInfo qci = {
+      .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
+      .queueCount = 1,
+      .pQueuePriorities = &prio,
+   };
+   VkPhysicalDeviceVulkan12Features v12 = {
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
+      .hostQueryReset = VK_TRUE,
+   };
+   VkDeviceCreateInfo dci = {
+      .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
+      .pNext = &v12,
+      .queueCreateInfoCount = 1,
+      .pQueueCreateInfos = &qci,
+   };
+   IPROC(vkCreateDevice);
+   CHECK(vkCreateDevice(pd, &dci, NULL, &dev));
+   DPROC(vkGetDeviceQueue);
+   DPROC(vkCreateQueryPool);
+   DPROC(vkResetQueryPool);
+   DPROC(vkGetQueryPoolResults);
+   DPROC(vkDestroyQueryPool);
+   DPROC(vkCreateCommandPool);
+   DPROC(vkAllocateCommandBuffers);
+   DPROC(vkBeginCommandBuffer);
+   DPROC(vkEndCommandBuffer);
+   DPROC(vkCmdResetQueryPool);
+   DPROC(vkCmdWriteTimestamp);
+   DPROC(vkQueueSubmit);
+   DPROC(vkQueueWaitIdle);
+   VkQueue queue;
+   vkGetDeviceQueue(dev, 0, 0, &queue);
+
+   VkQueryPoolCreateInfo ci = {
+      .sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,
+      .queryType = VK_QUERY_TYPE_TIMESTAMP,
+      .queryCount = 5000,
+   };
+   VkQueryPool ts;
+   CHECK(vkCreateQueryPool(dev, &ci, NULL, &ts));
+   vkResetQueryPool(dev, ts, 0, 5000);
+   uint64_t value = 0;
+   if (vkGetQueryPoolResults(dev, ts, 4500, 1, sizeof(value), &value,
+                             sizeof(value), VK_QUERY_RESULT_64_BIT) !=
+       VK_NOT_READY) {
+      fprintf(stderr, "a reset timestamp query is available\n");
+      _exit(1);
+   }
+
+   VkCommandPoolCreateInfo cpci = {
+      .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+   };
+   VkCommandPool cpool;
+   CHECK(vkCreateCommandPool(dev, &cpci, NULL, &cpool));
+   VkCommandBufferAllocateInfo cbai = {
+      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+      .commandPool = cpool,
+      .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+      .commandBufferCount = 1,
+   };
+   VkCommandBuffer cmd;
+   CHECK(vkAllocateCommandBuffers(dev, &cbai, &cmd));
+   VkCommandBufferBeginInfo bi = {
+      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+   };
+   CHECK(vkBeginCommandBuffer(cmd, &bi));
+   vkCmdResetQueryPool(cmd, ts, 0, 5000);
+   vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, ts, 0);
+   vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, ts, 4999);
+   CHECK(vkEndCommandBuffer(cmd));
+   VkSubmitInfo si = {
+      .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+      .commandBufferCount = 1,
+      .pCommandBuffers = &cmd,
+   };
+   CHECK(vkQueueSubmit(queue, 1, &si, VK_NULL_HANDLE));
+   CHECK(vkQueueWaitIdle(queue));
+   vkDestroyQueryPool(dev, ts, NULL);
+   _exit(0);
+}
+
+/* patches/mesa 0044: while a GPU capture is armed, a timestamp pool makes no
+ * Metal counter heap, and its writes still record and submit; without a
+ * capture the same pool makes them (the mock's abort ends that child). */
+static int
+check_capture_timestamp_pool(void)
+{
+   static const struct {
+      const char *capture_frame;
+      bool aborts;
+   } cases[] = {{"3000", false}, {NULL, true}};
+   for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+      pid_t child = fork();
+      if (child == 0)
+         timestamp_pool_child(cases[i].capture_frame);
+      int status = 0;
+      if (child < 0 || waitpid(child, &status, 0) != child) {
+         fprintf(stderr, "timestamp pool child: no status\n");
+         return 1;
+      }
+      bool aborted = WIFSIGNALED(status) && WTERMSIG(status) == SIGABRT;
+      bool passed = WIFEXITED(status) && WEXITSTATUS(status) == 0;
+      if (cases[i].aborts ? !aborted : !passed) {
+         fprintf(stderr, "timestamp pool, MESA_KK_GPU_CAPTURE_FRAME=%s: "
+                 "status %#x, %s expected\n",
+                 cases[i].capture_frame ? cases[i].capture_frame : "(unset)",
+                 status, cases[i].aborts ? "a counter heap" : "none");
+         return 1;
+      }
+   }
+   printf("ok capture-timestamp-pool\n");
+   return 0;
+}
+
+static int
+check_linear_images(VkPhysicalDevice pd, VkQueue queue, VkCommandPool pool)
+{
+   DPROC(vkCreateImage);
+   DPROC(vkGetImageMemoryRequirements);
+   DPROC(vkGetImageSubresourceLayout);
+   DPROC(vkAllocateMemory);
+   DPROC(vkBindImageMemory);
+   DPROC(vkCreateImageView);
+   DPROC(vkCreateBuffer);
+   DPROC(vkGetBufferMemoryRequirements);
+   DPROC(vkBindBufferMemory);
+   DPROC(vkAllocateCommandBuffers);
+   DPROC(vkBeginCommandBuffer);
+   DPROC(vkEndCommandBuffer);
+   DPROC(vkCmdCopyBufferToImage);
+   DPROC(vkCmdCopyImageToBuffer);
+   DPROC(vkCmdBeginRendering);
+   DPROC(vkCmdEndRendering);
+   DPROC(vkQueueSubmit);
+   DPROC(vkQueueWaitIdle);
+
+   const VkImageUsageFlags xfer_sampled = VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+                                          VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                                          VK_IMAGE_USAGE_SAMPLED_BIT;
+   const struct {
+      const char *name;
+      VkImageType type;
+      VkFormat format;
+      uint32_t texel_B;
+      VkExtent3D extent;
+      uint32_t levels, layers;
+      VkImageUsageFlags usage;
+      VkImageCreateFlags flags;
+   } shapes[] = {
+      {"2d", VK_IMAGE_TYPE_2D, VK_FORMAT_R16G16B16A16_SFLOAT, 8, {32, 4, 1},
+       1, 1, xfer_sampled, 0},
+      {"2d-colour-attachment", VK_IMAGE_TYPE_2D, VK_FORMAT_R32_SFLOAT, 4,
+       {1, 1, 1}, 1, 1, xfer_sampled | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, 0},
+      {"2d-colour-attachment-storage", VK_IMAGE_TYPE_2D, VK_FORMAT_R8_UINT, 1,
+       {4096, 64, 1}, 1, 1,
+       xfer_sampled | VK_IMAGE_USAGE_STORAGE_BIT |
+          VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+       0},
+      {"2d-array", VK_IMAGE_TYPE_2D, VK_FORMAT_R16G16B16A16_SFLOAT, 8,
+       {16, 28, 1}, 1, 8, xfer_sampled, 0},
+      {"3d-storage", VK_IMAGE_TYPE_3D, VK_FORMAT_R16G16B16A16_SFLOAT, 8,
+       {64, 64, 16}, 1, 1, xfer_sampled | VK_IMAGE_USAGE_STORAGE_BIT,
+       VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT},
+      {"3d-storage-r32ui", VK_IMAGE_TYPE_3D, VK_FORMAT_R32_UINT, 4,
+       {32, 32, 16}, 1, 1, xfer_sampled | VK_IMAGE_USAGE_STORAGE_BIT,
+       VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT},
+      {"2d-mips", VK_IMAGE_TYPE_2D, VK_FORMAT_R32_SFLOAT, 4, {128, 72, 1}, 7,
+       1, xfer_sampled, 0},
+   };
+   enum { N = sizeof(shapes) / sizeof(shapes[0]) };
+   VkImage images[N];
+   VkDeviceSize offsets[N], total = 0, staging = 0;
+   uint32_t bits = ~0u;
+   for (unsigned i = 0; i < N; i++) {
+      VkImageCreateInfo ci = {
+         .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+         .flags = shapes[i].flags,
+         .imageType = shapes[i].type,
+         .format = shapes[i].format,
+         .extent = shapes[i].extent,
+         .mipLevels = shapes[i].levels,
+         .arrayLayers = shapes[i].layers,
+         .samples = VK_SAMPLE_COUNT_1_BIT,
+         .tiling = VK_IMAGE_TILING_LINEAR,
+         .usage = shapes[i].usage,
+      };
+      CHECK(vkCreateImage(dev, &ci, NULL, &images[i]));
+      VkMemoryRequirements mr;
+      vkGetImageMemoryRequirements(dev, images[i], &mr);
+      bits &= mr.memoryTypeBits;
+      /* As the game does: one allocation, each image at its alignment. */
+      offsets[i] = (total + mr.alignment - 1) / mr.alignment * mr.alignment;
+      total = offsets[i] + mr.size;
+
+      /* Every subresource's layout inside the image's memory, none
+       * overlapping another. */
+      VkDeviceSize texels = 0, start[64], end[64];
+      unsigned nsub = 0;
+      for (uint32_t level = 0; level < shapes[i].levels; level++) {
+         uint32_t w = shapes[i].extent.width >> level;
+         uint32_t h = shapes[i].extent.height >> level;
+         uint32_t d = shapes[i].extent.depth >> level;
+         w = w ? w : 1;
+         h = h ? h : 1;
+         d = d ? d : 1;
+         texels += (VkDeviceSize)w * h * d * shapes[i].layers;
+         for (uint32_t layer = 0; layer < shapes[i].layers; layer++) {
+            VkImageSubresource sr = {VK_IMAGE_ASPECT_COLOR_BIT, level, layer};
+            VkSubresourceLayout sl;
+            vkGetImageSubresourceLayout(dev, images[i], &sr, &sl);
+            VkDeviceSize row_B = (VkDeviceSize)w * shapes[i].texel_B;
+            if (sl.rowPitch < row_B ||
+                (d > 1 && sl.depthPitch < sl.rowPitch * h) ||
+                sl.size < sl.rowPitch * (h - 1) + row_B +
+                             (d > 1 ? sl.depthPitch * (d - 1) : 0) ||
+                sl.offset + sl.size > mr.size) {
+               fprintf(stderr, "linear %s level %u layer %u: offset %llu "
+                       "size %llu rowPitch %llu depthPitch %llu in %llu "
+                       "bytes\n", shapes[i].name, level, layer,
+                       (unsigned long long)sl.offset,
+                       (unsigned long long)sl.size,
+                       (unsigned long long)sl.rowPitch,
+                       (unsigned long long)sl.depthPitch,
+                       (unsigned long long)mr.size);
+               return 1;
+            }
+            for (unsigned k = 0; k < nsub; k++) {
+               if (sl.offset < end[k] && start[k] < sl.offset + sl.size) {
+                  fprintf(stderr, "linear %s level %u layer %u overlaps "
+                          "another subresource\n", shapes[i].name, level,
+                          layer);
+                  return 1;
+               }
+            }
+            start[nsub] = sl.offset;
+            end[nsub++] = sl.offset + sl.size;
+            /* The 2D images Metal can make from a buffer keep their
+             * layout: rows at the linear alignment, from the start. */
+            if (shapes[i].type == VK_IMAGE_TYPE_2D && shapes[i].levels == 1 &&
+                shapes[i].layers == 1 &&
+                (sl.offset != 0 || sl.rowPitch != (row_B + 15) / 16 * 16 ||
+                 sl.size != sl.rowPitch * h)) {
+               fprintf(stderr, "linear %s: layout changed (rowPitch %llu, "
+                       "size %llu)\n", shapes[i].name,
+                       (unsigned long long)sl.rowPitch,
+                       (unsigned long long)sl.size);
+               return 1;
+            }
+         }
+      }
+      if (texels * shapes[i].texel_B > staging)
+         staging = texels * shapes[i].texel_B;
+      printf("linear %s: %llu bytes, alignment %llu\n", shapes[i].name,
+             (unsigned long long)mr.size, (unsigned long long)mr.alignment);
+   }
+
+   VkMemoryAllocateInfo mai = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+                               .allocationSize = total,
+                               .memoryTypeIndex = find_memory(pd, bits)};
+   VkDeviceMemory mem;
+   CHECK(vkAllocateMemory(dev, &mai, NULL, &mem));
+   VkImageView views[N];
+   for (unsigned i = 0; i < N; i++) {
+      CHECK(vkBindImageMemory(dev, images[i], mem, offsets[i]));
+      VkImageViewCreateInfo vci = {
+         .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+         .image = images[i],
+         .viewType = shapes[i].type == VK_IMAGE_TYPE_3D ? VK_IMAGE_VIEW_TYPE_3D
+                     : shapes[i].layers > 1             ? VK_IMAGE_VIEW_TYPE_2D_ARRAY
+                                                        : VK_IMAGE_VIEW_TYPE_2D,
+         .format = shapes[i].format,
+         .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, shapes[i].levels,
+                              0, shapes[i].layers},
+      };
+      CHECK(vkCreateImageView(dev, &vci, NULL, &views[i]));
+   }
+
+   VkBufferCreateInfo bci = {
+      .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+      .size = staging,
+      .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+   };
+   VkBuffer sbuf;
+   CHECK(vkCreateBuffer(dev, &bci, NULL, &sbuf));
+   VkMemoryRequirements bmr;
+   vkGetBufferMemoryRequirements(dev, sbuf, &bmr);
+   mai.allocationSize = bmr.size;
+   mai.memoryTypeIndex = find_memory(pd, bmr.memoryTypeBits);
+   VkDeviceMemory smem;
+   CHECK(vkAllocateMemory(dev, &mai, NULL, &smem));
+   CHECK(vkBindBufferMemory(dev, sbuf, smem, 0));
+
+   VkCommandBufferAllocateInfo cbai = {
+      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+      .commandPool = pool,
+      .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+      .commandBufferCount = 1,
+   };
+   VkCommandBuffer cmd;
+   CHECK(vkAllocateCommandBuffers(dev, &cbai, &cmd));
+   VkCommandBufferBeginInfo bi = {
+      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+   };
+   CHECK(vkBeginCommandBuffer(cmd, &bi));
+   for (unsigned i = 0; i < N; i++) {
+      for (uint32_t level = 0; level < shapes[i].levels; level++) {
+         uint32_t w = shapes[i].extent.width >> level;
+         uint32_t h = shapes[i].extent.height >> level;
+         uint32_t d = shapes[i].extent.depth >> level;
+         VkBufferImageCopy region = {
+            .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, level, 0,
+                                 shapes[i].layers},
+            .imageExtent = {w ? w : 1, h ? h : 1, d ? d : 1},
+         };
+         vkCmdCopyBufferToImage(cmd, sbuf, images[i],
+                                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+         vkCmdCopyImageToBuffer(cmd, images[i],
+                                VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, sbuf, 1,
+                                &region);
+      }
+      if (!(shapes[i].usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT))
+         continue;
+      VkRenderingAttachmentInfo ca = {
+         .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+         .imageView = views[i],
+         .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+         .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+         .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+      };
+      VkRenderingInfo ri = {
+         .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
+         .renderArea = {{0, 0},
+                        {shapes[i].extent.width, shapes[i].extent.height}},
+         .layerCount = 1,
+         .colorAttachmentCount = 1,
+         .pColorAttachments = &ca,
+      };
+      vkCmdBeginRendering(cmd, &ri);
+      vkCmdEndRendering(cmd);
+   }
+   CHECK(vkEndCommandBuffer(cmd));
+   VkSubmitInfo si = {
+      .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+      .commandBufferCount = 1,
+      .pCommandBuffers = &cmd,
+   };
+   CHECK(vkQueueSubmit(queue, 1, &si, VK_NULL_HANDLE));
+   CHECK(vkQueueWaitIdle(queue));
+   printf("ok linear-images\n");
+   return 0;
+}
+
+/* Only at the end of main: extra devices must not renumber old MSL files. */
+static void *
+descriptor_empty_updates(void *arg)
+{
+   PFN_vkUpdateDescriptorSets update = (PFN_vkUpdateDescriptorSets)gipa(inst, "vkUpdateDescriptorSets");
+   VkDevice device = *(VkDevice *)arg;
+   for (int i = 0; i < 1000; i++)
+      update(device, 0, NULL, 0, NULL);
+   return NULL;
+}
+
+static void *VKAPI_PTR
+descriptor_fail_alloc(void *data, size_t size, size_t alignment, VkSystemAllocationScope scope)
+{
+   (void)data; (void)size; (void)alignment; (void)scope;
+   return NULL;
+}
+static void *VKAPI_PTR
+descriptor_fail_realloc(void *data, void *old, size_t size, size_t alignment,
+                         VkSystemAllocationScope scope)
+{
+   (void)old;
+   return descriptor_fail_alloc(data, size, alignment, scope);
+}
+static void VKAPI_PTR descriptor_fail_free(void *data, void *ptr) { (void)data; free(ptr); }
+
+/* Permit the device allocation, then fail common-runtime initialization. */
+static void *VKAPI_PTR
+descriptor_init_fail_alloc(void *data, size_t size, size_t alignment,
+                           VkSystemAllocationScope scope)
+{
+   (void)scope;
+   if (!*(unsigned *)data) return NULL;
+   --*(unsigned *)data;
+   void *ptr = NULL;
+   return posix_memalign(&ptr, alignment < sizeof(void *) ? sizeof(void *) : alignment,
+                         size) ? NULL : ptr;
+}
+
+static int
+check_descriptor_stats(VkPhysicalDevice pd)
+{
+   if (!getenv("KK_HOST_DESCRIPTOR_TEST"))
+      return 0;
+   fprintf(stderr, "descriptor-fixture begin\n");
+   DPROC(vkCreateDevice); DPROC(vkDestroyDevice); DPROC(vkGetDeviceQueue);
+   DPROC(vkQueueSubmit); DPROC(vkQueueWaitIdle);
+   DPROC(vkCreateDescriptorSetLayout); DPROC(vkDestroyDescriptorSetLayout);
+   DPROC(vkCreateDescriptorPool); DPROC(vkDestroyDescriptorPool);
+   DPROC(vkAllocateDescriptorSets); DPROC(vkFreeDescriptorSets); DPROC(vkResetDescriptorPool);
+   DPROC(vkUpdateDescriptorSets); DPROC(vkUpdateDescriptorSetWithTemplate);
+   DPROC(vkCreateDescriptorUpdateTemplate); DPROC(vkDestroyDescriptorUpdateTemplate);
+   DPROC(vkCreatePipelineLayout); DPROC(vkDestroyPipelineLayout);
+   DPROC(vkCreateCommandPool); DPROC(vkDestroyCommandPool); DPROC(vkAllocateCommandBuffers);
+   DPROC(vkBeginCommandBuffer); DPROC(vkEndCommandBuffer);
+   DPROC(vkCmdBindDescriptorSets); DPROC(vkCmdPushDescriptorSetKHR);
+   DPROC(vkCmdPushDescriptorSetWithTemplateKHR);
+   float priority = 1;
+   VkDeviceQueueCreateInfo qci = {.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
+      .queueCount = 1, .pQueuePriorities = &priority};
+   const char *exts[] = {"VK_KHR_push_descriptor", "VK_EXT_robustness2"};
+   VkPhysicalDeviceRobustness2FeaturesEXT robustness = {
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT,
+      .nullDescriptor = VK_TRUE};
+   VkPhysicalDeviceInlineUniformBlockFeatures inline_features = {
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_INLINE_UNIFORM_BLOCK_FEATURES,
+      .pNext = &robustness, .inlineUniformBlock = VK_TRUE};
+   VkDeviceCreateInfo dci = {.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
+      .pNext = &inline_features, .queueCreateInfoCount = 1, .pQueueCreateInfos = &qci,
+      .enabledExtensionCount = 2, .ppEnabledExtensionNames = exts};
+   VkAllocationCallbacks fail = {.pfnAllocation = descriptor_fail_alloc,
+      .pfnReallocation = descriptor_fail_realloc, .pfnFree = descriptor_fail_free};
+   VkDevice failed_device = VK_NULL_HANDLE;
+   if (vkCreateDevice(pd, &dci, &fail, &failed_device) != VK_ERROR_OUT_OF_HOST_MEMORY)
+      return 1;
+   unsigned remaining = 1;
+   VkAllocationCallbacks init_fail = fail;
+   init_fail.pUserData = &remaining;
+   init_fail.pfnAllocation = descriptor_init_fail_alloc;
+   if (vkCreateDevice(pd, &dci, &init_fail, &failed_device) != VK_ERROR_OUT_OF_HOST_MEMORY)
+      return 1;
+   VkDevice devices[2];
+   CHECK(vkCreateDevice(pd, &dci, NULL, &devices[0]));
+   CHECK(vkCreateDevice(pd, &dci, NULL, &devices[1]));
+   for (int index = 0; index < 2; index++) {
+      VkDevice d = devices[index];
+      VkQueue queue;
+      vkGetDeviceQueue(d, 0, 0, &queue);
+      CHECK(vkQueueSubmit(queue, 0, NULL, VK_NULL_HANDLE));
+      CHECK(vkQueueWaitIdle(queue));
+      if (index) { vkDestroyDevice(d, NULL); continue; }
+      VkDescriptorSetLayoutBinding bindings[] = {
+         {.binding = 0, .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+          .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_ALL},
+         {.binding = 1, .descriptorType = VK_DESCRIPTOR_TYPE_INLINE_UNIFORM_BLOCK,
+          .descriptorCount = 16, .stageFlags = VK_SHADER_STAGE_ALL},
+         {.binding = 2, .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,
+          .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_ALL}};
+      VkDescriptorSetLayoutCreateInfo lci = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+         .bindingCount = 3, .pBindings = bindings};
+      VkDescriptorSetLayout layouts[2];
+      CHECK(vkCreateDescriptorSetLayout(d, &lci, NULL, &layouts[0]));
+      layouts[1] = layouts[0];
+      VkDescriptorPoolSize sizes[] = {{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 2},
+         {VK_DESCRIPTOR_TYPE_INLINE_UNIFORM_BLOCK, 32},
+         {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 2}};
+      VkDescriptorPoolInlineUniformBlockCreateInfo inline_pool = {
+         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_INLINE_UNIFORM_BLOCK_CREATE_INFO,
+         .maxInlineUniformBlockBindings = 2};
+      VkDescriptorPoolCreateInfo pci = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+         .pNext = &inline_pool, .flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT,
+         .maxSets = 2, .poolSizeCount = 3, .pPoolSizes = sizes};
+      VkDescriptorPool pool, failed_pool;
+      if (vkCreateDescriptorPool(d, &pci, &fail, &failed_pool) != VK_ERROR_OUT_OF_HOST_MEMORY)
+         return 1;
+      CHECK(vkCreateDescriptorPool(d, &pci, NULL, &pool));
+      VkDescriptorSetAllocateInfo ai = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+         .descriptorPool = pool, .descriptorSetCount = 2, .pSetLayouts = layouts};
+      VkDescriptorSet sets[2];
+      CHECK(vkAllocateDescriptorSets(d, &ai, sets));
+      VkDescriptorBufferInfo buffer = {.range = VK_WHOLE_SIZE}; /* null descriptor */
+      unsigned data[4] = {1,2,3,4};
+      VkWriteDescriptorSetInlineUniformBlock in = {
+         .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_INLINE_UNIFORM_BLOCK,
+         .dataSize = sizeof(data), .pData = data};
+      VkWriteDescriptorSet writes[3];
+      for (int i = 0; i < 3; i++) writes[i] = (VkWriteDescriptorSet){
+         .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = sets[0],
+         .dstBinding = i, .descriptorType = bindings[i].descriptorType,
+         .descriptorCount = bindings[i].descriptorCount, .pBufferInfo = &buffer};
+      writes[1].pNext = &in;
+      VkCopyDescriptorSet copies[2];
+      for (int i = 0; i < 2; i++) copies[i] = (VkCopyDescriptorSet){
+         .sType = VK_STRUCTURE_TYPE_COPY_DESCRIPTOR_SET,
+         .srcSet = sets[0], .dstSet = sets[1], .srcBinding = i, .dstBinding = i,
+         .descriptorCount = bindings[i].descriptorCount};
+      vkUpdateDescriptorSets(d, 3, writes, 2, copies);
+      pthread_t a, b;
+      if (pthread_create(&a, NULL, descriptor_empty_updates, &d) ||
+          pthread_create(&b, NULL, descriptor_empty_updates, &d) ||
+          pthread_join(a, NULL) || pthread_join(b, NULL)) return 1;
+      struct {VkDescriptorBufferInfo buffer; unsigned data[4];} payload = {buffer, {1,2,3,4}};
+      VkDescriptorUpdateTemplateEntry entries[] = {
+         {.dstBinding = 0, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+          .offset = 0, .stride = sizeof(buffer)},
+         {.dstBinding = 1, .descriptorCount = 16, .descriptorType = VK_DESCRIPTOR_TYPE_INLINE_UNIFORM_BLOCK,
+          .offset = offsetof(__typeof__(payload), data), .stride = 1}};
+      VkDescriptorUpdateTemplateCreateInfo ti = {
+         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_UPDATE_TEMPLATE_CREATE_INFO,
+         .descriptorUpdateEntryCount = 2, .pDescriptorUpdateEntries = entries,
+         .templateType = VK_DESCRIPTOR_UPDATE_TEMPLATE_TYPE_DESCRIPTOR_SET,
+         .descriptorSetLayout = layouts[0]};
+      VkDescriptorUpdateTemplate t;
+      CHECK(vkCreateDescriptorUpdateTemplate(d, &ti, NULL, &t));
+      vkUpdateDescriptorSetWithTemplate(d, sets[0], t, &payload);
+      vkDestroyDescriptorUpdateTemplate(d, t, NULL);
+      VkPipelineLayoutCreateInfo plci = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+         .setLayoutCount = 1, .pSetLayouts = layouts};
+      VkPipelineLayout pl;
+      CHECK(vkCreatePipelineLayout(d, &plci, NULL, &pl));
+      VkCommandPoolCreateInfo cpci = {.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
+      VkCommandPool cp;
+      CHECK(vkCreateCommandPool(d, &cpci, NULL, &cp));
+      VkCommandBufferAllocateInfo cbai = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+         .commandPool = cp, .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY, .commandBufferCount = 1};
+      VkCommandBuffer cb;
+      CHECK(vkAllocateCommandBuffers(d, &cbai, &cb));
+      VkCommandBufferBeginInfo bi = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+      CHECK(vkBeginCommandBuffer(cb, &bi));
+      uint32_t offset = 16;
+      vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pl, 0, 1, sets, 1, &offset);
+      lci.bindingCount = 1;
+      lci.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR;
+      VkDescriptorSetLayout push_layout;
+      CHECK(vkCreateDescriptorSetLayout(d, &lci, NULL, &push_layout));
+      plci.pSetLayouts = &push_layout;
+      VkPipelineLayout push_pl;
+      CHECK(vkCreatePipelineLayout(d, &plci, NULL, &push_pl));
+      writes[0].dstSet = VK_NULL_HANDLE;
+      vkCmdPushDescriptorSetKHR(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, push_pl, 0, 1, writes);
+      ti.descriptorUpdateEntryCount = 1;
+      ti.templateType = VK_DESCRIPTOR_UPDATE_TEMPLATE_TYPE_PUSH_DESCRIPTORS_KHR;
+      ti.pipelineLayout = push_pl;
+      ti.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+      CHECK(vkCreateDescriptorUpdateTemplate(d, &ti, NULL, &t));
+      vkCmdPushDescriptorSetWithTemplateKHR(cb, t, push_pl, 0, &payload);
+      CHECK(vkEndCommandBuffer(cb));
+      vkDestroyDescriptorUpdateTemplate(d, t, NULL);
+      vkDestroyCommandPool(d, cp, NULL);
+      vkDestroyPipelineLayout(d, pl, NULL);
+      vkDestroyPipelineLayout(d, push_pl, NULL);
+      vkDestroyDescriptorSetLayout(d, push_layout, NULL);
+      CHECK(vkFreeDescriptorSets(d, pool, 1, sets));
+      CHECK(vkResetDescriptorPool(d, pool, 0));
+      vkDestroyDescriptorPool(d, pool, NULL);
+      vkDestroyDescriptorSetLayout(d, layouts[0], NULL);
+      /* First large set succeeds, second fails: rollback is inside allocate,
+       * never a spurious external free call. A later allocation proves rollback. */
+      bindings[0].descriptorCount = 4096;
+      lci.flags = 0;
+      CHECK(vkCreateDescriptorSetLayout(d, &lci, NULL, &layouts[0]));
+      layouts[1] = layouts[0];
+      VkDescriptorPoolSize large_size = {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 4096};
+      pci.pNext = NULL; pci.maxSets = 1; pci.poolSizeCount = 1; pci.pPoolSizes = &large_size;
+      CHECK(vkCreateDescriptorPool(d, &pci, NULL, &pool));
+      ai.descriptorPool = pool;
+      VkResult result = vkAllocateDescriptorSets(d, &ai, sets);
+      if (result != VK_ERROR_OUT_OF_POOL_MEMORY || sets[0] || sets[1]) return 1;
+      ai.descriptorSetCount = 1;
+      CHECK(vkAllocateDescriptorSets(d, &ai, sets));
+      vkDestroyDescriptorPool(d, pool, NULL); /* destroys the live recovered set */
+      vkDestroyDescriptorSetLayout(d, layouts[0], NULL);
+      vkDestroyDevice(d, NULL);
+   }
+   fprintf(stderr, "descriptor-fixture end\n");
+   puts("ok descriptor_stats API: mixed writes/copies, inline bytes, template/bind/push, rollback, threads, two devices");
+   return 0;
+}
+
+/* A fence forces the mock's opt-in deferred feedback to drain before host
+ * observation and before any referenced resources can be destroyed. */
+static void
+descriptor_replay_submit(VkDevice d, VkQueue queue, const VkSubmitInfo *submit)
+{
+   DPROC(vkCreateFence); DPROC(vkDestroyFence); DPROC(vkWaitForFences);
+   DPROC(vkQueueSubmit);
+   VkFenceCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+   VkFence fence;
+   CHECK(vkCreateFence(d, &ci, NULL, &fence));
+   CHECK(vkQueueSubmit(queue, 1, submit, fence));
+   CHECK(vkWaitForFences(d, 1, &fence, VK_TRUE, 30000000000ull));
+   vkDestroyFence(d, fence, NULL);
+}
+
+/* Capture real native telemetry only after all host/mock work is idle. An empty
+ * submit invokes the normal reporter; waiting past its one-second throttle
+ * avoids modifying production state or parsing a live stderr stream. */
+static void
+descriptor_replay_snapshot(VkDevice d, VkQueue queue, const char *phase)
+{
+   DPROC(vkQueueWaitIdle);
+   CHECK(vkQueueWaitIdle(queue));
+   sleep(2);
+   fprintf(stderr, "descriptor-replay phase=%s begin\n", phase);
+   VkSubmitInfo empty = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO};
+   descriptor_replay_submit(d, queue, &empty);
+   CHECK(vkQueueWaitIdle(queue));
+   fprintf(stderr, "descriptor-replay phase=%s end\n", phase);
+}
+
+static int
+check_descriptor_replay(VkPhysicalDevice pd)
+{
+   if (!getenv("KK_HOST_DESCRIPTOR_TEST"))
+      return 0;
+   fprintf(stderr, "descriptor-replay begin\n");
+   if (setenv("KK_MOCK_DEFER_FEEDBACK", "1", 1))
+      return 1;
+   DPROC(vkCreateDevice); DPROC(vkDestroyDevice); DPROC(vkGetDeviceQueue);
+   DPROC(vkCreateDescriptorSetLayout); DPROC(vkDestroyDescriptorSetLayout);
+   DPROC(vkCreateDescriptorPool); DPROC(vkDestroyDescriptorPool);
+   DPROC(vkAllocateDescriptorSets); DPROC(vkUpdateDescriptorSets);
+   DPROC(vkCreatePipelineLayout); DPROC(vkDestroyPipelineLayout);
+   DPROC(vkCreateDescriptorUpdateTemplate); DPROC(vkDestroyDescriptorUpdateTemplate);
+   DPROC(vkCreateCommandPool); DPROC(vkDestroyCommandPool); DPROC(vkAllocateCommandBuffers);
+   DPROC(vkBeginCommandBuffer); DPROC(vkEndCommandBuffer); DPROC(vkCmdExecuteCommands);
+   DPROC(vkCmdBindDescriptorSets); DPROC(vkCmdPushDescriptorSetKHR);
+   DPROC(vkCmdPushDescriptorSetWithTemplateKHR); DPROC(vkQueueWaitIdle);
+   float priority = 1;
+   VkDeviceQueueCreateInfo qci = {.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
+      .queueCount = 1, .pQueuePriorities = &priority};
+   const char *exts[] = {"VK_KHR_push_descriptor", "VK_EXT_robustness2"};
+   VkPhysicalDeviceRobustness2FeaturesEXT robustness = {
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT,
+      .nullDescriptor = VK_TRUE};
+   VkDeviceCreateInfo dci = {.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
+      .pNext = &robustness, .queueCreateInfoCount = 1, .pQueueCreateInfos = &qci,
+      .enabledExtensionCount = 2, .ppEnabledExtensionNames = exts};
+   VkDevice d;
+   CHECK(vkCreateDevice(pd, &dci, NULL, &d));
+   VkQueue queue;
+   vkGetDeviceQueue(d, 0, 0, &queue);
+   VkDescriptorSetLayoutBinding binding = {.binding = 0,
+      .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptorCount = 1,
+      .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT};
+   VkDescriptorSetLayoutCreateInfo lci = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+      .bindingCount = 1, .pBindings = &binding};
+   VkDescriptorSetLayout layout, push_layout;
+   CHECK(vkCreateDescriptorSetLayout(d, &lci, NULL, &layout));
+   lci.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR;
+   CHECK(vkCreateDescriptorSetLayout(d, &lci, NULL, &push_layout));
+   VkPipelineLayoutCreateInfo plci = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+      .setLayoutCount = 1, .pSetLayouts = &layout};
+   VkPipelineLayout pl, push_pl;
+   CHECK(vkCreatePipelineLayout(d, &plci, NULL, &pl));
+   plci.pSetLayouts = &push_layout;
+   CHECK(vkCreatePipelineLayout(d, &plci, NULL, &push_pl));
+   VkDescriptorPoolSize size = {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1};
+   VkDescriptorPoolCreateInfo pci = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+      .maxSets = 1, .poolSizeCount = 1, .pPoolSizes = &size};
+   VkDescriptorPool pool;
+   CHECK(vkCreateDescriptorPool(d, &pci, NULL, &pool));
+   VkDescriptorSetAllocateInfo ai = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+      .descriptorPool = pool, .descriptorSetCount = 1, .pSetLayouts = &layout};
+   VkDescriptorSet set;
+   CHECK(vkAllocateDescriptorSets(d, &ai, &set));
+   VkDescriptorBufferInfo buffer = {.range = VK_WHOLE_SIZE}; /* enabled nullDescriptor */
+   VkWriteDescriptorSet write = {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+      .dstSet = set, .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+      .descriptorCount = 1, .pBufferInfo = &buffer};
+   vkUpdateDescriptorSets(d, 1, &write, 0, NULL);
+   write.dstSet = VK_NULL_HANDLE;
+   VkDescriptorUpdateTemplateEntry entry = {.descriptorCount = 1,
+      .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .stride = sizeof(buffer)};
+   VkDescriptorUpdateTemplateCreateInfo ti = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_UPDATE_TEMPLATE_CREATE_INFO,
+      .descriptorUpdateEntryCount = 1, .pDescriptorUpdateEntries = &entry,
+      .templateType = VK_DESCRIPTOR_UPDATE_TEMPLATE_TYPE_PUSH_DESCRIPTORS_KHR,
+      .pipelineBindPoint = VK_PIPELINE_BIND_POINT_COMPUTE, .pipelineLayout = push_pl};
+   VkDescriptorUpdateTemplate t;
+   CHECK(vkCreateDescriptorUpdateTemplate(d, &ti, NULL, &t));
+   VkCommandPoolCreateInfo cpci = {.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
+   VkCommandPool cp;
+   CHECK(vkCreateCommandPool(d, &cpci, NULL, &cp));
+   VkCommandBufferAllocateInfo cbai = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+      .commandPool = cp, .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY, .commandBufferCount = 2};
+   VkCommandBuffer primary[2], secondary;
+   CHECK(vkAllocateCommandBuffers(d, &cbai, primary));
+   cbai.level = VK_COMMAND_BUFFER_LEVEL_SECONDARY;
+   cbai.commandBufferCount = 1;
+   CHECK(vkAllocateCommandBuffers(d, &cbai, &secondary));
+   VkCommandBufferInheritanceInfo inheritance = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_INHERITANCE_INFO};
+   VkCommandBufferBeginInfo bi = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+      .flags = VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT, .pInheritanceInfo = &inheritance};
+   CHECK(vkBeginCommandBuffer(secondary, &bi));
+   vkCmdBindDescriptorSets(secondary, VK_PIPELINE_BIND_POINT_COMPUTE, pl, 0, 1, &set, 0, NULL);
+   vkCmdPushDescriptorSetKHR(secondary, VK_PIPELINE_BIND_POINT_COMPUTE, push_pl, 0, 1, &write);
+   vkCmdPushDescriptorSetWithTemplateKHR(secondary, t, push_pl, 0, &buffer);
+   CHECK(vkEndCommandBuffer(secondary));
+   descriptor_replay_snapshot(d, queue, "secondary-recorded");
+   bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+   bi.pInheritanceInfo = NULL;
+   CHECK(vkBeginCommandBuffer(primary[0], &bi));
+   vkCmdExecuteCommands(primary[0], 1, &secondary);
+   descriptor_replay_snapshot(d, queue, "secondary-executed-once");
+   vkCmdExecuteCommands(primary[0], 1, &secondary);
+   CHECK(vkEndCommandBuffer(primary[0]));
+   descriptor_replay_snapshot(d, queue, "secondary-executed-twice");
+   VkSubmitInfo submit = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+      .commandBufferCount = 1, .pCommandBuffers = &primary[0]};
+   descriptor_replay_submit(d, queue, &submit);
+   descriptor_replay_snapshot(d, queue, "secondary-primary-submitted");
+   /* No ONE_TIME_SUBMIT: valid to resubmit after each wait. Keep every set,
+    * layout, template and secondary alive until all submissions complete. */
+   bi.flags = 0;
+   CHECK(vkBeginCommandBuffer(primary[1], &bi));
+   vkCmdBindDescriptorSets(primary[1], VK_PIPELINE_BIND_POINT_COMPUTE, pl, 0, 1, &set, 0, NULL);
+   vkCmdPushDescriptorSetKHR(primary[1], VK_PIPELINE_BIND_POINT_COMPUTE, push_pl, 0, 1, &write);
+   vkCmdPushDescriptorSetWithTemplateKHR(primary[1], t, push_pl, 0, &buffer);
+   CHECK(vkEndCommandBuffer(primary[1]));
+   descriptor_replay_snapshot(d, queue, "reusable-recorded");
+   submit.pCommandBuffers = &primary[1];
+   const char *phases[] = {"reusable-submit-1", "reusable-submit-2", "reusable-submit-3"};
+   for (unsigned i = 0; i < 3; i++) {
+      descriptor_replay_submit(d, queue, &submit);
+      descriptor_replay_snapshot(d, queue, phases[i]);
+   }
+   CHECK(vkQueueWaitIdle(queue));
+   vkDestroyCommandPool(d, cp, NULL);
+   vkDestroyDescriptorUpdateTemplate(d, t, NULL);
+   vkDestroyPipelineLayout(d, pl, NULL);
+   vkDestroyPipelineLayout(d, push_pl, NULL);
+   vkDestroyDescriptorPool(d, pool, NULL);
+   vkDestroyDescriptorSetLayout(d, layout, NULL);
+   vkDestroyDescriptorSetLayout(d, push_layout, NULL);
+   vkDestroyDevice(d, NULL);
+   unsetenv("KK_MOCK_DEFER_FEEDBACK");
+   fprintf(stderr, "descriptor-replay end\n");
+   puts("ok descriptor replay: deferred secondary bind/push/template-push, repeated execution and reusable-primary resubmission");
+   return 0;
+}
+
 int
 main(int argc, char **argv)
 {
@@ -275,6 +2073,20 @@ main(int argc, char **argv)
                             .apiVersion = VK_API_VERSION_1_3};
    VkInstanceCreateInfo ici = {.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
                                .pApplicationInfo = &app};
+   if (check_gpu_log())
+      return 1;
+   if (check_pass_rules())
+      return 1;
+   if (check_device_type())
+      return 1;
+   if (check_capture_timestamp_pool())
+      return 1;
+   if (check_budget_cap(&ici))
+      return 1;
+   if (check_heap_cap(&ici))
+      return 1;
+   if (check_memory_priority(&ici))
+      return 1;
    CHECK(vkCreateInstance(&ici, NULL, &inst));
 
    IPROC(vkEnumeratePhysicalDevices);
@@ -290,8 +2102,12 @@ main(int argc, char **argv)
    IPROC(vkGetPhysicalDeviceFeatures2);
    VkPhysicalDeviceProperties props;
    vkGetPhysicalDeviceProperties(pd, &props);
+   VkPhysicalDeviceShaderAtomicFloatFeaturesEXT atomic_float_feat = {
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_ATOMIC_FLOAT_FEATURES_EXT,
+   };
    VkPhysicalDeviceTransformFeedbackFeaturesEXT xfb_feat = {
       .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TRANSFORM_FEEDBACK_FEATURES_EXT,
+      .pNext = &atomic_float_feat,
    };
    VkPhysicalDeviceProvokingVertexFeaturesEXT pv_feat = {
       .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROVOKING_VERTEX_FEATURES_EXT,
@@ -317,6 +2133,50 @@ main(int argc, char **argv)
       fprintf(stderr, "geometryShader not exposed\n");
       return 1;
    }
+   /* PLA-437: MSL 4.0, so no shared float atomic add, unless
+    * MESA_KK_EXPERIMENTAL=msl41 (the mock is iOS 27, which has 4.1). */
+   if (atomic_float_feat.shaderSharedFloat32AtomicAdd != msl41_wanted()) {
+      fprintf(stderr, "shaderSharedFloat32AtomicAdd %d with MESA_KK_EXPERIMENTAL=%s\n",
+              atomic_float_feat.shaderSharedFloat32AtomicAdd,
+              getenv("MESA_KK_EXPERIMENTAL") ? getenv("MESA_KK_EXPERIMENTAL") : "");
+      return 1;
+   }
+   /* PLA-72: float controls 2, VK_KHR_shader_float_controls2 and signed
+    * zero, Inf and NaN preservation for 16- and 32-bit floats are reported
+    * unless MESA_KK_EXPERIMENTAL=no_fp_preserve. */
+   {
+      IPROC(vkGetPhysicalDeviceProperties2);
+      VkPhysicalDeviceShaderFloatControls2FeaturesKHR fc2 = {
+         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT_CONTROLS_2_FEATURES_KHR,
+      };
+      VkPhysicalDeviceFeatures2 fc2f = {
+         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+         .pNext = &fc2,
+      };
+      vkGetPhysicalDeviceFeatures2(pd, &fc2f);
+      VkPhysicalDeviceVulkan12Properties p12 = {
+         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_PROPERTIES,
+      };
+      VkPhysicalDeviceProperties2 p2 = {
+         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
+         .pNext = &p12,
+      };
+      vkGetPhysicalDeviceProperties2(pd, &p2);
+      const bool want = !no_fp_preserve_wanted();
+      if (fc2.shaderFloatControls2 != want ||
+          has_device_extension(pd, "VK_KHR_shader_float_controls2") != want ||
+          p12.shaderSignedZeroInfNanPreserveFloat16 != want ||
+          p12.shaderSignedZeroInfNanPreserveFloat32 != want) {
+         fprintf(stderr, "float controls: shaderFloatControls2 %u, "
+                         "shaderSignedZeroInfNanPreserveFloat16 %u and 32 %u "
+                         "with MESA_KK_EXPERIMENTAL=%s\n",
+                 fc2.shaderFloatControls2,
+                 p12.shaderSignedZeroInfNanPreserveFloat16,
+                 p12.shaderSignedZeroInfNanPreserveFloat32,
+                 getenv("MESA_KK_EXPERIMENTAL") ? getenv("MESA_KK_EXPERIMENTAL") : "");
+         return 1;
+      }
+   }
 
    float prio = 1.0f;
    VkDeviceQueueCreateInfo qci = {
@@ -324,14 +2184,58 @@ main(int argc, char **argv)
       .queueCount = 1,
       .pQueuePriorities = &prio,
    };
+   VkPhysicalDeviceVulkan12Features v12 = {
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
+      .hostQueryReset = VK_TRUE,
+   };
    VkPhysicalDeviceVulkan13Features v13 = {
       .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
+      .pNext = &v12,
       .dynamicRendering = VK_TRUE,
       .synchronization2 = VK_TRUE,
    };
+   VkPhysicalDeviceGraphicsPipelineLibraryFeaturesEXT gpl_enable = {
+      .sType =
+         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GRAPHICS_PIPELINE_LIBRARY_FEATURES_EXT,
+      .pNext = &v13,
+      .graphicsPipelineLibrary = VK_TRUE,
+   };
+   /* PLA-424: VK_EXT_graphics_pipeline_library only with
+    * MESA_KK_EXPERIMENTAL=gpl; without it nothing changes. */
+   const bool gpl = has_device_extension(pd, "VK_EXT_graphics_pipeline_library");
+   if (gpl != gpl_wanted()) {
+      fprintf(stderr, "VK_EXT_graphics_pipeline_library %s with MESA_KK_EXPERIMENTAL=%s\n",
+              gpl ? "exposed" : "not exposed",
+              getenv("MESA_KK_EXPERIMENTAL") ? getenv("MESA_KK_EXPERIMENTAL") : "");
+      return 1;
+   }
+   /* PLA-431: VK_EXT_shader_module_identifier, and its feature, only with
+    * MESA_KK_EXPERIMENTAL=module_identifier. */
+   VkPhysicalDeviceShaderModuleIdentifierFeaturesEXT module_id_feat = {
+      .sType =
+         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_MODULE_IDENTIFIER_FEATURES_EXT,
+   };
+   VkPhysicalDeviceFeatures2 module_id_f2 = {
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+      .pNext = &module_id_feat,
+   };
+   vkGetPhysicalDeviceFeatures2(pd, &module_id_f2);
+   const bool module_id =
+      has_device_extension(pd, "VK_EXT_shader_module_identifier");
+   if (module_id != module_identifier_wanted() ||
+       module_id_feat.shaderModuleIdentifier != module_id) {
+      fprintf(stderr, "VK_EXT_shader_module_identifier %d, shaderModuleIdentifier "
+              "%d with MESA_KK_EXPERIMENTAL=%s\n",
+              module_id, module_id_feat.shaderModuleIdentifier,
+              getenv("MESA_KK_EXPERIMENTAL") ? getenv("MESA_KK_EXPERIMENTAL") : "");
+      return 1;
+   }
+   module_id_feat.pNext = gpl ? (void *)&gpl_enable : (void *)&v13;
    VkPhysicalDeviceTransformFeedbackFeaturesEXT xfb_enable = {
       .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TRANSFORM_FEEDBACK_FEATURES_EXT,
-      .pNext = &v13,
+      .pNext = module_id ? (void *)&module_id_feat
+               : gpl     ? (void *)&gpl_enable
+                         : (void *)&v13,
       .transformFeedback = VK_TRUE,
       .geometryStreams = VK_TRUE,
    };
@@ -346,19 +2250,32 @@ main(int argc, char **argv)
       .fillModeNonSolid = f2.features.fillModeNonSolid,
       .shaderClipDistance = VK_TRUE,
       .shaderCullDistance = VK_TRUE,
+      /* check_gpl's dual-source blend and logic op links */
+      .dualSrcBlend = gpl,
+      .logicOp = gpl,
    };
-   const char *exts[] = {"VK_EXT_transform_feedback", "VK_EXT_provoking_vertex"};
+   const char *exts[5] = {"VK_EXT_transform_feedback"};
+   uint32_t next = 1;
+   if (pv_feat.provokingVertexLast)
+      exts[next++] = "VK_EXT_provoking_vertex";
+   if (gpl) {
+      exts[next++] = "VK_KHR_pipeline_library";
+      exts[next++] = "VK_EXT_graphics_pipeline_library";
+   }
+   if (module_id)
+      exts[next++] = "VK_EXT_shader_module_identifier";
    VkDeviceCreateInfo dci = {
       .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
       .pNext = &pv_enable,
       .queueCreateInfoCount = 1,
       .pQueueCreateInfos = &qci,
-      .enabledExtensionCount = pv_feat.provokingVertexLast ? 2 : 1,
+      .enabledExtensionCount = next,
       .ppEnabledExtensionNames = exts,
       .pEnabledFeatures = &feats,
    };
    IPROC(vkCreateDevice);
    CHECK(vkCreateDevice(pd, &dci, NULL, &dev));
+   device_info = &dci;
 
    DPROC(vkGetDeviceQueue);
    DPROC(vkCreateImage);
@@ -441,7 +2358,8 @@ main(int argc, char **argv)
                VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
                VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT |
                VK_BUFFER_USAGE_TRANSFORM_FEEDBACK_BUFFER_BIT_EXT |
-               VK_BUFFER_USAGE_TRANSFORM_FEEDBACK_COUNTER_BUFFER_BIT_EXT,
+               VK_BUFFER_USAGE_TRANSFORM_FEEDBACK_COUNTER_BUFFER_BIT_EXT |
+               VK_BUFFER_USAGE_TRANSFER_DST_BIT,
    };
    VkBuffer buf;
    CHECK(vkCreateBuffer(dev, &bci, NULL, &buf));
@@ -492,6 +2410,9 @@ main(int argc, char **argv)
    const VkPolygonMode FILL = VK_POLYGON_MODE_FILL;
    struct pipe_desc descs[] = {
       {"no-gs", "pass.vert", NULL, NULL, NULL, "color.frag", TRI, false, FIRST, FILL},
+      {"unroll-hint", "pass.vert", NULL, NULL, NULL, "unroll-hint.frag", TRI, false, FIRST, FILL},
+      {"dxvk-fp", "pass.vert", NULL, NULL, NULL, "dxvk-fp.frag", TRI, false, FIRST, FILL},
+      {"quad-merge", "pass.vert", NULL, NULL, NULL, "quad-merge.frag", TRI, false, FIRST, FILL},
       {"gs-passthrough", "pass.vert", NULL, NULL, "passthrough.geom", "color.frag", TRI, false, FIRST, FILL},
       {"gs-dynamic-count", "pass.vert", NULL, NULL, "dynamic.geom", "color.frag", VK_PRIMITIVE_TOPOLOGY_POINT_LIST, false, FIRST, FILL},
       {"gs-lines-out", "pass.vert", NULL, NULL, "lines.geom", "color.frag", TRI, false, FIRST, FILL},
@@ -541,6 +2462,25 @@ main(int argc, char **argv)
                          "feedback\n", descs[i].name);
          return 1;
       }
+      /* A loop with an unroll hint that would unroll into 64 nested ifs of
+       * a large body stays a loop, and a small hinted loop is still unrolled
+       * (mesa 0060): the fragment MSL has exactly one loop. */
+      if (!strcmp(descs[i].name, "unroll-hint") && msl_before >= 0) {
+         const int loops = msl_count_text(msl_before, msl_count(),
+                                          "for (uint64_t no_crash");
+         if (loops != 1) {
+            fprintf(stderr, "unroll-hint: %d loops in the MSL, not 1\n", loops);
+            return 1;
+         }
+      }
+      /* PLA-72: how the pipeline's MSL guards multiplications against
+       * NaN * 0 folding (workaround 14), how many math mode blocks it has
+       * and how many root table loads go through buf0 */
+      if (!strcmp(descs[i].name, "dxvk-fp") && msl_before >= 0)
+         printf("dxvk-fp: fmul_guards=%d math_modes=%d root_table_loads=%d\n",
+                msl_count_text(msl_before, msl_count(), "!&buf0.contents[0] ? 1 :"),
+                msl_count_text(msl_before, msl_count(), "#pragma METAL fp math_mode"),
+                msl_count_text(msl_before, msl_count(), "(constant uchar *)&buf0.contents[0] +"));
       bool tess = descs[i].tcs != NULL;
 
       VkCommandBufferAllocateInfo cbai = {
@@ -776,6 +2716,22 @@ main(int argc, char **argv)
          }
       }
 
+      /* An fcanonicalize kept by an FP32 flush-to-zero execution mode
+       * (shaders/texel-ftz.comp.spvasm), in the same layout: the pipeline
+       * builds and the MSL has no untranslated ALU op. */
+      {
+         int ftz_before = msl_count();
+         VkComputePipelineCreateInfo fci = cpci;
+         fci.stage.module = load_module("texel-ftz.comp");
+         VkPipeline fp;
+         CHECK(vkCreateComputePipelines(dev, VK_NULL_HANDLE, 1, &fci, NULL, &fp));
+         if (ftz_before >= 0 && msl_contains(ftz_before, msl_count(), "ALU ")) {
+            fprintf(stderr, "texel-ftz: an untranslated ALU op in the MSL\n");
+            return 1;
+         }
+         printf("ok texel-ftz\n");
+      }
+
       VkCommandBufferAllocateInfo cbai = {
          .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
          .commandPool = pool,
@@ -802,5 +2758,1619 @@ main(int argc, char **argv)
       CHECK(vkQueueWaitIdle(queue));
       printf("ok texel-buffers-unaligned\n");
    }
+
+   /* Size and level queries of an int and a uint texture
+    * (shaders/query-int.frag) name them int and uint (PLA-437). */
+   {
+      DPROC(vkCreateDescriptorSetLayout);
+      VkDescriptorSetLayoutBinding bindings[] = {
+         {0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT},
+         {1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT},
+      };
+      VkDescriptorSetLayoutCreateInfo dslci = {
+         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+         .bindingCount = 2,
+         .pBindings = bindings,
+      };
+      VkDescriptorSetLayout dsl;
+      CHECK(vkCreateDescriptorSetLayout(dev, &dslci, NULL, &dsl));
+      VkPipelineLayoutCreateInfo qplci = {
+         .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+         .setLayoutCount = 1,
+         .pSetLayouts = &dsl,
+      };
+      VkPipelineLayout qpl;
+      CHECK(vkCreatePipelineLayout(dev, &qplci, NULL, &qpl));
+
+      int msl_before = msl_count();
+      struct pipe_desc di = {"query-int", "pass.vert", NULL, NULL, NULL,
+                             "query-int.frag", TRI, false, FIRST, FILL};
+      make_pipeline(&di, qpl);
+      int msl_after = msl_count();
+      if (msl_before >= 0 &&
+          (!msl_contains(msl_before, msl_after, "texture2d<int>") ||
+           !msl_contains(msl_before, msl_after, "texture2d<uint>") ||
+           msl_contains(msl_before, msl_after, "texture2d<float>"))) {
+         fprintf(stderr, "query-int: not texture2d<int> and texture2d<uint> alone\n");
+         return 1;
+      }
+      printf("ok query-texture-type\n");
+   }
+
+   /* A defined sampler with an undefined image (shaders/undef-image.frag.spvasm):
+    * the pipeline builds, and descriptor lowering does not abort. */
+   {
+      DPROC(vkCreateDescriptorSetLayout);
+      VkDescriptorSetLayoutBinding binding = {
+         0, VK_DESCRIPTOR_TYPE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT};
+      VkDescriptorSetLayoutCreateInfo dslci = {
+         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+         .bindingCount = 1,
+         .pBindings = &binding,
+      };
+      VkDescriptorSetLayout dsl;
+      CHECK(vkCreateDescriptorSetLayout(dev, &dslci, NULL, &dsl));
+      VkPipelineLayoutCreateInfo uplci = {
+         .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+         .setLayoutCount = 1,
+         .pSetLayouts = &dsl,
+      };
+      VkPipelineLayout upl;
+      CHECK(vkCreatePipelineLayout(dev, &uplci, NULL, &upl));
+      struct pipe_desc d = {"undef-image", "pass.vert", NULL, NULL, NULL,
+                            "undef-image.frag", TRI, false, FIRST, FILL};
+      make_pipeline(&d, upl);
+      printf("ok undef-image\n");
+   }
+
+   /* Undefined storage images (shaders/undef-storage-image.frag.spvasm and
+    * .comp.spvasm): a read, a write, a size query and an atomic, in a
+    * fragment and a compute shader. Both pipelines build, and their MSL
+    * touches no texture. */
+   {
+      DPROC(vkCreateComputePipelines);
+      int msl_before = msl_count();
+      struct pipe_desc d = {"undef-storage-image", "pass.vert", NULL, NULL,
+                            NULL, "undef-storage-image.frag", TRI, false,
+                            FIRST, FILL};
+      make_pipeline(&d, layout);
+      VkComputePipelineCreateInfo cpci = {
+         .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+         .stage = {
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            .stage = VK_SHADER_STAGE_COMPUTE_BIT,
+            .module = load_module("undef-storage-image.comp"),
+            .pName = "main",
+         },
+         .layout = layout,
+      };
+      VkPipeline cp;
+      CHECK(vkCreateComputePipelines(dev, VK_NULL_HANDLE, 1, &cpci, NULL, &cp));
+      if (msl_before >= 0 && msl_contains(msl_before, msl_count(), "texture2d")) {
+         fprintf(stderr, "undef-storage-image: a texture in the MSL\n");
+         return 1;
+      }
+      printf("ok undef-storage-image\n");
+   }
+
+   /* A pipeline-statistics pool without pipelineStatisticsQuery, as Red Dead
+    * Redemption 2 makes (8 queries, all 11 counters): it is created, reset,
+    * begun and ended around a draw and copied, and its results are 11 zeros
+    * per query. The mock runs no GPU work, so the end's availability and the
+    * copy are only recorded; the host results are those of the reset. */
+   {
+      if (f2.features.pipelineStatisticsQuery) {
+         fprintf(stderr, "pipelineStatisticsQuery is reported\n");
+         return 1;
+      }
+      DPROC(vkResetQueryPool);
+      DPROC(vkCmdBeginQuery);
+      DPROC(vkCmdEndQuery);
+      DPROC(vkCmdCopyQueryPoolResults);
+      VkQueryPoolCreateInfo ci = {
+         .sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,
+         .queryType = VK_QUERY_TYPE_PIPELINE_STATISTICS,
+         .queryCount = 8,
+         .pipelineStatistics = 0x7ff,
+      };
+      VkQueryPool stats;
+      CHECK(vkCreateQueryPool(dev, &ci, NULL, &stats));
+      vkResetQueryPool(dev, stats, 0, 8);
+
+      /* 11 counters and the availability, then a guard word the driver
+       * must leave alone. */
+      const uint64_t guard = 0xa5a5a5a5a5a5a5a5ull;
+      uint64_t r64[8][13];
+      memset(r64, 0xa5, sizeof(r64));
+      VkResult r = vkGetQueryPoolResults(
+         dev, stats, 0, 8, sizeof(r64), r64, sizeof(r64[0]),
+         VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT |
+            VK_QUERY_RESULT_PARTIAL_BIT);
+      /* Partial results of unavailable queries: KosmicKrisp, like NVK,
+       * returns VK_SUCCESS when it wrote every value. */
+      if (r != VK_SUCCESS && r != VK_NOT_READY) {
+         fprintf(stderr, "statistics after a reset: %d\n", r);
+         return 1;
+      }
+      for (unsigned q = 0; q < 8; q++) {
+         for (unsigned j = 0; j < 12; j++) {
+            if (r64[q][j] != 0) {
+               fprintf(stderr, "statistics query %u value %u is %llx\n", q, j,
+                       (unsigned long long)r64[q][j]);
+               return 1;
+            }
+         }
+         if (r64[q][12] != guard) {
+            fprintf(stderr, "statistics query %u wrote past 11 counters\n", q);
+            return 1;
+         }
+      }
+      /* 32-bit, no partial results: only the availability is written. */
+      uint32_t r32[2][13];
+      memset(r32, 0xa5, sizeof(r32));
+      r = vkGetQueryPoolResults(dev, stats, 3, 2, sizeof(r32), r32,
+                                sizeof(r32[0]),
+                                VK_QUERY_RESULT_WITH_AVAILABILITY_BIT);
+      if (r != VK_NOT_READY || r32[0][0] != (uint32_t)guard ||
+          r32[0][11] != 0 || r32[1][11] != 0 || r32[1][12] != (uint32_t)guard) {
+         fprintf(stderr, "32-bit statistics results wrong (%d)\n", r);
+         return 1;
+      }
+
+      VkPipeline p = make_pipeline(&descs[0], layout);
+      VkCommandBufferAllocateInfo cbai = {
+         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+         .commandPool = pool,
+         .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+         .commandBufferCount = 1,
+      };
+      VkCommandBuffer cmd;
+      CHECK(vkAllocateCommandBuffers(dev, &cbai, &cmd));
+      VkCommandBufferBeginInfo bi = {
+         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+      };
+      CHECK(vkBeginCommandBuffer(cmd, &bi));
+      vkCmdResetQueryPool(cmd, stats, 0, 8);
+      VkRenderingAttachmentInfo ca = {
+         .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+         .imageView = view,
+         .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+         .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+         .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+      };
+      VkRenderingInfo ri = {
+         .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
+         .renderArea = {{0, 0}, {64, 64}},
+         .layerCount = 1,
+         .colorAttachmentCount = 1,
+         .pColorAttachments = &ca,
+      };
+      vkCmdBeginRendering(cmd, &ri);
+      vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, p);
+      VkViewport vpt = {0, 0, 64, 64, 0, 1};
+      VkRect2D sc = {{0, 0}, {64, 64}};
+      vkCmdSetViewport(cmd, 0, 1, &vpt);
+      vkCmdSetScissor(cmd, 0, 1, &sc);
+      VkDeviceSize off = 0;
+      vkCmdBindVertexBuffers(cmd, 0, 1, &buf, &off);
+      vkCmdBeginQuery(cmd, stats, 0, 0);
+      vkCmdDraw(cmd, 12, 1, 0, 0);
+      vkCmdEndQuery(cmd, stats, 0);
+      vkCmdBeginQuery(cmd, stats, 1, 0);
+      vkCmdDraw(cmd, 3, 1, 0, 0);
+      vkCmdEndQuery(cmd, stats, 1);
+      vkCmdEndRendering(cmd);
+      vkCmdCopyQueryPoolResults(
+         cmd, stats, 0, 2, buf, 65536, 12 * sizeof(uint64_t),
+         VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT |
+            VK_QUERY_RESULT_WAIT_BIT);
+      vkCmdCopyQueryPoolResults(cmd, stats, 0, 8, buf, 65536 + 256,
+                                11 * sizeof(uint32_t),
+                                VK_QUERY_RESULT_PARTIAL_BIT);
+      CHECK(vkEndCommandBuffer(cmd));
+      VkSubmitInfo si = {
+         .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+         .commandBufferCount = 1,
+         .pCommandBuffers = &cmd,
+      };
+      CHECK(vkQueueSubmit(queue, 1, &si, VK_NULL_HANDLE));
+      CHECK(vkQueueWaitIdle(queue));
+      printf("ok pipeline-statistics-without-feature\n");
+   }
+
+   /* Pipelines with rasterizationSamples 8 on a device whose sample counts
+    * are 1, 2 and 4, as Red Dead Redemption 2 builds 96 (its images are
+    * clamped to 4): drawn into a 4-sample image, and without attachments.
+    * The mock aborts on a raster sample count the device does not
+    * support. */
+   {
+      if (props.limits.framebufferColorSampleCounts & VK_SAMPLE_COUNT_8_BIT) {
+         fprintf(stderr, "the device reports 8 samples\n");
+         return 1;
+      }
+      VkImageCreateInfo msci = imci;
+      msci.samples = VK_SAMPLE_COUNT_4_BIT;
+      VkImage ms_image;
+      CHECK(vkCreateImage(dev, &msci, NULL, &ms_image));
+      vkGetImageMemoryRequirements(dev, ms_image, &mr);
+      mai.allocationSize = mr.size;
+      mai.memoryTypeIndex = find_memory(pd, mr.memoryTypeBits);
+      VkDeviceMemory ms_mem;
+      CHECK(vkAllocateMemory(dev, &mai, NULL, &ms_mem));
+      CHECK(vkBindImageMemory(dev, ms_image, ms_mem, 0));
+      VkImageViewCreateInfo msvci = ivci;
+      msvci.image = ms_image;
+      VkImageView ms_view;
+      CHECK(vkCreateImageView(dev, &msvci, NULL, &ms_view));
+
+      struct pipe_desc d8 = {"samples-8", "pass.vert", NULL, NULL, NULL,
+                             "color.frag", TRI, false, FIRST, FILL};
+      d8.samples = VK_SAMPLE_COUNT_8_BIT;
+      VkPipeline p8 = make_pipeline(&d8, layout);
+      d8.no_attachments = true;
+      VkPipeline p8_none = make_pipeline(&d8, layout);
+
+      VkCommandBufferAllocateInfo cbai = {
+         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+         .commandPool = pool,
+         .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+         .commandBufferCount = 1,
+      };
+      VkCommandBuffer cmd;
+      CHECK(vkAllocateCommandBuffers(dev, &cbai, &cmd));
+      VkCommandBufferBeginInfo bi = {
+         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+      };
+      CHECK(vkBeginCommandBuffer(cmd, &bi));
+      VkRenderingAttachmentInfo ca = {
+         .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+         .imageView = ms_view,
+         .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+         .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+         .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+      };
+      VkRenderingInfo ri = {
+         .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
+         .renderArea = {{0, 0}, {64, 64}},
+         .layerCount = 1,
+         .colorAttachmentCount = 1,
+         .pColorAttachments = &ca,
+      };
+      VkViewport vpt = {0, 0, 64, 64, 0, 1};
+      VkRect2D sc = {{0, 0}, {64, 64}};
+      VkDeviceSize off = 0;
+      VkPipeline pipes[2] = {p8, p8_none};
+      for (unsigned i = 0; i < 2; i++) {
+         ri.colorAttachmentCount = i == 0 ? 1 : 0;
+         vkCmdBeginRendering(cmd, &ri);
+         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipes[i]);
+         vkCmdSetViewport(cmd, 0, 1, &vpt);
+         vkCmdSetScissor(cmd, 0, 1, &sc);
+         vkCmdBindVertexBuffers(cmd, 0, 1, &buf, &off);
+         vkCmdDraw(cmd, 12, 1, 0, 0);
+         vkCmdEndRendering(cmd);
+      }
+      CHECK(vkEndCommandBuffer(cmd));
+      VkSubmitInfo si = {
+         .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+         .commandBufferCount = 1,
+         .pCommandBuffers = &cmd,
+      };
+      CHECK(vkQueueSubmit(queue, 1, &si, VK_NULL_HANDLE));
+      CHECK(vkQueueWaitIdle(queue));
+      printf("ok samples-8-on-a-4-sample-device\n");
+   }
+
+   /* Texel fetches from a sampled 4-sample, 2-layer image through a 2D array
+    * view, in a module that declares ImageMSArray
+    * (shaders/ms-array.frag.spvasm) while shaderStorageImageMultisample is
+    * not reported, as 73 of Red Dead Redemption 2's modules do. */
+   {
+      if (f2.features.shaderStorageImageMultisample) {
+         fprintf(stderr, "shaderStorageImageMultisample is reported\n");
+         return 1;
+      }
+      DPROC(vkCreateDescriptorSetLayout);
+      DPROC(vkCreateDescriptorPool);
+      DPROC(vkAllocateDescriptorSets);
+      DPROC(vkUpdateDescriptorSets);
+      DPROC(vkCmdBindDescriptorSets);
+
+      VkImageCreateInfo msci = imci;
+      msci.samples = VK_SAMPLE_COUNT_4_BIT;
+      msci.arrayLayers = 2;
+      msci.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+      VkImage ms_image;
+      CHECK(vkCreateImage(dev, &msci, NULL, &ms_image));
+      vkGetImageMemoryRequirements(dev, ms_image, &mr);
+      mai.allocationSize = mr.size;
+      mai.memoryTypeIndex = find_memory(pd, mr.memoryTypeBits);
+      VkDeviceMemory ms_mem;
+      CHECK(vkAllocateMemory(dev, &mai, NULL, &ms_mem));
+      CHECK(vkBindImageMemory(dev, ms_image, ms_mem, 0));
+      VkImageViewCreateInfo msvci = ivci;
+      msvci.image = ms_image;
+      msvci.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+      msvci.subresourceRange.layerCount = 2;
+      VkImageView ms_view;
+      CHECK(vkCreateImageView(dev, &msvci, NULL, &ms_view));
+
+      VkDescriptorSetLayoutBinding binding = {
+         0, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, VK_SHADER_STAGE_FRAGMENT_BIT};
+      VkDescriptorSetLayoutCreateInfo dslci = {
+         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+         .bindingCount = 1,
+         .pBindings = &binding,
+      };
+      VkDescriptorSetLayout dsl;
+      CHECK(vkCreateDescriptorSetLayout(dev, &dslci, NULL, &dsl));
+      VkDescriptorPoolSize size = {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1};
+      VkDescriptorPoolCreateInfo dpci = {
+         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+         .maxSets = 1,
+         .poolSizeCount = 1,
+         .pPoolSizes = &size,
+      };
+      VkDescriptorPool dp;
+      CHECK(vkCreateDescriptorPool(dev, &dpci, NULL, &dp));
+      VkDescriptorSetAllocateInfo dsai = {
+         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+         .descriptorPool = dp,
+         .descriptorSetCount = 1,
+         .pSetLayouts = &dsl,
+      };
+      VkDescriptorSet ds;
+      CHECK(vkAllocateDescriptorSets(dev, &dsai, &ds));
+      VkDescriptorImageInfo dii = {
+         .imageView = ms_view,
+         .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+      };
+      VkWriteDescriptorSet write = {
+         .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+         .dstSet = ds,
+         .dstBinding = 0,
+         .descriptorCount = 1,
+         .descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
+         .pImageInfo = &dii,
+      };
+      vkUpdateDescriptorSets(dev, 1, &write, 0, NULL);
+      VkPipelineLayoutCreateInfo mplci = {
+         .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+         .setLayoutCount = 1,
+         .pSetLayouts = &dsl,
+      };
+      VkPipelineLayout mpl;
+      CHECK(vkCreatePipelineLayout(dev, &mplci, NULL, &mpl));
+
+      int msl_before = msl_count();
+      struct pipe_desc d = {"ms-array", "pass.vert", NULL, NULL, NULL,
+                            "ms-array.frag", TRI, false, FIRST, FILL};
+      VkPipeline p = make_pipeline(&d, mpl);
+      if (msl_before >= 0 &&
+          !msl_contains(msl_before, msl_count(), "texture2d_ms_array<float>")) {
+         fprintf(stderr, "ms-array: no texture2d_ms_array in the MSL\n");
+         return 1;
+      }
+
+      VkCommandBufferAllocateInfo cbai = {
+         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+         .commandPool = pool,
+         .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+         .commandBufferCount = 1,
+      };
+      VkCommandBuffer cmd;
+      CHECK(vkAllocateCommandBuffers(dev, &cbai, &cmd));
+      VkCommandBufferBeginInfo bi = {
+         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+      };
+      CHECK(vkBeginCommandBuffer(cmd, &bi));
+      VkRenderingAttachmentInfo ca = {
+         .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+         .imageView = view,
+         .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+         .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+         .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+      };
+      VkRenderingInfo ri = {
+         .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
+         .renderArea = {{0, 0}, {64, 64}},
+         .layerCount = 1,
+         .colorAttachmentCount = 1,
+         .pColorAttachments = &ca,
+      };
+      vkCmdBeginRendering(cmd, &ri);
+      vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, p);
+      vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, mpl, 0, 1,
+                              &ds, 0, NULL);
+      VkViewport vpt = {0, 0, 64, 64, 0, 1};
+      VkRect2D sc = {{0, 0}, {64, 64}};
+      vkCmdSetViewport(cmd, 0, 1, &vpt);
+      vkCmdSetScissor(cmd, 0, 1, &sc);
+      VkDeviceSize off = 0;
+      vkCmdBindVertexBuffers(cmd, 0, 1, &buf, &off);
+      vkCmdDraw(cmd, 12, 1, 0, 0);
+      vkCmdEndRendering(cmd);
+      CHECK(vkEndCommandBuffer(cmd));
+      VkSubmitInfo si = {
+         .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+         .commandBufferCount = 1,
+         .pCommandBuffers = &cmd,
+      };
+      CHECK(vkQueueSubmit(queue, 1, &si, VK_NULL_HANDLE));
+      CHECK(vkQueueWaitIdle(queue));
+      printf("ok ms-array\n");
+   }
+
+   /* A static sample mask that has every rasterization sample, as DXVK
+    * gives 0x1 at one sample, writes no sample mask in the fragment shader
+    * (PLA-430); 0x5 at four samples does. */
+   {
+      DPROC(vkDestroyPipeline);
+      struct pipe_desc dm = {"sample-mask", "pass.vert", NULL, NULL, NULL,
+                             "color.frag", TRI, false, FIRST, FILL};
+      const struct {
+         VkSampleCountFlagBits samples;
+         VkSampleMask mask;
+         bool lowered;
+      } masks[] = {{VK_SAMPLE_COUNT_1_BIT, 0x1, false},
+                   {VK_SAMPLE_COUNT_4_BIT, 0xf, false},
+                   {VK_SAMPLE_COUNT_4_BIT, 0x5, true}};
+      for (unsigned i = 0; i < sizeof(masks) / sizeof(masks[0]); i++) {
+         dm.samples = masks[i].samples;
+         dm.sample_mask = masks[i].mask;
+         const int before = msl_count();
+         VkPipeline p = make_pipeline(&dm, layout);
+         const int written =
+            before < 0 ? -1 : msl_count_text(before, msl_count(), "sample_mask_out");
+         if (before >= 0 && (written > 0) != masks[i].lowered) {
+            fprintf(stderr, "sample mask %#x at %d samples: %d sample mask "
+                    "outputs in its MSL\n", masks[i].mask, masks[i].samples,
+                    written);
+            return 1;
+         }
+         vkDestroyPipeline(dev, p, NULL);
+      }
+      printf("ok sample-mask: a mask with every sample is not lowered\n");
+   }
+
+   if (check_linear_images(pd, queue, pool))
+      return 1;
+   if (gpl_wanted() && check_gpl(pd, queue, pool, buf))
+      return 1;
+   if (check_module_identifier(pd, queue, pool, buf))
+      return 1;
+   if (check_descriptor_stats(pd))
+      return 1;
+   if (check_descriptor_replay(pd))
+      return 1;
+   return 0;
+}
+
+/* VK_EXT_graphics_pipeline_library, used the way DXVK uses it (PLA-424):
+ * one library per part (vertex input, pre-rasterization with the vertex
+ * shader, fragment shader, fragment output), linked fast (no flags) and with
+ * link-time optimization, drawn into two colour formats with three vertex
+ * layouts, and a depth-only pipeline whose fragment shader library has no
+ * shader. Each pipeline records draws and is submitted. The vertex and
+ * fragment shaders' libraries are built with their pipeline libraries (and
+ * an empty fragment shader's with the first vertex shader's), and a fast link
+ * only builds the Metal pipeline from them, blending in Metal's fixed
+ * function, whatever the vertex layout; with VK_POLYGON_MODE_POINT or a logic
+ * op the link falls back to compiling the whole pipeline. */
+struct gpl_libs {
+   VkPipelineLayout layout;
+   VkShaderModule vs, fs;
+   /* The vertex shader by identifier instead of vs, with
+    * VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT
+    * (check_module_identifier): gpl_library returns VK_NULL_HANDLE for
+    * VK_PIPELINE_COMPILE_REQUIRED */
+   const VkPipelineShaderStageModuleIdentifierCreateInfoEXT *vs_id;
+};
+
+/* The pipeline cache libraries are made with (gpl_round_trip) */
+static VkPipelineCache gpl_pipeline_cache;
+
+/* A library's blend and multisample state, or input assembly */
+enum gpl_output {
+   GPL_PLAIN,
+   /* Alpha blending */
+   GPL_BLEND,
+   /* Only red, green and blue written */
+   GPL_WRITE_MASK,
+   GPL_ALPHA_TO_COVERAGE,
+   /* SRC1_COLOR blending */
+   GPL_DUAL_SOURCE,
+   GPL_LOGIC_OP,
+   /* pSampleMask 0x1 at one sample, as DXVK gives it: every sample */
+   GPL_SAMPLE_MASK,
+   /* pSampleMask 0x5 at four samples: not every sample */
+   GPL_SAMPLE_MASK_PARTIAL,
+   /* A point list */
+   GPL_POINTS,
+   /* CONSTANT_COLOR blending with dynamic blend constants */
+   GPL_BLEND_CONSTANT,
+};
+
+static VkPipeline
+gpl_library(const struct gpl_libs *g, VkGraphicsPipelineLibraryFlagsEXT part,
+            VkFormat attr_format, VkFormat color, enum gpl_output output,
+            bool with_fs, VkPolygonMode polygon_mode)
+{
+   DPROC(vkCreateGraphicsPipelines);
+   VkGraphicsPipelineLibraryCreateInfoEXT lib = {
+      .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_LIBRARY_CREATE_INFO_EXT,
+      .flags = part,
+   };
+   VkPipelineRenderingCreateInfo rinfo = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
+      .pNext = &lib,
+      .colorAttachmentCount = color != VK_FORMAT_UNDEFINED,
+      .pColorAttachmentFormats = &color,
+   };
+   VkGraphicsPipelineCreateInfo ci = {
+      .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+      .pNext = &rinfo,
+      .flags = VK_PIPELINE_CREATE_LIBRARY_BIT_KHR |
+               VK_PIPELINE_CREATE_RETAIN_LINK_TIME_OPTIMIZATION_INFO_BIT_EXT,
+   };
+
+   VkVertexInputBindingDescription binding = {
+      0, attr_format == VK_FORMAT_R32G32B32A32_SFLOAT ? 16 : 4,
+      VK_VERTEX_INPUT_RATE_VERTEX};
+   VkVertexInputAttributeDescription attr = {0, 0, attr_format, 0};
+   VkPipelineVertexInputStateCreateInfo vi = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+      .vertexBindingDescriptionCount = 1,
+      .pVertexBindingDescriptions = &binding,
+      .vertexAttributeDescriptionCount = 1,
+      .pVertexAttributeDescriptions = &attr,
+   };
+   VkPipelineInputAssemblyStateCreateInfo ia = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+      .topology = output == GPL_POINTS ? VK_PRIMITIVE_TOPOLOGY_POINT_LIST
+                                       : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+   };
+   VkPipelineViewportStateCreateInfo vp = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+      .viewportCount = 1,
+      .scissorCount = 1,
+   };
+   VkPipelineRasterizationStateCreateInfo rs = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+      .polygonMode = polygon_mode,
+      .lineWidth = 1.0f,
+   };
+   const VkSampleMask sample_mask =
+      output == GPL_SAMPLE_MASK_PARTIAL ? 0x5 : 0x1;
+   VkPipelineMultisampleStateCreateInfo ms = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+      .rasterizationSamples = output == GPL_SAMPLE_MASK_PARTIAL
+                                 ? VK_SAMPLE_COUNT_4_BIT
+                                 : VK_SAMPLE_COUNT_1_BIT,
+      .pSampleMask = output == GPL_SAMPLE_MASK ||
+                           output == GPL_SAMPLE_MASK_PARTIAL
+                        ? &sample_mask
+                        : NULL,
+      .alphaToCoverageEnable = output == GPL_ALPHA_TO_COVERAGE,
+   };
+   VkPipelineDepthStencilStateCreateInfo ds = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+   };
+   VkPipelineColorBlendAttachmentState att = {
+      .blendEnable = output == GPL_BLEND || output == GPL_DUAL_SOURCE ||
+                     output == GPL_BLEND_CONSTANT,
+      .srcColorBlendFactor = output == GPL_DUAL_SOURCE ? VK_BLEND_FACTOR_ONE
+                             : output == GPL_BLEND_CONSTANT
+                                ? VK_BLEND_FACTOR_CONSTANT_COLOR
+                                : VK_BLEND_FACTOR_SRC_ALPHA,
+      .dstColorBlendFactor = output == GPL_DUAL_SOURCE
+                                ? VK_BLEND_FACTOR_SRC1_COLOR
+                                : VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
+      .colorBlendOp = VK_BLEND_OP_ADD,
+      .srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
+      .dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO,
+      .alphaBlendOp = VK_BLEND_OP_ADD,
+      .colorWriteMask = output == GPL_WRITE_MASK ? 0x7 : 0xf,
+   };
+   VkPipelineColorBlendStateCreateInfo cb = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+      .logicOpEnable = output == GPL_LOGIC_OP,
+      .logicOp = VK_LOGIC_OP_XOR,
+      .attachmentCount = color != VK_FORMAT_UNDEFINED,
+      .pAttachments = &att,
+   };
+   VkDynamicState dyn_states[] = {VK_DYNAMIC_STATE_VIEWPORT,
+                                  VK_DYNAMIC_STATE_SCISSOR};
+   VkPipelineDynamicStateCreateInfo dyn = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+      .dynamicStateCount = 2,
+      .pDynamicStates = dyn_states,
+   };
+   const VkDynamicState dyn_cb_state = VK_DYNAMIC_STATE_BLEND_CONSTANTS;
+   VkPipelineDynamicStateCreateInfo dyn_cb = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+      .dynamicStateCount = 1,
+      .pDynamicStates = &dyn_cb_state,
+   };
+   VkPipelineShaderStageCreateInfo stage = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+      .pName = "main",
+   };
+
+   switch (part) {
+   case VK_GRAPHICS_PIPELINE_LIBRARY_VERTEX_INPUT_INTERFACE_BIT_EXT:
+      ci.pVertexInputState = &vi;
+      ci.pInputAssemblyState = &ia;
+      break;
+   case VK_GRAPHICS_PIPELINE_LIBRARY_PRE_RASTERIZATION_SHADERS_BIT_EXT:
+      stage.stage = VK_SHADER_STAGE_VERTEX_BIT;
+      stage.module = g->vs;
+      if (g->vs_id) {
+         stage.pNext = g->vs_id;
+         ci.flags |= VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT;
+      }
+      ci.stageCount = 1;
+      ci.pStages = &stage;
+      ci.pViewportState = &vp;
+      ci.pRasterizationState = &rs;
+      ci.pDynamicState = &dyn;
+      ci.layout = g->layout;
+      break;
+   case VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_SHADER_BIT_EXT:
+      stage.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+      stage.module = g->fs;
+      ci.stageCount = with_fs;
+      ci.pStages = &stage;
+      ci.pMultisampleState = &ms;
+      ci.pDepthStencilState = &ds;
+      ci.layout = g->layout;
+      break;
+   case VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_OUTPUT_INTERFACE_BIT_EXT:
+      ci.pMultisampleState = &ms;
+      ci.pColorBlendState = &cb;
+      if (output == GPL_BLEND_CONSTANT)
+         ci.pDynamicState = &dyn_cb;
+      break;
+   }
+   VkPipeline p;
+   VkResult r =
+      vkCreateGraphicsPipelines(dev, gpl_pipeline_cache, 1, &ci, NULL, &p);
+   if (g->vs_id && r == VK_PIPELINE_COMPILE_REQUIRED && p == VK_NULL_HANDLE)
+      return VK_NULL_HANDLE;
+   CHECK(r);
+   return p;
+}
+
+static VkPipeline
+gpl_link(const struct gpl_libs *g, const VkPipeline libs[4], bool lto)
+{
+   DPROC(vkCreateGraphicsPipelines);
+   VkPipelineLibraryCreateInfoKHR li = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_LIBRARY_CREATE_INFO_KHR,
+      .libraryCount = 4,
+      .pLibraries = libs,
+   };
+   VkGraphicsPipelineCreateInfo ci = {
+      .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+      .pNext = &li,
+      .flags = lto ? VK_PIPELINE_CREATE_LINK_TIME_OPTIMIZATION_BIT_EXT : 0,
+      .layout = g->layout,
+   };
+   VkPipeline p;
+   CHECK(vkCreateGraphicsPipelines(dev, VK_NULL_HANDLE, 1, &ci, NULL, &p));
+   return p;
+}
+
+/* A 64x64 colour target of samples samples; image_out and memory_out, if
+ * not NULL, get what to destroy with it */
+static VkImageView
+gpl_target(VkPhysicalDevice pd, VkFormat format, VkSampleCountFlagBits samples,
+           VkImage *image_out, VkDeviceMemory *memory_out)
+{
+   DPROC(vkCreateImage);
+   DPROC(vkGetImageMemoryRequirements);
+   DPROC(vkAllocateMemory);
+   DPROC(vkBindImageMemory);
+   DPROC(vkCreateImageView);
+   VkImageCreateInfo imci = {
+      .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+      .imageType = VK_IMAGE_TYPE_2D,
+      .format = format,
+      .extent = {64, 64, 1},
+      .mipLevels = 1,
+      .arrayLayers = 1,
+      .samples = samples,
+      .usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+   };
+   VkImage image;
+   CHECK(vkCreateImage(dev, &imci, NULL, &image));
+   VkMemoryRequirements mr;
+   vkGetImageMemoryRequirements(dev, image, &mr);
+   VkMemoryAllocateInfo mai = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+                               .allocationSize = mr.size,
+                               .memoryTypeIndex =
+                                  find_memory(pd, mr.memoryTypeBits)};
+   VkDeviceMemory mem;
+   CHECK(vkAllocateMemory(dev, &mai, NULL, &mem));
+   CHECK(vkBindImageMemory(dev, image, mem, 0));
+   VkImageViewCreateInfo ivci = {
+      .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+      .image = image,
+      .viewType = VK_IMAGE_VIEW_TYPE_2D,
+      .format = format,
+      .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1},
+   };
+   VkImageView view;
+   CHECK(vkCreateImageView(dev, &ivci, NULL, &view));
+   if (image_out)
+      *image_out = image;
+   if (memory_out)
+      *memory_out = mem;
+   return view;
+}
+
+/* Records two draws with p into view and submits them */
+static void
+gpl_draw(VkQueue queue, VkCommandPool pool, VkBuffer buf, VkImageView view,
+         VkPipeline p)
+{
+   DPROC(vkAllocateCommandBuffers);
+   DPROC(vkBeginCommandBuffer);
+   DPROC(vkEndCommandBuffer);
+   DPROC(vkCmdBeginRendering);
+   DPROC(vkCmdEndRendering);
+   DPROC(vkCmdBindPipeline);
+   DPROC(vkCmdSetViewport);
+   DPROC(vkCmdSetScissor);
+   DPROC(vkCmdBindVertexBuffers);
+   DPROC(vkCmdDraw);
+   DPROC(vkQueueSubmit);
+   DPROC(vkQueueWaitIdle);
+   VkCommandBufferAllocateInfo cbai = {
+      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+      .commandPool = pool,
+      .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+      .commandBufferCount = 1,
+   };
+   VkCommandBuffer cmd;
+   CHECK(vkAllocateCommandBuffers(dev, &cbai, &cmd));
+   VkCommandBufferBeginInfo bi = {
+      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+   };
+   CHECK(vkBeginCommandBuffer(cmd, &bi));
+   VkRenderingAttachmentInfo ca = {
+      .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+      .imageView = view,
+      .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+      .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+      .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+   };
+   VkRenderingInfo ri = {
+      .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
+      .renderArea = {{0, 0}, {64, 64}},
+      .layerCount = 1,
+      .colorAttachmentCount = 1,
+      .pColorAttachments = &ca,
+   };
+   vkCmdBeginRendering(cmd, &ri);
+   vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, p);
+   VkViewport vpt = {0, 0, 64, 64, 0, 1};
+   VkRect2D sc = {{0, 0}, {64, 64}};
+   vkCmdSetViewport(cmd, 0, 1, &vpt);
+   vkCmdSetScissor(cmd, 0, 1, &sc);
+   VkDeviceSize off = 0;
+   vkCmdBindVertexBuffers(cmd, 0, 1, &buf, &off);
+   vkCmdDraw(cmd, 12, 1, 0, 0);
+   vkCmdDraw(cmd, 24, 3, 3, 1);
+   vkCmdEndRendering(cmd);
+   CHECK(vkEndCommandBuffer(cmd));
+   VkSubmitInfo si = {
+      .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+      .commandBufferCount = 1,
+      .pCommandBuffers = &cmd,
+   };
+   CHECK(vkQueueSubmit(queue, 1, &si, VK_NULL_HANDLE));
+   CHECK(vkQueueWaitIdle(queue));
+}
+
+/* A pipeline library's shaders through a pipeline cache: libraries made with
+ * an empty cache, the cache's data read, everything destroyed, and the same
+ * libraries made with a cache made from that data. The second time the
+ * vertex and fragment shaders' Metal libraries are built from the MSL the
+ * cache gave (byte for byte the first time's), and a fast link of them
+ * compiles nothing at link or draw. The fragment shader reads a uniform
+ * buffer of a set layout with another binding before it; a link with a logic
+ * op, which compiles the whole pipeline from the libraries' NIR and set
+ * layouts at its first draw, gives the same MSL before and after the cache.
+ * It runs on a device of its own, destroyed at the end, so the driver's
+ * counts (MESA_KK_DEBUG=memory: [kk-mem] gpl device finish) show every
+ * library shader, Metal library and link gone. */
+static int
+gpl_round_trip(VkPhysicalDevice pd)
+{
+   IPROC(vkCreateDevice);
+   DPROC(vkDestroyDevice);
+   DPROC(vkGetDeviceQueue);
+   DPROC(vkCreatePipelineCache);
+   DPROC(vkGetPipelineCacheData);
+   DPROC(vkDestroyPipelineCache);
+   DPROC(vkCreateDescriptorSetLayout);
+   DPROC(vkDestroyDescriptorSetLayout);
+   DPROC(vkCreatePipelineLayout);
+   DPROC(vkDestroyPipelineLayout);
+   DPROC(vkDestroyShaderModule);
+   DPROC(vkCreateCommandPool);
+   DPROC(vkDestroyCommandPool);
+   DPROC(vkDestroyPipeline);
+   DPROC(vkCreateBuffer);
+   DPROC(vkDestroyBuffer);
+   DPROC(vkGetBufferMemoryRequirements);
+   DPROC(vkAllocateMemory);
+   DPROC(vkFreeMemory);
+   DPROC(vkBindBufferMemory);
+   DPROC(vkDestroyImage);
+   DPROC(vkDestroyImageView);
+
+   const VkDevice main_dev = dev;
+   CHECK(vkCreateDevice(pd, device_info, NULL, &dev));
+   VkQueue queue;
+   vkGetDeviceQueue(dev, 0, 0, &queue);
+   VkCommandPoolCreateInfo cpci = {
+      .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+   };
+   VkCommandPool pool;
+   CHECK(vkCreateCommandPool(dev, &cpci, NULL, &pool));
+   VkBufferCreateInfo bci = {
+      .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+      .size = 4096,
+      .usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+   };
+   VkBuffer buf;
+   CHECK(vkCreateBuffer(dev, &bci, NULL, &buf));
+   VkMemoryRequirements req;
+   vkGetBufferMemoryRequirements(dev, buf, &req);
+   VkMemoryAllocateInfo mai = {
+      .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+      .allocationSize = req.size,
+      .memoryTypeIndex = find_memory(pd, req.memoryTypeBits),
+   };
+   VkDeviceMemory buf_mem;
+   CHECK(vkAllocateMemory(dev, &mai, NULL, &buf_mem));
+   CHECK(vkBindBufferMemory(dev, buf, buf_mem, 0));
+   VkImage image;
+   VkDeviceMemory image_mem;
+   VkImageView view =
+      gpl_target(pd, VK_FORMAT_R8G8B8A8_UNORM, VK_SAMPLE_COUNT_1_BIT, &image,
+                 &image_mem);
+
+   const VkDescriptorSetLayoutBinding bindings[] = {
+      {0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 2,
+       VK_SHADER_STAGE_FRAGMENT_BIT, NULL},
+      {1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT,
+       NULL},
+   };
+   VkDescriptorSetLayoutCreateInfo dslci = {
+      .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+      .bindingCount = 2,
+      .pBindings = bindings,
+   };
+   VkDescriptorSetLayout set_layout;
+   CHECK(vkCreateDescriptorSetLayout(dev, &dslci, NULL, &set_layout));
+   VkPipelineLayoutCreateInfo plci = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+      .flags = VK_PIPELINE_LAYOUT_CREATE_INDEPENDENT_SETS_BIT_EXT,
+      .setLayoutCount = 1,
+      .pSetLayouts = &set_layout,
+   };
+   struct gpl_libs g = {.vs = load_module("pass.vert"),
+                        .fs = load_module("gpl-ubo.frag")};
+   CHECK(vkCreatePipelineLayout(dev, &plci, NULL, &g.layout));
+
+   /* The four parts, and a fragment output library with a logic op */
+   const VkGraphicsPipelineLibraryFlagsEXT parts[5] = {
+      VK_GRAPHICS_PIPELINE_LIBRARY_VERTEX_INPUT_INTERFACE_BIT_EXT,
+      VK_GRAPHICS_PIPELINE_LIBRARY_PRE_RASTERIZATION_SHADERS_BIT_EXT,
+      VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_SHADER_BIT_EXT,
+      VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_OUTPUT_INTERFACE_BIT_EXT,
+      VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_OUTPUT_INTERFACE_BIT_EXT,
+   };
+   VkPipeline libs[5], fast[4], logic[4];
+   VkPipelineCacheCreateInfo pcci = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO,
+   };
+   void *data = NULL;
+   size_t size = 0;
+   /* MSL libraries: [0] where the first libraries' start, [1] the logic op
+    * link's, [2] where the cache's libraries start, [3] the logic op link's
+    * again, [4] the fast link's, [5] its draw's, [6] the end */
+   int at[7];
+   for (int pass = 0; pass < 2; pass++) {
+      if (pass == 1) {
+         pcci.initialDataSize = size;
+         pcci.pInitialData = data;
+      }
+      CHECK(vkCreatePipelineCache(dev, &pcci, NULL, &gpl_pipeline_cache));
+      at[2 * pass] = msl_count();
+      for (int i = 0; i < 5; i++)
+         libs[i] = gpl_library(&g, parts[i], VK_FORMAT_R32G32B32A32_SFLOAT,
+                               VK_FORMAT_R8G8B8A8_UNORM,
+                               i < 4 ? GPL_PLAIN : GPL_LOGIC_OP, true,
+                               VK_POLYGON_MODE_FILL);
+      for (int i = 0; i < 4; i++) {
+         fast[i] = libs[i];
+         logic[i] = libs[i < 3 ? i : 4];
+      }
+      at[2 * pass + 1] = msl_count();
+      VkPipeline p = gpl_link(&g, logic, false);
+      gpl_draw(queue, pool, buf, view, p);
+      vkDestroyPipeline(dev, p, NULL);
+      if (pass == 1)
+         break;
+      CHECK(vkGetPipelineCacheData(dev, gpl_pipeline_cache, &size, NULL));
+      data = malloc(size);
+      CHECK(vkGetPipelineCacheData(dev, gpl_pipeline_cache, &size, data));
+      for (int i = 0; i < 5; i++)
+         vkDestroyPipeline(dev, libs[i], NULL);
+      vkDestroyPipelineCache(dev, gpl_pipeline_cache, NULL);
+   }
+   free(data);
+   at[4] = msl_count();
+   VkPipeline p = gpl_link(&g, fast, false);
+   at[5] = msl_count();
+   gpl_draw(queue, pool, buf, view, p);
+   at[6] = msl_count();
+
+   if (at[0] >= 0) {
+      /* The first time the vertex shader's, the device's empty fragment
+       * shader's and the fragment shader's; from the cache the vertex and
+       * the fragment shader's, the same MSL */
+      const int made = at[1] - at[0], loaded = at[3] - at[2];
+      const int logic_made = at[2] - at[1], logic_again = at[4] - at[3];
+      bool same = made == 3 && loaded == 2 && msl_same(at[0], at[2]) &&
+                  msl_same(at[0] + 2, at[2] + 1) && logic_made >= 2 &&
+                  logic_again == logic_made;
+      for (int i = 0; same && i < logic_made; i++)
+         same = msl_same(at[1] + i, at[3] + i);
+      if (!same || at[5] != at[4] || at[6] != at[5]) {
+         fprintf(stderr, "gpl cache: libraries made %d MSL libraries, from "
+                 "the cache %d (the same: %d); the logic op link %d, from "
+                 "the cache %d; the fast link %d at link, %d at draw\n",
+                 made, loaded, same, logic_made, logic_again, at[5] - at[4],
+                 at[6] - at[5]);
+         return 1;
+      }
+   }
+   printf("ok gpl cache: libraries from the cache made %d MSL libraries, the "
+          "same; logic op link %d, the same; fast link: MSL libraries at link "
+          "%d, at draw %d\n",
+          at[3] - at[2], at[4] - at[3], at[5] - at[4], at[6] - at[5]);
+
+   vkDestroyPipeline(dev, p, NULL);
+   for (int i = 0; i < 5; i++)
+      vkDestroyPipeline(dev, libs[i], NULL);
+   vkDestroyPipelineCache(dev, gpl_pipeline_cache, NULL);
+   gpl_pipeline_cache = VK_NULL_HANDLE;
+   vkDestroyImageView(dev, view, NULL);
+   vkDestroyImage(dev, image, NULL);
+   vkFreeMemory(dev, image_mem, NULL);
+   vkDestroyBuffer(dev, buf, NULL);
+   vkFreeMemory(dev, buf_mem, NULL);
+   vkDestroyCommandPool(dev, pool, NULL);
+   vkDestroyPipelineLayout(dev, g.layout, NULL);
+   vkDestroyDescriptorSetLayout(dev, set_layout, NULL);
+   vkDestroyShaderModule(dev, g.vs, NULL);
+   vkDestroyShaderModule(dev, g.fs, NULL);
+   vkDestroyDevice(dev, NULL);
+   dev = main_dev;
+   return 0;
+}
+
+static int
+check_gpl(VkPhysicalDevice pd, VkQueue queue, VkCommandPool pool, VkBuffer buf)
+{
+   DPROC(vkCreatePipelineLayout);
+   DPROC(vkAllocateCommandBuffers);
+   DPROC(vkBeginCommandBuffer);
+   DPROC(vkEndCommandBuffer);
+   DPROC(vkCmdBeginRendering);
+   DPROC(vkCmdEndRendering);
+   DPROC(vkCmdBindPipeline);
+   DPROC(vkCmdSetViewport);
+   DPROC(vkCmdSetScissor);
+   DPROC(vkCmdSetBlendConstants);
+   DPROC(vkCmdBindVertexBuffers);
+   DPROC(vkCmdDraw);
+   DPROC(vkQueueSubmit);
+   DPROC(vkQueueWaitIdle);
+   DPROC(vkDestroyPipeline);
+
+   IPROC(vkGetPhysicalDeviceFeatures2);
+   VkPhysicalDeviceGraphicsPipelineLibraryFeaturesEXT feat = {
+      .sType =
+         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GRAPHICS_PIPELINE_LIBRARY_FEATURES_EXT,
+   };
+   VkPhysicalDeviceFeatures2 f2 = {
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+      .pNext = &feat,
+   };
+   vkGetPhysicalDeviceFeatures2(pd, &f2);
+   if (!feat.graphicsPipelineLibrary) {
+      fprintf(stderr, "gpl: graphicsPipelineLibrary not reported\n");
+      return 1;
+   }
+
+   VkPipelineLayoutCreateInfo plci = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+      .flags = VK_PIPELINE_LAYOUT_CREATE_INDEPENDENT_SETS_BIT_EXT,
+   };
+   struct gpl_libs g = {.vs = load_module("pass.vert"),
+                        .fs = load_module("color.frag")};
+   CHECK(vkCreatePipelineLayout(dev, &plci, NULL, &g.layout));
+   /* Shaders whose fragment side reads fewer components than the vertex
+    * side writes, of a float and a flat integer output */
+   struct gpl_libs gv = {.layout = g.layout,
+                         .vs = load_module("gpl-varyings.vert"),
+                         .fs = load_module("gpl-varyings.frag")};
+   /* A fragment shader with both sources of dual-source blending */
+   struct gpl_libs gd = {.layout = g.layout, .fs = load_module("gpl-dual.frag")};
+   /* A vertex shader that writes a layer */
+   struct gpl_libs gl = {.layout = g.layout, .vs = load_module("gpl-layer.vert")};
+
+   const VkFormat RGBA8 = VK_FORMAT_R8G8B8A8_UNORM;
+   const VkFormat RGBA16F = VK_FORMAT_R16G16B16A16_SFLOAT;
+   const VkFormat RGBA32F = VK_FORMAT_R32G32B32A32_SFLOAT;
+   const VkFormat BGRA8 = VK_FORMAT_B8G8R8A8_UNORM;
+   const VkFormat NONE = VK_FORMAT_UNDEFINED;
+   const VkPolygonMode FILL = VK_POLYGON_MODE_FILL;
+   const int msl_start = msl_count();
+   const enum gpl_output PLAIN = GPL_PLAIN;
+   VkPipeline vi_f32 = gpl_library(&g, VK_GRAPHICS_PIPELINE_LIBRARY_VERTEX_INPUT_INTERFACE_BIT_EXT, RGBA32F, NONE, PLAIN, true, FILL);
+   VkPipeline vi_u8 = gpl_library(&g, VK_GRAPHICS_PIPELINE_LIBRARY_VERTEX_INPUT_INTERFACE_BIT_EXT, RGBA8, NONE, PLAIN, true, FILL);
+   VkPipeline vi_bgra8 = gpl_library(&g, VK_GRAPHICS_PIPELINE_LIBRARY_VERTEX_INPUT_INTERFACE_BIT_EXT, BGRA8, NONE, PLAIN, true, FILL);
+   VkPipeline pre = gpl_library(&g, VK_GRAPHICS_PIPELINE_LIBRARY_PRE_RASTERIZATION_SHADERS_BIT_EXT, RGBA32F, RGBA8, PLAIN, true, FILL);
+   VkPipeline pre_points = gpl_library(&g, VK_GRAPHICS_PIPELINE_LIBRARY_PRE_RASTERIZATION_SHADERS_BIT_EXT, RGBA32F, RGBA8, PLAIN, true, VK_POLYGON_MODE_POINT);
+   VkPipeline frag = gpl_library(&g, VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_SHADER_BIT_EXT, RGBA32F, RGBA8, PLAIN, true, FILL);
+   VkPipeline no_frag = gpl_library(&g, VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_SHADER_BIT_EXT, RGBA32F, RGBA8, PLAIN, false, FILL);
+   /* Its multisample state matches the fragment output library's */
+   VkPipeline frag_a2c = gpl_library(&g, VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_SHADER_BIT_EXT, RGBA32F, RGBA8, GPL_ALPHA_TO_COVERAGE, true, FILL);
+   VkPipeline frag_dual = gpl_library(&gd, VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_SHADER_BIT_EXT, RGBA32F, RGBA8, PLAIN, true, FILL);
+   VkPipeline out_u8 = gpl_library(&g, VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_OUTPUT_INTERFACE_BIT_EXT, RGBA32F, RGBA8, PLAIN, true, FILL);
+   VkPipeline out_f16 = gpl_library(&g, VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_OUTPUT_INTERFACE_BIT_EXT, RGBA32F, RGBA16F, GPL_BLEND, true, FILL);
+   VkPipeline out_mask = gpl_library(&g, VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_OUTPUT_INTERFACE_BIT_EXT, RGBA32F, RGBA8, GPL_WRITE_MASK, true, FILL);
+   VkPipeline out_a2c = gpl_library(&g, VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_OUTPUT_INTERFACE_BIT_EXT, RGBA32F, RGBA8, GPL_ALPHA_TO_COVERAGE, true, FILL);
+   VkPipeline out_dual = gpl_library(&g, VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_OUTPUT_INTERFACE_BIT_EXT, RGBA32F, RGBA8, GPL_DUAL_SOURCE, true, FILL);
+   VkPipeline out_logic = gpl_library(&g, VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_OUTPUT_INTERFACE_BIT_EXT, RGBA32F, RGBA8, GPL_LOGIC_OP, true, FILL);
+   VkPipeline pre_vary = gpl_library(&gv, VK_GRAPHICS_PIPELINE_LIBRARY_PRE_RASTERIZATION_SHADERS_BIT_EXT, RGBA32F, RGBA8, PLAIN, true, FILL);
+   VkPipeline frag_vary = gpl_library(&gv, VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_SHADER_BIT_EXT, RGBA32F, RGBA8, PLAIN, true, FILL);
+   /* Their multisample state matches the fragment output library's */
+   VkPipeline frag_smask = gpl_library(&g, VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_SHADER_BIT_EXT, RGBA32F, RGBA8, GPL_SAMPLE_MASK, true, FILL);
+   VkPipeline frag_smask4 = gpl_library(&g, VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_SHADER_BIT_EXT, RGBA32F, RGBA8, GPL_SAMPLE_MASK_PARTIAL, true, FILL);
+   VkPipeline out_smask = gpl_library(&g, VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_OUTPUT_INTERFACE_BIT_EXT, RGBA32F, RGBA8, GPL_SAMPLE_MASK, true, FILL);
+   VkPipeline out_smask4 = gpl_library(&g, VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_OUTPUT_INTERFACE_BIT_EXT, RGBA32F, RGBA8, GPL_SAMPLE_MASK_PARTIAL, true, FILL);
+   VkPipeline vi_points = gpl_library(&g, VK_GRAPHICS_PIPELINE_LIBRARY_VERTEX_INPUT_INTERFACE_BIT_EXT, RGBA32F, NONE, GPL_POINTS, true, FILL);
+   VkPipeline pre_layer = gpl_library(&gl, VK_GRAPHICS_PIPELINE_LIBRARY_PRE_RASTERIZATION_SHADERS_BIT_EXT, RGBA32F, RGBA8, PLAIN, true, FILL);
+   VkPipeline out_const = gpl_library(&g, VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_OUTPUT_INTERFACE_BIT_EXT, RGBA32F, RGBA8, GPL_BLEND_CONSTANT, true, FILL);
+   const int msl_libs = msl_count();
+   /* Each pre-rasterization library builds its vertex shader's library, the
+    * first one also the empty fragment shader's, and each fragment shader
+    * library its fragment shader's: 4 vertex and 1 + 6 fragment */
+   printf("gpl: 24 libraries made %d MSL libraries\n", msl_libs - msl_start);
+   if (msl_start >= 0 && msl_libs - msl_start != 4 + 7) {
+      fprintf(stderr, "gpl: the libraries made %d MSL libraries, not 11\n",
+              msl_libs - msl_start);
+      return 1;
+   }
+
+   /* A fragment shader library whose float textures are only queried
+    * (shaders/query-float.frag), as DXVK's D3D9 fetch4 path queries every
+    * sampler's size: its MSL names them float, not int (PLA-437) */
+   {
+      DPROC(vkCreateDescriptorSetLayout);
+      VkDescriptorSetLayoutBinding bindings[] = {
+         {0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT},
+         {1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT},
+      };
+      VkDescriptorSetLayoutCreateInfo dslci = {
+         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+         .bindingCount = 2,
+         .pBindings = bindings,
+      };
+      VkDescriptorSetLayout dsl;
+      CHECK(vkCreateDescriptorSetLayout(dev, &dslci, NULL, &dsl));
+      VkPipelineLayoutCreateInfo qplci = plci;
+      qplci.setLayoutCount = 1;
+      qplci.pSetLayouts = &dsl;
+      struct gpl_libs gq = {.fs = load_module("query-float.frag")};
+      CHECK(vkCreatePipelineLayout(dev, &qplci, NULL, &gq.layout));
+      const int before = msl_count();
+      VkPipeline frag_query = gpl_library(&gq, VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_SHADER_BIT_EXT, RGBA32F, RGBA8, PLAIN, true, FILL);
+      const int after = msl_count();
+      if (before >= 0 &&
+          (after - before != 1 ||
+           !msl_contains(before, after, "texture2d<float>") ||
+           !msl_contains(before, after, "texture2d_ms<float>") ||
+           msl_contains(before, after, "texture2d<int>") ||
+           msl_contains(before, after, "texture2d_ms<int>"))) {
+         fprintf(stderr, "gpl: the query-float library is not 1 MSL library with texture2d<float> and texture2d_ms<float> alone\n");
+         return 1;
+      }
+      vkDestroyPipeline(dev, frag_query, NULL);
+      printf("ok gpl query-texture-type\n");
+   }
+
+   /* MSL libraries each link compiles at link and at its first draw; -1 for
+    * a whole pipeline (2 or more) */
+   struct {
+      const char *name;
+      VkPipeline libs[4];
+      bool lto;
+      VkFormat color;
+      int at_link, at_draw;
+      /* Drawn into a 4-sample target */
+      bool four_samples;
+      /* Its two draws set other blend constants: one link serves both
+       * (run.sh counts the separate links) */
+      bool blend_constants;
+   } links[] = {
+      {"fast f32 rgba8", {vi_f32, pre, frag, out_u8}, false, RGBA8, 0, 0},
+      {"fast u8 rgba8", {vi_u8, pre, frag, out_u8}, false, RGBA8, 0, 0},
+      {"fast bgra8 rgba8", {vi_bgra8, pre, frag, out_u8}, false, RGBA8, 0, 0},
+      {"fast f32 rgba16f blend", {vi_f32, pre, frag, out_f16}, false, RGBA16F, 0, 0},
+      {"fast write-mask rgba8", {vi_f32, pre, frag, out_mask}, false, RGBA8, 0, 0},
+      {"fast alpha-to-coverage rgba8", {vi_f32, pre, frag_a2c, out_a2c}, false, RGBA8, 0, 0},
+      {"fast dual-source rgba8", {vi_f32, pre, frag_dual, out_dual}, false, RGBA8, 0, 0},
+      {"fast no-fs rgba8", {vi_f32, pre, no_frag, out_u8}, false, RGBA8, 0, 0},
+      {"fast point-fill fallback", {vi_f32, pre_points, frag, out_u8}, false, RGBA8, 0, -1},
+      {"fast logic-op fallback", {vi_f32, pre, frag, out_logic}, false, RGBA8, 0, -1},
+      {"fast varyings rgba8", {vi_f32, pre_vary, frag_vary, out_u8}, false, RGBA8, 0, 0},
+      {"lto f32 rgba8", {vi_f32, pre, frag, out_u8}, true, RGBA8, 2, 0},
+      {"lto u8 rgba16f blend", {vi_u8, pre, frag, out_f16}, true, RGBA16F, 2, 0},
+      {"fast sample-mask 0x1 of 1 rgba8", {vi_f32, pre, frag_smask, out_smask}, false, RGBA8, 0, 0},
+      {"fast sample-mask 0x5 of 4 fallback", {vi_f32, pre, frag_smask4, out_smask4}, false, RGBA8, 0, -1, true},
+      /* Its vertex library writes a point size, as every one does: Metal
+       * (the mock) refuses that with the line and triangle classes, so the
+       * other fast links leave the class unspecified, which a vertex shader
+       * that writes a layer cannot have */
+      {"fast points rgba8", {vi_points, pre, frag, out_u8}, false, RGBA8, 0, 0},
+      {"fast layer point-size fallback", {vi_f32, pre_layer, frag, out_u8}, false, RGBA8, 0, -1},
+      {"fast blend constants rgba8", {vi_f32, pre, frag, out_const}, false, RGBA8, 0, 0, false, true},
+   };
+   VkImageView views[3] = {
+      gpl_target(pd, RGBA8, VK_SAMPLE_COUNT_1_BIT, NULL, NULL),
+      gpl_target(pd, RGBA16F, VK_SAMPLE_COUNT_1_BIT, NULL, NULL),
+      gpl_target(pd, RGBA8, VK_SAMPLE_COUNT_4_BIT, NULL, NULL)};
+   for (unsigned i = 0; i < sizeof(links) / sizeof(links[0]); i++) {
+      const int before_link = msl_count();
+      VkPipeline p = gpl_link(&g, links[i].libs, links[i].lto);
+      const int linked = msl_count();
+
+      VkCommandBufferAllocateInfo cbai = {
+         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+         .commandPool = pool,
+         .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+         .commandBufferCount = 1,
+      };
+      VkCommandBuffer cmd;
+      CHECK(vkAllocateCommandBuffers(dev, &cbai, &cmd));
+      VkCommandBufferBeginInfo bi = {
+         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+      };
+      CHECK(vkBeginCommandBuffer(cmd, &bi));
+      VkRenderingAttachmentInfo ca = {
+         .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+         .imageView = views[links[i].four_samples       ? 2
+                            : links[i].color == RGBA16F ? 1
+                                                        : 0],
+         .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+         .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+         .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+      };
+      VkRenderingInfo ri = {
+         .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
+         .renderArea = {{0, 0}, {64, 64}},
+         .layerCount = 1,
+         .colorAttachmentCount = 1,
+         .pColorAttachments = &ca,
+      };
+      vkCmdBeginRendering(cmd, &ri);
+      vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, p);
+      VkViewport vpt = {0, 0, 64, 64, 0, 1};
+      VkRect2D sc = {{0, 0}, {64, 64}};
+      vkCmdSetViewport(cmd, 0, 1, &vpt);
+      vkCmdSetScissor(cmd, 0, 1, &sc);
+      VkDeviceSize off = 0;
+      vkCmdBindVertexBuffers(cmd, 0, 1, &buf, &off);
+      const float quarter[4] = {0.25f, 0.25f, 0.25f, 0.25f};
+      const float three_quarters[4] = {0.75f, 0.5f, 0.25f, 1.0f};
+      if (links[i].blend_constants)
+         vkCmdSetBlendConstants(cmd, quarter);
+      vkCmdDraw(cmd, 12, 1, 0, 0);
+      if (links[i].blend_constants)
+         vkCmdSetBlendConstants(cmd, three_quarters);
+      vkCmdDraw(cmd, 24, 3, 3, 1);
+      vkCmdEndRendering(cmd);
+      CHECK(vkEndCommandBuffer(cmd));
+      const int drawn = msl_count();
+      VkSubmitInfo si = {
+         .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+         .commandBufferCount = 1,
+         .pCommandBuffers = &cmd,
+      };
+      CHECK(vkQueueSubmit(queue, 1, &si, VK_NULL_HANDLE));
+      CHECK(vkQueueWaitIdle(queue));
+      const int at_link = linked - before_link, at_draw = drawn - linked;
+      if (before_link >= 0 &&
+          (at_link != links[i].at_link ||
+           (links[i].at_draw < 0 ? at_draw < 2 : at_draw != links[i].at_draw))) {
+         fprintf(stderr, "gpl %s: MSL libraries at link %d, at draw %d\n",
+                 links[i].name, at_link, at_draw);
+         return 1;
+      }
+      printf("ok gpl %s: MSL libraries at link %d, at draw %d\n", links[i].name,
+             at_link, at_draw);
+      vkDestroyPipeline(dev, p, NULL);
+   }
+   VkPipeline libs[] = {vi_f32,   vi_u8,     vi_bgra8, pre,      pre_points,
+                        frag,     no_frag,   frag_a2c, frag_dual, out_u8,
+                        out_f16,  out_mask,  out_a2c,  out_dual, out_logic,
+                        pre_vary, frag_vary, frag_smask, frag_smask4,
+                        out_smask, out_smask4, vi_points, pre_layer,
+                        out_const};
+   for (unsigned i = 0; i < sizeof(libs) / sizeof(libs[0]); i++)
+      vkDestroyPipeline(dev, libs[i], NULL);
+   if (gpl_round_trip(pd))
+      return 1;
+   printf("ok gpl: libraries, fast and optimized links drawn\n");
+   return 0;
+}
+
+/* texel.comp's pipeline in layout, from module or, with
+ * VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT, from id */
+static VkResult
+identifier_compute(VkPipelineCache cache, VkPipelineLayout layout,
+                   VkShaderModule module,
+                   const VkPipelineShaderStageModuleIdentifierCreateInfoEXT *id,
+                   VkPipeline *p)
+{
+   DPROC(vkCreateComputePipelines);
+   VkComputePipelineCreateInfo ci = {
+      .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+      .flags = id ? VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT : 0,
+      .stage = {
+         .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+         .pNext = id,
+         .stage = VK_SHADER_STAGE_COMPUTE_BIT,
+         .module = id ? VK_NULL_HANDLE : module,
+         .pName = "main",
+      },
+      .layout = layout,
+   };
+   *p = (VkPipeline)(uintptr_t)1;
+   VkResult r = vkCreateComputePipelines(dev, cache, 1, &ci, NULL, p);
+   if (r == VK_PIPELINE_COMPILE_REQUIRED && *p != VK_NULL_HANDLE) {
+      fprintf(stderr, "module_identifier: VK_PIPELINE_COMPILE_REQUIRED with "
+              "a pipeline\n");
+      exit(1);
+   }
+   return r;
+}
+
+/* Whether the MSL libraries [first, first + n) are each the same as those
+ * from like on; true without KK_MOCK_MSL_DIR */
+static bool
+msl_same_run(int first, int like, int n)
+{
+   for (int i = 0; first >= 0 && i < n; i++)
+      if (!msl_same(first + i, like + i))
+         return false;
+   return true;
+}
+
+/* VK_EXT_shader_module_identifier (PLA-431), as vkd3d-proton's pipeline
+ * cache and DXVK's pipeline libraries use it. Without
+ * MESA_KK_EXPERIMENTAL=module_identifier, main's device has no
+ * vkGetShaderModuleIdentifierEXT. Either way the algorithm UUID is the
+ * common runtime's "MESA-BLAKE3". With it, on devices of their own (as main
+ * made dev, which enables it):
+ * - a module's identifier is the one of its create info, the same for the
+ *   same SPIR-V and another for other SPIR-V;
+ * - texel.comp's pipeline from its identifier fails with
+ *   VK_PIPELINE_COMPILE_REQUIRED, compiling nothing, without a pipeline
+ *   cache, from an empty one, and with an identifier no module has;
+ * - once built from its module into a pipeline cache, it is made from the
+ *   identifier through that cache, and on a second device through a cache
+ *   made from the first's data (but still not without one), any MSL library
+ *   it makes the same as its module's;
+ * - with gpl, on main's device, a vertex shader library from an identifier
+ *   fails the same way
+ *   in an empty pipeline cache, is made once the cache has it, and links
+ *   fast and draws. */
+static int
+check_module_identifier(VkPhysicalDevice pd, VkQueue queue, VkCommandPool pool,
+                        VkBuffer buf)
+{
+   IPROC(vkGetPhysicalDeviceProperties2);
+   IPROC(vkGetDeviceProcAddr);
+   VkPhysicalDeviceShaderModuleIdentifierPropertiesEXT id_props = {
+      .sType =
+         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_MODULE_IDENTIFIER_PROPERTIES_EXT,
+   };
+   VkPhysicalDeviceProperties2 props = {
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
+      .pNext = &id_props,
+   };
+   vkGetPhysicalDeviceProperties2(pd, &props);
+   const uint8_t uuid[VK_UUID_SIZE] = "MESA-BLAKE3";
+   if (memcmp(id_props.shaderModuleIdentifierAlgorithmUUID, uuid,
+              VK_UUID_SIZE) != 0) {
+      fprintf(stderr, "module_identifier: the algorithm UUID is not "
+              "MESA-BLAKE3\n");
+      return 1;
+   }
+   PFN_vkGetShaderModuleIdentifierEXT get_id =
+      (PFN_vkGetShaderModuleIdentifierEXT)vkGetDeviceProcAddr(
+         dev, "vkGetShaderModuleIdentifierEXT");
+   PFN_vkGetShaderModuleCreateInfoIdentifierEXT get_info_id =
+      (PFN_vkGetShaderModuleCreateInfoIdentifierEXT)vkGetDeviceProcAddr(
+         dev, "vkGetShaderModuleCreateInfoIdentifierEXT");
+   if (!get_id != !module_identifier_wanted() ||
+       !get_info_id != !module_identifier_wanted()) {
+      fprintf(stderr, "module_identifier: vkGetShaderModuleIdentifierEXT %s\n",
+              get_id ? "without the extension" : "missing");
+      return 1;
+   }
+   if (!module_identifier_wanted())
+      return 0;
+
+   IPROC(vkCreateDevice);
+   DPROC(vkDestroyDevice);
+   DPROC(vkDestroyShaderModule);
+   DPROC(vkCreateDescriptorSetLayout);
+   DPROC(vkDestroyDescriptorSetLayout);
+   DPROC(vkCreatePipelineLayout);
+   DPROC(vkDestroyPipelineLayout);
+   DPROC(vkCreatePipelineCache);
+   DPROC(vkGetPipelineCacheData);
+   DPROC(vkDestroyPipelineCache);
+   DPROC(vkDestroyPipeline);
+
+   /* Identifiers, on main's device */
+   VkShaderModuleCreateInfo comp_info = read_spv("texel.comp");
+   VkShaderModule comp = load_module("texel.comp");
+   VkShaderModule comp_again = load_module("texel.comp");
+   VkShaderModule frag = load_module("color.frag");
+   VkShaderModuleIdentifierEXT id_comp = {
+      .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_IDENTIFIER_EXT};
+   VkShaderModuleIdentifierEXT id_info = id_comp, id_again = id_comp,
+                               id_frag = id_comp;
+   get_id(dev, comp, &id_comp);
+   get_id(dev, comp_again, &id_again);
+   get_id(dev, frag, &id_frag);
+   get_info_id(dev, &comp_info, &id_info);
+   if (id_comp.identifierSize == 0 ||
+       id_comp.identifierSize > VK_MAX_SHADER_MODULE_IDENTIFIER_SIZE_EXT ||
+       id_info.identifierSize != id_comp.identifierSize ||
+       memcmp(id_info.identifier, id_comp.identifier, id_comp.identifierSize) ||
+       id_again.identifierSize != id_comp.identifierSize ||
+       memcmp(id_again.identifier, id_comp.identifier, id_comp.identifierSize) ||
+       id_frag.identifierSize != id_comp.identifierSize ||
+       !memcmp(id_frag.identifier, id_comp.identifier, id_comp.identifierSize)) {
+      fprintf(stderr, "module_identifier: identifiers of %u bytes; the create "
+              "info's the same %d, the same SPIR-V's %d, other SPIR-V's other %d\n",
+              id_comp.identifierSize,
+              !memcmp(id_info.identifier, id_comp.identifier, 32),
+              !memcmp(id_again.identifier, id_comp.identifier, 32),
+              !!memcmp(id_frag.identifier, id_comp.identifier, 32));
+      return 1;
+   }
+   free((void *)comp_info.pCode);
+   vkDestroyShaderModule(dev, comp_again, NULL);
+   vkDestroyShaderModule(dev, frag, NULL);
+   const VkPipelineShaderStageModuleIdentifierCreateInfoEXT by_id = {
+      .sType =
+         VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_MODULE_IDENTIFIER_CREATE_INFO_EXT,
+      .identifierSize = id_comp.identifierSize,
+      .pIdentifier = id_comp.identifier,
+   };
+   uint8_t no_module[32];
+   memset(no_module, 0xab, sizeof(no_module));
+   const VkPipelineShaderStageModuleIdentifierCreateInfoEXT by_bad_id = {
+      .sType =
+         VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_MODULE_IDENTIFIER_CREATE_INFO_EXT,
+      .identifierSize = sizeof(no_module),
+      .pIdentifier = no_module,
+   };
+
+   /* texel.comp's layout */
+   const VkDescriptorSetLayoutBinding bindings[] = {
+      {0, VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER, 1,
+       VK_SHADER_STAGE_COMPUTE_BIT, NULL},
+      {1, VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER, 1,
+       VK_SHADER_STAGE_COMPUTE_BIT, NULL},
+      {2, VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER, 1,
+       VK_SHADER_STAGE_COMPUTE_BIT, NULL},
+   };
+   const VkDescriptorSetLayoutCreateInfo dslci = {
+      .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+      .bindingCount = 3,
+      .pBindings = bindings,
+   };
+
+   const VkDevice main_dev = dev;
+   void *data = NULL;
+   size_t size = 0;
+   /* MSL libraries: [0] before the module's build, [1] after it, [2] after
+    * the first device's identifier build, [3] before the second device's,
+    * [4] after it */
+   int at[5] = {0};
+   for (int device = 0; device < 2; device++) {
+      CHECK(vkCreateDevice(pd, device_info, NULL, &dev));
+      VkDescriptorSetLayout dsl;
+      CHECK(vkCreateDescriptorSetLayout(dev, &dslci, NULL, &dsl));
+      VkPipelineLayoutCreateInfo plci = {
+         .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+         .setLayoutCount = 1,
+         .pSetLayouts = &dsl,
+      };
+      VkPipelineLayout layout;
+      CHECK(vkCreatePipelineLayout(dev, &plci, NULL, &layout));
+      VkPipelineCacheCreateInfo pcci = {
+         .sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO,
+         .initialDataSize = device ? size : 0,
+         .pInitialData = device ? data : NULL,
+      };
+      VkPipelineCache cache;
+      CHECK(vkCreatePipelineCache(dev, &pcci, NULL, &cache));
+      VkPipelineCache empty;
+      pcci.initialDataSize = 0;
+      pcci.pInitialData = NULL;
+      CHECK(vkCreatePipelineCache(dev, &pcci, NULL, &empty));
+
+      /* Not in any cache of this device */
+      const int before_miss = msl_count();
+      VkPipeline p;
+      VkResult no_cache = identifier_compute(VK_NULL_HANDLE, layout,
+                                             VK_NULL_HANDLE, &by_id, &p);
+      VkResult empty_cache =
+         identifier_compute(empty, layout, VK_NULL_HANDLE, &by_id, &p);
+      VkResult bad_id = identifier_compute(device ? cache : empty, layout,
+                                           VK_NULL_HANDLE, &by_bad_id, &p);
+      if (no_cache != VK_PIPELINE_COMPILE_REQUIRED ||
+          empty_cache != VK_PIPELINE_COMPILE_REQUIRED ||
+          bad_id != VK_PIPELINE_COMPILE_REQUIRED || msl_count() != before_miss) {
+         fprintf(stderr, "module_identifier device %d: without a cache %d, "
+                 "an empty cache %d, an unknown identifier %d, %d MSL "
+                 "libraries made\n",
+                 device, no_cache, empty_cache, bad_id,
+                 msl_count() - before_miss);
+         return 1;
+      }
+
+      if (device == 0) {
+         VkShaderModule module = load_module("texel.comp");
+         at[0] = msl_count();
+         CHECK(identifier_compute(cache, layout, module, NULL, &p));
+         at[1] = msl_count();
+         vkDestroyPipeline(dev, p, NULL);
+         vkDestroyShaderModule(dev, module, NULL);
+         CHECK(identifier_compute(cache, layout, VK_NULL_HANDLE, &by_id, &p));
+         at[2] = msl_count();
+         vkDestroyPipeline(dev, p, NULL);
+         CHECK(vkGetPipelineCacheData(dev, cache, &size, NULL));
+         data = malloc(size);
+         CHECK(vkGetPipelineCacheData(dev, cache, &size, data));
+      } else {
+         at[3] = msl_count();
+         CHECK(identifier_compute(cache, layout, VK_NULL_HANDLE, &by_id, &p));
+         at[4] = msl_count();
+         vkDestroyPipeline(dev, p, NULL);
+      }
+      vkDestroyPipelineCache(dev, cache, NULL);
+      vkDestroyPipelineCache(dev, empty, NULL);
+      vkDestroyPipelineLayout(dev, layout, NULL);
+      vkDestroyDescriptorSetLayout(dev, dsl, NULL);
+      vkDestroyDevice(dev, NULL);
+      dev = main_dev;
+   }
+   free(data);
+   if (at[0] >= 0) {
+      const int built = at[1] - at[0], again = at[2] - at[1],
+                second = at[4] - at[3];
+      if (built < 1 || again > built || second > built ||
+          !msl_same_run(at[1], at[0], again) ||
+          !msl_same_run(at[3], at[0], second)) {
+         fprintf(stderr, "module_identifier: the module's build made %d MSL "
+                 "libraries, the identifier's %d, the second device's %d, "
+                 "not the same\n", built, again, second);
+         return 1;
+      }
+   }
+   printf("ok module_identifier: identifiers stable, VK_PIPELINE_COMPILE_REQUIRED "
+          "without a cache, from an empty one and for an unknown identifier; "
+          "from the cache the module was built into %d MSL libraries, on a "
+          "second device from its data %d, as the module's %d\n",
+          at[2] - at[1], at[4] - at[3], at[1] - at[0]);
+
+   if (gpl_wanted()) {
+      VkPipelineLayoutCreateInfo plci = {
+         .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+         .flags = VK_PIPELINE_LAYOUT_CREATE_INDEPENDENT_SETS_BIT_EXT,
+      };
+      struct gpl_libs g = {.vs = load_module("pass.vert"),
+                           .fs = load_module("color.frag")};
+      CHECK(vkCreatePipelineLayout(dev, &plci, NULL, &g.layout));
+      VkShaderModuleIdentifierEXT id_vs = {
+         .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_IDENTIFIER_EXT};
+      get_id(dev, g.vs, &id_vs);
+      const VkPipelineShaderStageModuleIdentifierCreateInfoEXT vs_by_id = {
+         .sType =
+            VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_MODULE_IDENTIFIER_CREATE_INFO_EXT,
+         .identifierSize = id_vs.identifierSize,
+         .pIdentifier = id_vs.identifier,
+      };
+      struct gpl_libs g_id = {.layout = g.layout, .vs_id = &vs_by_id};
+      VkPipelineCacheCreateInfo pcci = {
+         .sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO,
+      };
+      CHECK(vkCreatePipelineCache(dev, &pcci, NULL, &gpl_pipeline_cache));
+      const VkFormat RGBA8 = VK_FORMAT_R8G8B8A8_UNORM;
+      const VkFormat RGBA32F = VK_FORMAT_R32G32B32A32_SFLOAT;
+      const VkPolygonMode FILL = VK_POLYGON_MODE_FILL;
+      const VkGraphicsPipelineLibraryFlagsEXT PRE =
+         VK_GRAPHICS_PIPELINE_LIBRARY_PRE_RASTERIZATION_SHADERS_BIT_EXT;
+      const int before_miss = msl_count();
+      VkPipeline miss = gpl_library(&g_id, PRE, RGBA32F, RGBA8, GPL_PLAIN, true, FILL);
+      const int after_miss = msl_count();
+      VkPipeline pre = gpl_library(&g, PRE, RGBA32F, RGBA8, GPL_PLAIN, true, FILL);
+      const int built = msl_count();
+      VkPipeline pre_id = gpl_library(&g_id, PRE, RGBA32F, RGBA8, GPL_PLAIN, true, FILL);
+      const int again = msl_count();
+      if (miss != VK_NULL_HANDLE || after_miss != before_miss ||
+          pre_id == VK_NULL_HANDLE || again - built > built - after_miss ||
+          !msl_same_run(built, after_miss, again - built)) {
+         fprintf(stderr, "module_identifier gpl: a vertex library from an "
+                 "identifier before the build %s (%d MSL libraries), after it "
+                 "%s (%d MSL libraries, the build %d)\n",
+                 miss ? "made" : "not made", after_miss - before_miss,
+                 pre_id ? "made" : "not made", again - built,
+                 built - after_miss);
+         return 1;
+      }
+      VkPipeline libs[4] = {
+         gpl_library(&g, VK_GRAPHICS_PIPELINE_LIBRARY_VERTEX_INPUT_INTERFACE_BIT_EXT,
+                     RGBA32F, RGBA8, GPL_PLAIN, true, FILL),
+         pre_id,
+         gpl_library(&g, VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_SHADER_BIT_EXT,
+                     RGBA32F, RGBA8, GPL_PLAIN, true, FILL),
+         gpl_library(&g, VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_OUTPUT_INTERFACE_BIT_EXT,
+                     RGBA32F, RGBA8, GPL_PLAIN, true, FILL),
+      };
+      VkImage image;
+      VkDeviceMemory image_mem;
+      VkImageView view = gpl_target(pd, RGBA8, VK_SAMPLE_COUNT_1_BIT, &image,
+                                    &image_mem);
+      VkPipeline linked = gpl_link(&g, libs, false);
+      gpl_draw(queue, pool, buf, view, linked);
+      printf("ok module_identifier gpl: a vertex library from an identifier: "
+             "VK_PIPELINE_COMPILE_REQUIRED in an empty cache, made from the "
+             "cache with %d MSL libraries (the build %d), linked fast and "
+             "drawn\n", again - built, built - after_miss);
+      DPROC(vkDestroyImageView);
+      DPROC(vkDestroyImage);
+      DPROC(vkFreeMemory);
+      vkDestroyPipeline(dev, linked, NULL);
+      vkDestroyPipeline(dev, pre, NULL);
+      for (int i = 0; i < 4; i++)
+         vkDestroyPipeline(dev, libs[i], NULL);
+      vkDestroyPipelineCache(dev, gpl_pipeline_cache, NULL);
+      gpl_pipeline_cache = VK_NULL_HANDLE;
+      vkDestroyImageView(dev, view, NULL);
+      vkDestroyImage(dev, image, NULL);
+      vkFreeMemory(dev, image_mem, NULL);
+      vkDestroyPipelineLayout(dev, g.layout, NULL);
+      vkDestroyShaderModule(dev, g.vs, NULL);
+      vkDestroyShaderModule(dev, g.fs, NULL);
+   }
+   vkDestroyShaderModule(dev, comp, NULL);
    return 0;
 }

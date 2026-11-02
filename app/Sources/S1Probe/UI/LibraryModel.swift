@@ -7,6 +7,7 @@
 // are logged to the app log (AppLog) as `library:` lines. None needs Steam:
 // a Steam install is verified against its retained manifests.
 
+import BattleNetClientKit
 import EpicClientKit
 import GOGClientKit
 import Foundation
@@ -55,8 +56,16 @@ final class LibraryModel: ObservableObject {
     /// What a Play does before the game starts, by title id, for its Play button (a Steam game's
     /// redistributables download).
     @Published private(set) var preparing: [String: String] = [:]
+    /// The Play an accepted ban-risk notice went on with (PLA-514): what it returned, for a dev
+    /// build's UIDriver to follow as it follows a play:.
+    private(set) var noticePlay: Task<Bool, Never>?
+    /// The Play that goes on after the Battle.net update it asked for finished in Downloads
+    /// (`playAfterUpdate`), for a dev build's UIDriver to follow as it follows a play:.
+    private(set) var updatePlay: (id: String, task: Task<Bool, Never>)?
     /// A refresh asked for while a scan ran: its scan may predate the change.
     private var rescan = false
+    /// Waiting in `settled()` for the running scan, and any rescan asked during it, to be adopted.
+    private var settling: [CheckedContinuation<Void, Never>] = []
     private let store = CatalogStore(url: LibraryModel.paths.catalog)
 
     private init() {
@@ -165,14 +174,8 @@ final class LibraryModel: ObservableObject {
     private func adopted(_ scanned: Catalog) {
         scanning = false
         scannedOnce = true
-        // Edits made while the scan ran win over the scan's copy of them.
-        var merged = scanned
-        for i in merged.titles.indices {
-            guard let now = catalog.title(id: merged.titles[i].id) else { continue }
-            merged.titles[i].lastPlayed = now.lastPlayed
-            merged.titles[i].playSeconds = now.playSeconds
-            if now.buildID == merged.titles[i].buildID { merged.titles[i].lastVerification = now.lastVerification }
-        }
+        // Edits made while the scan ran (play time, a verification, a notice acceptance) win over the scan's copy of them.
+        var merged = scanned.keepingEdits(of: catalog)
         if merged.titles.map(\.id) != catalog.titles.map(\.id) {
             Self.log("adopted \(merged.titles.count) title(s): "
                      + merged.titles.map { "\($0.name) [\($0.badge.rawValue)]" }.joined(separator: ", "))
@@ -185,6 +188,19 @@ final class LibraryModel: ObservableObject {
             rescan = false
             refresh()
         }
+        // No scan pending (a rescan that could not start, a title running, leaves none either).
+        if !scanning {
+            let waiting = settling
+            settling = []
+            for c in waiting { c.resume() }
+        }
+    }
+
+    /// Returns once the running scan, and a rescan asked for while it ran, has been adopted; at once
+    /// when no scan runs. What a refresh found on disk (an update's new client) is then the catalogue's.
+    func settled() async {
+        guard scanning else { return }
+        await withCheckedContinuation { settling.append($0) }
     }
 
     func title(_ id: String) -> InstalledTitle? { catalog.title(id: id) }
@@ -200,14 +216,64 @@ final class LibraryModel: ObservableObject {
     /// asks, an ownership token. When they cannot be had it does not start; the player gets Try again,
     /// and for a game that may run offline Play offline (`epicOffline`), which starts it as before
     /// step 1 of the store game sign-in plan, with no sign-in arguments.
+    /// A Battle.net copy follows PlayportKit's BattleNetPlay (PLA-514, PLA-521, decision 0177): the
+    /// ban-risk notice first (false while it is up; accepted, the Play goes on as `noticePlay`), then
+    /// the update check: a newer build, or the x64 client an install from before 0177 lacks, that fits
+    /// is updated through Downloads (false; the Play goes on as `updatePlay` once it finished), one that
+    /// does not is refused, a failed check is said on the launch screen; then a copy whose client is not
+    /// the x64 one is refused, and the x64 client starts through FEX on Vulkan. `battleNetUpdate`: the
+    /// check's answer when the Play already has it.
     /// `continuing`: the Play goes on after Playport's restart that followed its prerequisites
     /// (AppRestart.continuePlay, decision 0084): no cloud save check (the Play passed it a few
     /// seconds ago) and no prerequisites, so it cannot restart again.
     @discardableResult
     /// `program`: an .exe a page's Run a program copied into the game's folder (GameMods), run in
     /// its place with the game's settings, without its arguments, prerequisites or sign-ins.
-    func play(_ id: String, epicOffline: Bool = false, continuing: Bool = false, program: String? = nil) async throws -> Bool {
+    func play(_ id: String, epicOffline: Bool = false, continuing: Bool = false,
+              battleNetUpdate: BattleNetPlay.Update? = nil, program: String? = nil) async throws -> Bool {
         guard catalog.title(id: id)?.canPlay == true, !TitleLaunch.shared.running, !TitleLaunch.shared.spent else { return false }
+        // A Battle.net copy (PLA-514, decisions 0175 and 0177): the ban-risk notice before its first Play,
+        // which goes on once accepted; declined, nothing starts. Then the update check (PLA-521), not while
+        // a download of the copy is queued; while it runs the Play button says so and a second Play does not
+        // start another check. A client that is not the x64 one is refused after it.
+        var bnetLaunch: BattleNetPlay.Launch?
+        if let t = catalog.title(id: id), BattleNet.product(t.key) != nil {
+            let installs = SteamAccountModel.current?.installs
+            if installs?.jobs[t.key] != nil || preparing[id] != nil { return false }
+            var facts = BattleNetPlay.Facts(copy: t, update: battleNetUpdate)
+            decide: while let step = BattleNetPlay.decide(facts) {
+                switch step {
+                case let .notice(product):
+                    Self.log("play \(t.name) (\(id)): the ban-risk notice asks first")
+                    askRiskNotice(t, product)
+                    return false
+                case let .refuse(why):
+                    Self.log("play \(t.name) (\(id)) refused: \(why)")
+                    PadModal.shared.picker(title: "Can't start \(t.name)", context: nil, note: why,
+                                           options: [PadOption(id: "ok", label: "OK")], selected: nil) { _ in }
+                    return false
+                case let .checkUpdate(product):
+                    Self.log("play \(t.name) (\(id)): checking for an update")
+                    preparing[id] = "Checking for an update…"
+                    facts.update = await BattleNetInstalled.shared.checkUpdate(product)
+                    preparing[id] = nil
+                    facts.freeBytes = freeBytes
+                case let .update(product, version):
+                    guard let installs else {
+                        Self.log("play \(t.name) (\(id)): an update to \(version) is out, and there is no download queue")
+                        return false
+                    }
+                    Self.log("play \(t.name) (\(id)): updating to \(version) in Downloads first")
+                    if let why = BattleNetInstalled.shared.update(product, downloads: installs, thenPlay: id) {
+                        Self.log("play \(t.name) (\(id)): the update was not queued: \(why)")
+                    }
+                    return false
+                case let .launch(launch):
+                    bnetLaunch = launch
+                    break decide
+                }
+            }
+        }
         // A game whose saves changed on the phone and on Steam asks which to keep first; the
         // choice starts it, Decide later does not (UI/CloudConflictView.swift).
         if !continuing, program == nil, let t = catalog.title(id: id), let app = t.appID, let steam = SteamAccountModel.current {
@@ -222,6 +288,11 @@ final class LibraryModel: ObservableObject {
         // with the fix; a missing pairing (iOS 27) or LocalDevVPN down JitSetup fixes (UI/SetupView.swift).
         guard SetupState.shared.beforePlay(steamGame: catalog.title(id: id)?.appID != nil) else { return false }
         guard await JitSetup.shared.ensureReady() else { return false }
+        // A failed update check is said on the launch screen (PLA-521); the installed version plays.
+        if let report = bnetLaunch?.report {
+            Self.log("play \(id): \(report)")
+            SetupState.shared.addLaunchNote(report)
+        }
         // Setup may outlive navigation or a catalogue refresh: validate again
         // and build the launch from current settings only after sheet dismissal.
         guard let t = catalog.title(id: id), t.canPlay, !verifying.contains(id), !removing.contains(id),
@@ -231,22 +302,47 @@ final class LibraryModel: ObservableObject {
         if let program { plan = try LaunchPlan.make(installDir: t.installDir, executable: program, arguments: []) }
         // A program runs as a game continued after its prerequisites does: none run first.
         let continuing = continuing || program != nil
-        // The player's settings over 720p, 60 fps, Vulkan for DX12 and DXMT otherwise.
+        // The player's settings over 720p, 60 fps, Vulkan and every game's defaults (decision 0153).
         #if PLAYPORT_RELEASE
         var settings = LaunchSettingsStore.shared.effective(for: t)
         // Memory ordering, block size, x87 precision, the disk cache, the Steam API choice and runtime keys are a dev build's
-        // (decision 0034): the player's app runs the game's profile and the emulator, whatever a dev build left stored.
+        // (decision 0034): the player's app runs the game's profile and the defaults, whatever a dev build left stored.
         settings.ordering = MemoryOrdering()
         settings.maxInst = nil
         settings.x87Reduced = nil
         settings.diskCache = nil
-        settings.steamAPI = .emulated
-        settings.runtime = [:]
+        // Playport's Steam client unless the game's compatibility default says otherwise (decisions 0115, 0153).
+        let compat = LaunchSettingsStore.shared.compat(for: t.id)?.settings
+        settings.steamAPI = LaunchSettings.releaseSteamAPI(compat: compat)
+        // The compatibility default's runtime keys, never a person's (decision 0126); every game's go under
+        // them in config(over:) (decision 0153).
+        settings.runtime = LaunchSettings.releaseRuntime(compat: compat)
         settings.graphicsEnvironment = [:]
         #else
-        let settings = LaunchSettingsStore.shared.effective(for: t)
+        var settings = LaunchSettingsStore.shared.effective(for: t)
         #endif
-        // A Steam app's steam_api: the emulator told about the paired account, or the game's own.
+        // A Battle.net copy's client: Blizzard's x64 client through FEX (decision 0177) drawing with Direct3D 12
+        // through vkd3d-proton on Vulkan, whatever the graphics settings say. Its Config.wtf first gets the install's
+        // language and region where it names none (else WoW asks in a Win32 box), the intro cinematic marked seen
+        // where it names none, and Direct3D 12 pinned. The launch screen stays up to its first window (minutes).
+        if let bnet = bnetLaunch {
+            if let product = BattleNet.product(t.key) { BattleNetInstalled.shared.prepareForPlay(product) }
+            settings.graphics = bnet.graphics
+            plan.args += bnet.arguments.filter { arg in !plan.args.contains { $0.caseInsensitiveCompare(arg) == .orderedSame } }
+            Self.log("play \(t.name): Battle.net's x64 client through FEX on \(bnet.graphics.rawValue), "
+                     + "\(bnet.arguments.joined(separator: " ")), Config.wtf's GxApi D3D12, GamePadEnable, HardwareCursor and playIntroMovie; "
+                     + "the launch screen waits up to \(Int(bnet.uncoverWithoutFrame)) s for its first window; WoW asks for its own sign-in")
+        }
+        // A game whose Play starts a publisher's launcher runs with its Open's grace, graphics
+        // environment and runtime keys under its own (decision 0115).
+        var exhaustionGrace = JitPool.exhaustionGrace
+        if let launcher = PublisherLauncher.startedBy(game: t.id) {
+            (settings, exhaustionGrace) = launcher.startingGame(settings)
+            Self.log("play \(t.name): starts \(launcher.name); its Open's grace (\(Int(exhaustionGrace)) s), graphics environment "
+                     + "and runtime keys apply")
+        }
+        // A Steam app's steam_api: the emulator told about the paired account, the game's own served by
+        // Playport's Steam client (decision 0115), or the game's own alone.
         let service = SteamAccountModel.current?.service
         // The emulator's encrypted app ticket, on by default (decision 0017): asked for now, while the
         // session is up (TitleLaunch.start closes it), after the start's sweep of old ones.
@@ -254,10 +350,15 @@ final class LibraryModel: ObservableObject {
         // The game's auth session and web API tickets, on by default (decision 0062): armed now, and
         // the CM session stays logged on for them alone through the play.
         var tickets: SteamTicketBroker?
-        if program == nil, let app = t.appID, settings.steamAPI == .emulated, let service {
+        // Steam refused the app's ownership ticket (AccessDenied): no licence grants it, and Playport's
+        // Steam client says so (decision 0115). Unknown (no session) counts as owned, as before.
+        var owned = true
+        if program == nil, let app = t.appID, settings.steamAPI == .emulated || settings.steamAPI == .client, let service {
             await ticketSweep?.value
             ticket = await service.encryptedAppTicket(appID: app)
-            tickets = await service.prepareTicketSession(appID: app, playLog: SteamTicketHost.log)
+            let session = await service.prepareTicketSession(appID: app, playLog: SteamTicketHost.log)
+            tickets = session.broker
+            if case .notOwned = session { owned = false }
         }
         // The game's language (Properties › Language on Steam), once its files are installed.
         let language = SteamGameLanguage.running(t)
@@ -269,7 +370,7 @@ final class LibraryModel: ObservableObject {
                                            if let language { s.language = language }
                                            return s
                                        },
-                                       ticket: ticket, tickets: tickets)
+                                       ticket: ticket, tickets: tickets, owned: owned)
         }
         let endTickets = { if tickets != nil { Task { await service?.endPlay() } } }
         // An Epic game's sign-in (decision 0059), fetched now: the code lives five minutes.
@@ -341,6 +442,16 @@ final class LibraryModel: ObservableObject {
             gogInstallScripts(t)
         }
         let prerequisites = Prerequisite.merge(store: storePrerequisites, unrealEngine: unrealEngine)
+        // Windows services (decision 0107): COM's RpcSs entry, which the prefix seed lacks, and the SCM's
+        // start timeout, for the SCM this play starts; a top-up, so a prefix that has them keeps its own.
+        if settings.windowsServices {
+            do {
+                try PrefixRegistryFile(prefix: WineHostRuntime.shared.prefixURL).add(WindowsServices.prefixEntries)
+                Self.log("play \(t.name): Windows services on; RpcSs's and MountMgr's service entries and the start timeout topped up in the prefix")
+            } catch {
+                Self.log("play \(t.name): RpcSs's and MountMgr's service entries and the start timeout not written (\(error))")
+            }
+        }
         // A GOG game's Galaxy service (decision 0063), on by default: listening from now to the game's exit
         // when its build names a Galaxy client and GOG is signed in; otherwise the game runs without it.
         let galaxy = t.store == .gog ? await GOGAccount.shared.galaxyListener(t.key.id, name: t.name) : nil
@@ -356,9 +467,15 @@ final class LibraryModel: ObservableObject {
                                        graphics: settings.graphics, graphicsEnvironment: settings.graphicsEnvironment,
                                        steamAppID: t.appID, fex: fex, steamAPI: steamAPI,
                                        memory: MemoryNeed.of(t, cohort: Self.cohort), epic: epic, galaxy: galaxy,
-                                       prerequisites: prerequisites, epicOffline: epicOffline,
-                                       poolMB: program != nil ? max(JitPool.programMB, settings.jitPoolMB ?? 0) : settings.jitPoolMB,
-                                       mouse: program != nil) else {
+                                       prerequisites: prerequisites, windowsServices: settings.windowsServices,
+                                       khronosVulkanLoader: settings.khronosVulkanLoader,
+                                       jitPoolMB: program != nil ? max(JitPool.programMB, settings.jitPoolMB ?? 0) : settings.jitPoolMB,
+                                       // The launcher it starts ends at the game's sign-in (decision 0130).
+                                       endLauncher: settings.endLauncherAfterSignIn
+                                           ? PublisherLauncher.startedBy(game: t.id)?.signIn : nil,
+                                       epicOffline: epicOffline,
+                                       exhaustionGrace: exhaustionGrace,
+                                       uncoverWithoutFrame: bnetLaunch?.uncoverWithoutFrame ?? LaunchProgress.uncoverWithoutFrame) else {
             endTickets()
             galaxy?.stop()
             return false
@@ -610,6 +727,44 @@ final class LibraryModel: ObservableObject {
         }
     }
 
+    /// The ban-risk notice before a Battle.net product's first Play (PLA-514, decision 0175). The
+    /// cursor starts on Don't play; Don't play, B or a tap outside start nothing, and the notice asks
+    /// again at the next Play. Accepting keeps the acceptance with the copy and goes on with the Play.
+    func askRiskNotice(_ t: InstalledTitle, _ product: BattleNetProduct) {
+        let notice = BattleNetPlay.notice(product)
+        PadModal.shared.picker(title: notice.title, context: t.name, note: notice.text,
+                               options: [PadOption(id: Self.noticeDecline, label: "Don't play"),
+                                         PadOption(id: Self.noticeAccept, label: "I understand, play")],
+                               selected: nil) { choice in
+            guard choice == Self.noticeAccept else {
+                Self.log("play \(t.name) (\(t.id)): ban-risk notice declined; Play not started")
+                return
+            }
+            LibraryModel.shared.acceptRiskNotice(t.id)
+        }
+    }
+
+    /// The notice's choices, which a dev build's UIDriver picks as the player does.
+    static let noticeAccept = "accept", noticeDecline = "decline"
+
+    private func acceptRiskNotice(_ id: String) {
+        catalog.update(id) { $0.riskNoticeAccepted = Date() }
+        save()
+        Self.log("play \(id): ban-risk notice accepted; kept with the copy, the Play goes on")
+        noticePlay = Task { (try? await self.play(id)) ?? false }
+    }
+
+    /// A Battle.net Play goes on once the update it queued finished (BattleNetInstalled.finished):
+    /// the check is not asked again. Downloads asked for a library refresh just before; the Play
+    /// waits for it, so it starts the client the update installed (the x64 one, decision 0177),
+    /// not the one the catalogue named before.
+    func playAfterUpdate(_ id: String) {
+        updatePlay = (id, Task {
+            await self.settled()
+            return (try? await self.play(id, battleNetUpdate: .updated)) ?? false
+        })
+    }
+
     /// The Cloud save conflict screen for the game's open conflicts; `thenPlay` starts it once settled.
     func askCloud(_ t: InstalledTitle, _ app: UInt32, _ conflicts: [SteamService.CloudConflict], thenPlay: Bool) {
         PadModal.shared.cloudConflict(CloudConflictSession(titleID: t.id, appID: app, name: t.name, conflicts: conflicts,
@@ -654,7 +809,11 @@ final class LibraryModel: ObservableObject {
                 }
                 if t.checksums == nil, let app = t.appID {
                     let r = try await TitleInstaller(layout: LibraryModel.paths.layout, session: nil, log: SteamUILog.logger).verify(appID: app)
-                    (v, report) = (InstalledTitle.Verification(date: Date(), files: r.files, bad: r.bad.count, unlisted: r.unlisted.count), r)
+                    (v, report) = (InstalledTitle.Verification(date: Date(), files: r.files, bad: r.bad.count, unlisted: r.unlisted.count,
+                                                               depotsToRecheck: r.depotsToRecheck.isEmpty ? nil : r.depotsToRecheck.count), r)
+                    if !r.depotsToRecheck.isEmpty {
+                        LibraryModel.log("verify \(t.name): depots \(r.depotsToRecheck) left out as shared installs; Repair checks them with Steam")
+                    }
                 } else {
                     (v, report) = try await TitleVerifier.verify(t, games: LibraryModel.paths.games, cohort: LibraryModel.cohort)
                 }
@@ -725,6 +884,7 @@ final class LibraryModel: ObservableObject {
                 if t.store != .steam { LibraryModel.paths.layout.removeReceipt(t.key) }
                 if t.store == .gog { await GOGAccount.shared.installer.forget(productID: t.key.id) }
                 if t.store == .epic { await EpicAccount.shared.installer.forget(t.key.id) }
+                if t.store == .battlenet { BattleNetStore.forget(t.key) }
             } catch {
                 LibraryModel.log("uninstall \(t.name) failed: \(error)")
                 failure = "\(error)"

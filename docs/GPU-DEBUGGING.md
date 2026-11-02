@@ -14,7 +14,6 @@ before it is needed.
 - **Results:** a finding others rely on becomes an evidence note, as in
   [DEVICE.md](DEVICE.md).
 - **Findings so far:** [metal-tools-without-a-mac](evidence/2026-09-29-metal-tools-without-a-mac.md).
-- **Leads to hunt:** [Hollow Knight's](plans/finished.md#hollow-knight-leads-from-the-first-gpu-captures).
 
 ## Which tool answers which question
 
@@ -25,9 +24,16 @@ before it is needed.
 | What one frame asks of the GPU: passes, targets, load/store, pipelines, draws, shader statistics | GPU capture: `pp gpu capture`, `pp gpu read` | [below](#a-frames-capture) |
 | Does the runtime misuse Metal, or does a shader read or write out of bounds or produce NaN | Metal validation: `pp gpu validate` | [below](#metal-validation) |
 | What the right picture is (D3D12, D3D11, Vulkan games) | the same game under Proton on this PC, captured with RenderDoc | [below](#the-reference-on-this-pc) |
-| Why a pass is slow (bandwidth, ALU, occupancy) | a Mac: Xcode's replay with counters | [On a Mac](#on-a-mac) |
+| Why a pass is slow (bandwidth, ALU, occupancy, limiters) | a Mac: `pp gpu live --capture … --profile`, `pp gpu profile` | [Scripted](#scripted-pp-gpu-on-the-mac) |
 | Where a hitch comes from (compiles, driver, CPU and GPU overlap) | our logs (`hitches.txt`); a Mac: Metal System Trace | [On a Mac](#on-a-mac) |
 | Which draw makes the picture wrong | a Mac: replay between draws, the shader debugger | [On a Mac](#on-a-mac) |
+| Is a Vulkan game's world stretched by its viewport or its camera, and what display values did it read | a dev build's game Graphics options `MESA_KK_FRAME_PROBE_S=N`: every N s after the first draw, ten times at most, the next 2500 draws' `[kk-draw]` lines and a scan of host-visible memory for view-projection matrices, `[kk-proj] P00 P11 aspect hits` (`patches/mesa` 0063); runtime key `env.MADEIRA_DISPLAY_QUERY_LOG=1`: each distinct answer of the display queries (metrics, monitor, modes, display config, device caps) per process as `[disp-q]` lines and the Vulkan surface extents as `[vk-surf]` (`patches/madeira-unix` 0178, `patches/wine-unix` 0044) | [rdr2-aspect](evidence/2026-10-20-rdr2-aspect.md) |
+| What KosmicKrisp's memory is: the game's own, KosmicKrisp's buffers, its Metal command allocators, the shaders' source | a dev build's `[kk-mem]` lines, at most one every 10 s (`MESA_KK_DEBUG=memory`, set with `compile` by `WineHostRuntime.swift`; `patches/mesa` 0046, 0047) | [rdr2-kk-memory](evidence/2026-10-20-rdr2-kk-memory.md) |
+| Which command buffers hold KosmicKrisp's command memory, and which callers ask for upload and scratch memory | a dev build's `[kk-cmd-census]` and `[kk-upload]` lines, every 30 s after a `[kk-mem]` line (`MESA_KK_DEBUG=memory`; `patches/mesa` 0131): recordings held now by queue or application, level, usage (once, simultaneous, reusable), pool flags and state, with upload and allocator MiB and ages; reusable primaries' direct and replayed submits; released recordings by hold time; then each `kk_pool_alloc` site's bytes, and for requests over 128 KiB the bytes asked, rounded and still owned | [rdr2-kk-audio-diagnostics](evidence/2026-10-30-rdr2-kk-audio-diagnostics.md) |
+| Does giving a ONE_TIME recording's command memory back at its commit's completion, and finer large-BO sizes, shrink KosmicKrisp's command memory | experiments through the game's Graphics options `MESA_KK_EXPERIMENTAL=cmd_retire,cmd_bo_classes`, off by default except for a Play of Rockstar's launcher (RDR2), where both are on in both builds (decision 0173) (`cmd_retire` must be named, `all` leaves it out; `patches/mesa` 0132–0134): with `cmd_retire` a dev build's `[kk-cmd-census]` block has a `[kk-cmd-retire]` line (`MESA_KK_DEBUG=memory`) giving the retirements in flight and done with their MiB, and the allocators reset, sealed (over 8 MiB at an End), tainted (begun in Metal and released without a commit, so destroyed, never reset), destroyed (tainted ones), shared, released (sealed ones destroyed once idle: a Metal reset keeps the heaps), trimmed (idle ones past four a pool), capped (a sealed one shared at the cap of eight a pool), over-cap (made past it, every one recording), `pool-max` (the most one pool had) and `unbegun` (recordings that encoded nothing, so began no Metal command buffer); the census's `submitted-once` buckets then hold `upload=0.0`. A `[kk-mem]` line ending `| growing allocators+N command+M MiB` came early (within a second, 8 allocators or 64 MiB more; the census then every 5 s; mesa 0135). With `cmd_bo_classes`, `[kk-upload]` `rounded` falls toward `asked` and `[kk-mem]` `large-new` rises. Bisect a fault with `cmd_retire` alone | [rdr2-kk-audio-diagnostics](evidence/2026-10-30-rdr2-kk-audio-diagnostics.md) |
+| Is a Vulkan game GPU-bound or CPU-bound: the GPU time of the command buffers that completed, frames, the time blocked waiting for a drawable or a present | a dev build's `[kk-gpu]` lines, about one a second (`MESA_KK_DEBUG=gpu`, set with `compile,memory` by `WineHostRuntime.swift`; a game's Graphics options `MESA_KK_DEBUG=` replaces the set, so name `gpu` there too): `busy` is GPU time with overlaps counted once and its share of the interval, `gpu/frame` is busy over frames, `acquire` and `present-wait` are the presenting threads' waits, `submit` the driver's own queue-submit CPU time (`patches/mesa` 0080). Busy near 100 % means GPU-bound; low busy with frames below the cap means the CPU side limits | [rdr2-perf-ports](evidence/2026-10-20-rdr2-perf-ports.md) |
+| What KosmicKrisp's Metal builds cost and which fail: each step (vertex, fragment library, pipeline), the MSL's source and size, the calling thread | a dev build's `[kk-compile]` lines (`MESA_KK_DEBUG=compile`, on by default): builds over 20 ms and every `FAIL` (`step=`, `err=DOMAIN:CODE`, `interrupted=1` when iOS ended MTLCompilerService); experiments, all off by default, through the game's Graphics options `MESA_KK_EXPERIMENTAL=`: `compile_retry` (an interrupted build again, twice at most, 200 ms apart; `retry` lines), `parallel_stages` (vertex and fragment libraries at once; `par=1`), `library_size_opt` (`MTLLibraryOptimizationLevelSize`), `msl41` (MSL 4.1 on iOS 27 with `shaderSharedFloat32AtomicAdd`, not the default 4.0, decision 0159) (`patches/mesa` 0052, 0053, 0107) | [kk-compile-levers](evidence/2026-10-20-kk-compile-levers.md) |
+| Which shaders are behind a slow or failed Metal build, and why they are large | a dev build's game Graphics options `MESA_KK_DUMP_MSL_MIN_KB=N`: each build over N KB of MSL writes its MSL, SPIR-V and specialization into `Library/Caches/kk-dump` (`MSL.STAGE.metal`, `MSL.STAGE.spv`, `MSL.txt`, MSL the `msl=` of `[kk-compile]`; with `MESA_KK_EXPERIMENTAL=gpl` each pipeline library too, `kind gpl`; 200 MB cap; `[kk-dump]` lines), pulled with `pp phone ls`/`pp phone pull`; replay captured pipelines on the host mock (`build/mesa-host-test/run-replay.sh`, `KK_MOCK_MSL_DIR`). Costly SPIR-V unroll hints are dropped and twice-interrupted MSL skipped by default (`MESA_KK_DEBUG=unroll_hints`, `no_known_fail` undo them; `patches/mesa` 0060–0062, decision 0139) | [kk-msl-size](evidence/2026-10-20-kk-msl-size.md) |
 | Is a Vulkan picture wrong because of a KosmicKrisp workaround that OS version 27 turns off | the game's Graphics options: `MESA_KK_DEBUG=os26_workarounds` (all of them back on), then `MESA_KK_DISABLE_WORKAROUNDS=N` beside it to find which one (`patches/mesa` 0029) | [unity-urp-vulkan](evidence/2026-10-11-unity-urp-vulkan.md), [kk-ios27-workarounds](evidence/2026-10-11-kk-ios27-workarounds.md) |
 
 ## Diagnostics in Settings
@@ -72,7 +78,17 @@ Notes:
      next until first frame + `--secs` (default N/50 + 20).
   2. It pulls the bundle into the run directory
      (`$PLAYPORT_BUILD/gpu-runs/<time>`).
-  3. It writes `capture.txt`, plus `passes.txt` with `--pass-prof`.
+  3. It deletes the bundle on the phone (the capture is written into the game's
+     folder) once the phone's tree has the files, bytes and links of the pulled
+     copy (`afc.py rm-bundle`, a `Documents/…/NAME.gputrace` only); the `bundle`
+     event says so, with the free space after. A bundle left there fails the run.
+  4. It writes `capture.txt`, plus `passes.txt` with `--pass-prof`.
+- **Space:** before the play the phone must have `--expect-gb` (default 1)
+  free above a 3.5 GB reserve, or the run is refused (the `space` event).
+- **Timestamp queries:** Metal refuses to capture a device with a counter heap, so while a
+  KosmicKrisp capture is armed a timestamp query pool makes none and its timestamps all read
+  `0xffffffff00000000` (`patches/mesa` 0044, `[kk-query]` lines). GPU timings a game measures with
+  them are 0 in such a play.
 - **Recorded phone evidence:** a DXMT title-screen capture (frame 1200)
   returned its report and pass table (2026-09-29); frame 600 captures on
   [both backends](evidence/2026-10-06-vulkan-perf-tooling.md#03-gpu-capture-on-kosmickrisp)
@@ -164,10 +180,10 @@ Notes:
   same translation layers the phone does: DXVK for D3D8 to D3D11,
   vkd3d-proton for D3D12. Captured with RenderDoc, which is installed
   (`qrenderdoc`, `renderdoccmd`), it shows every draw's inputs and outputs.
-- **On the phone:** i386 titles and detected or requested D3D12 default to
-  Vulkan; other titles default to DXMT. Explicit game/global graphics choices
-  take precedence (`LaunchSettings.resolve`). DXMT runs D3D10/11 on Metal,
-  not DXVK: a Proton capture is then a reference picture, not the same translation.
+- **On the phone:** every game defaults to Vulkan (decision 0153); DXMT stays
+  a choice. Explicit game/global graphics choices take precedence
+  (`LaunchSettings.resolve`). DXMT runs D3D10/11 on Metal, not DXVK: for a game
+  set to DXMT a Proton capture is then a reference picture, not the same translation.
 - **Before a reference is needed, tell the person these steps.** They need
   the person at this PC and Steam's UI:
   1. The game installed in Steam on this PC, the Windows build (Hollow Knight
@@ -188,16 +204,68 @@ Notes:
   passes by size and targets) and compare its outputs with what the phone's
   frame shows. Finding the first wrong draw on the phone needs a Mac
   ([below](#on-a-mac)).
-- **Status:** these steps are untested here. The first use records what
-  worked in this section.
+- **What the first use found** (RDR2, 2026-10-20,
+  [evidence](evidence/2026-10-20-rdr2-desktop-reference.md)): RenderDoc's layer in
+  every process broke the game's launcher (DXVK's d3d11 device failed under it).
+  An `LD_PRELOAD` shim that answers `ENABLE_VULKAN_RENDERDOC_CAPTURE=1` only in the
+  process whose command line names the game's executable loads it there alone.
+  Captures were triggered through RenderDoc's target control (`qrenderdoc
+  --python`). RenderDoc reads its hotkeys from X11, so keys sent with `SendInput`
+  inside the prefix do not trigger F12.
 
 ## On a Mac
 
-**Status:** plan; nothing here has been tried on a Mac.
-[Decision 0031](decisions/0031-a-mac-for-analysis-only.md) (proposed) bounds
-it and must be accepted first. When the person says "we are on a Mac", start
-with [Arrival checks](#arrival-checks). Then offer the [agenda](#agenda) in
-order, skipping what [Open questions](#open-questions) already answers.
+**Status:** second session (PLA-457, PLA-458): capture, replay, profile and Instruments run from
+`pp gpu` with no Xcode window ([0165](decisions/0165-pp-drives-apples-gpu-tools-on-a-mac.md)).
+[Decision 0031](decisions/0031-a-mac-for-analysis-only.md) (accepted) bounds
+it; [0164](decisions/0164-pp-ui-from-the-mac.md) lets `pp ui` drive the phone
+from the Mac. When the person says "we are on a Mac", start
+with [Arrival checks](#arrival-checks), then [Scripted](#scripted-pp-gpu-on-the-mac). The
+questions still to answer on a Mac are in [PLA-457](https://linear.app/playportdev/issue/PLA-457).
+
+### Scripted: `pp gpu` on the Mac
+
+```sh
+# a running W3 frame, captured live at first frame +85, replayed and profiled on the phone
+./pp gpu live --title app-292030 --secs 110 \
+  --pad first-frame+10:witcher3-continue --pad first-frame+60:witcher3-walk \
+  --capture first-frame+85 --profile
+./pp gpu profile TRACE [--exec serial|overlapping] [--read]  # profile (again) a .gputrace
+./pp gpu live ... --trace 'Metal System Trace' --trace-at first-frame+70 --trace-secs 15
+```
+
+- **Setup:** `pymobiledevice3` on PATH and `PLAYPORT_USBMUX_SOCKET=/var/run/usbmuxd` in
+  `.work/inputs.local` (as for `pp ui`, [0164](decisions/0164-pp-ui-from-the-mac.md)); `--any-build`
+  while the Mac's `.work` has no install record.
+- **The capture layer:** `pp gpu live --capture` launches the app with `MTL_CAPTURE_ENABLED=1`
+  (`pp ui --capture-layer`). Only then does `gpucapture list` show `S1Probe`: Settings' GPU capture
+  `setenv()`s the variable inside the process, too late for Metal's capture layer, which is why Xcode's
+  capture button stayed grey in the first session.
+- **Counter heaps:** Metal's capture layer refuses a device with a Metal 4 counter heap
+  ("Capturing Metal 4 Counter Heap is not supported"). KosmicKrisp makes none while its own capture is
+  armed (`patches/mesa` 0044), so `live` also sets Settings' GPU capture to frame 999999, which no play
+  reaches.
+- **What is captured:** `--boundary layer` (default) is one presented frame, from the running game at
+  `--capture`'s time: no frame number to guess. Only the resources the frame uses are recorded (`-du`):
+  with every resource gpucapture downloaded about 10 GB of vkd3d-proton's heaps and the game ended mid-capture.
+  A W3 frame is about 4 GB and takes about 70 s.
+- **Replay and profile:** `gpudebug -d <phone>` replays the trace on the phone (about a minute to
+  ready) and `profile run --exec serial --embed` profiles it with every counter (about 40 s); the
+  phone is a replay device only while Xcode's GPU tools agent runs, and `pp` starts Xcode hidden
+  (`open -gj`) when it does not. An overlapping replay (`--exec overlapping`) left the 161 encoders
+  of W3's main command buffer untimed (each reported the whole frame); serial timed all of them.
+- **What comes back:** `profile.txt` ranks encoders by GPU time with each counter's mean over the
+  encoder's interval (occupancy, ALU, F32/F16, instruction, control flow, texture read/filter/write,
+  LLC, L1, MMU, vertex/fragment/compute shader launch limiters, bandwidth); `profile.json`;
+  `profile/*.json` the raw series (~33 µs a sample). `gpudebug --oneshot -t TRACE -c "profile load"
+  -c "go /performance/timeline/encoders/ascN" -c "go :d"` leads from an encoder to its dispatch
+  or draws, pipeline and shader source, with no phone. The cost rankings
+  (`performance/encoders`, `commands`, `shaders`) stay empty in these profiles.
+- **Instruments:** `--trace TEMPLATE` records the whole phone with `xctrace --all-processes
+  --device-name`, at `--trace-at` for `--trace-secs`; `<name>-toc.xml` beside it is its table of
+  contents (`xctrace export --toc`). Without `--capture` the play has no capture layer.
+- **Never** run a `gpudebug` session against the phone outside `pp`: an abandoned one left a
+  profiling session there that only a phone restart cleared. `pp` terminates its sessions.
 
 ### What only a Mac adds
 
@@ -223,8 +291,7 @@ Apple's command-line tools need macOS 27:
 
 1. Validation findings from `pp gpu validate --shaders` for the titles in
    question, each already with the function it came from: the Mac session
-   then only has to explain them. Hollow Knight's NaN interpolants are one
-   such lead.
+   then only has to explain them.
 2. A reference capture per rendering bug ([above](#the-reference-on-this-pc)).
 3. The questions written down: title, save, route (a `tools/pad/` script),
    settings and frame.
@@ -240,9 +307,9 @@ Apple's command-line tools need macOS 27:
   `which gpucapture gpudebug metalperftrace`).
 - **The phone:** cabled and trusted (`xcrun devicectl list devices`).
   Xcode may mount its own developer disk image; the phone stays on its iOS.
-- **Playport:** the build `pp phone status` reports on Linux. The phone keeps
-  its network connection to the workstation, so `pp ui` can still drive Play
-  (untested with a cable to the Mac); otherwise the person taps Play.
+- **Playport:** the build `pp phone status` reports. `pp ui` drives Play from
+  the Mac ([0164](decisions/0164-pp-ui-from-the-mac.md)); otherwise the person
+  taps Play.
 - **Never Run, Install, Profile-from-scheme or Uninstall Playport from
   Xcode.** They replace the app or delete its container: the Wine prefix,
   the Steam session and the games. Only attach, record and replay; launches
@@ -251,56 +318,9 @@ Apple's command-line tools need macOS 27:
   the repository or the evidence. Copy results to the workstation and run
   `pp secrets`.
 
-### Agenda
+### Finding the draw that goes wrong
 
-**0. Can the Mac's tools reach our process? (10 minutes, first)** The JIT
-helper takes its debugger turn at every launch.
-1. With Hollow Knight at its first frame, attach Time Profiler for 10 s:
-   `xcrun xctrace record --template 'Time Profiler' --device <phone> --attach
-   <process> --time-limit 10s --output hk-tp.trace`. The process is the
-   game's (`hollow_knight`) or Playport's executable (`S1Probe`): the game
-   runs inside it.
-2. Then try Xcode's Debug, Attach to Process with GPU capture on. If Xcode
-   cannot attach, try `gpucapture`.
-3. If nothing attaches, items 1 and 3 fall back to replaying captures taken
-   with `pp gpu capture`.
-
-**1. Hollow Knight's first-use hitches (performance).**
-- **Record:** Metal System Trace of the launch through the first minute of
-  play, with the `hk-new-game` and `hk-walk` pads:
-  `xcrun xctrace record --template 'Metal System Trace' --device <phone>
-  --attach <process> --time-limit 90s --output hk-mst.trace`. Try the Game
-  Performance Overview template too.
-- **Read:** `xcrun xctrace export --input hk-mst.trace --toc`, then
-  `--xpath`, so an agent can parse it.
-- **Questions:**
-  - Is each hitch a shader or pipeline compile, and in Apple's compiler or
-    DXMT's translation (`[shader-time]`)?
-  - Does the GPU idle between command buffers?
-  - How does DXMT's encode time compare with GPU time?
-- This serves [the performance plan](plans/finished.md#performance-follow-up-after-the-runtime-audit)'s
-  first-use-hitch items.
-
-**2. Is King's Pass bandwidth-bound? (performance)** Replay a King's Pass
-capture in Xcode with the phone as the replay device (replay needs the GPU
-the capture was taken on), or `gpudebug -q -d <phone> <bundle>`, and profile
-it. The questions come from
-[the evidence](evidence/2026-09-29-metal-tools-without-a-mac.md):
-- **The grab-pass copies:** four full-screen copies split the scene, and each
-  following pass loads and stores colour and depth.
-  - Do those passes show bandwidth limiters?
-  - Would one uncut pass save the copies' ~15 % and the reloads?
-- **Unused clears:** do the two clear-only depth passes cost anything?
-- **Precision:** is any shader limited by 32-bit ALU work that FP16 could
-  halve?
-- **Resolution:** what share of the frame is resolution-bound (1564×720
-  against native)?
-
-Record each pass's time, limiter, bandwidth and occupancy, and compare with
-`passes.txt` of the same run, to check our pass timer against Apple's.
-
-**3. Find the draw that goes wrong (correctness, the Vulkan backend and
-DXMT).**
+For correctness, on the Vulkan backend and DXMT:
 1. Start Playport with GPU capture on (any frame: it makes Metal allow
    captures) and play to the bad spot.
 2. Capture with Xcode or `gpucapture`.
@@ -313,24 +333,34 @@ vkd3d-proton's or DXVK's SPIR-V, which translates the game's DXBC or DXIL.
 Name the layer that is wrong before patching. Validation findings from
 Linux say where to look first.
 
-**4. Optional: `metalperftrace`.** The phone's look-back trace fails on
-iOS 27.0. If Instruments' Game Performance Overview recorded a play, try
-`metalperftrace overview --json` on it.
+`metalperftrace`'s look-back trace of the phone fails on iOS 27.0.
 
 ### What comes back
 
-- **Evidence:** a note per item in `docs/evidence/`, with the IPA's sha256,
+- **Evidence:** a note per question in `docs/evidence/`, with the IPA's sha256,
   the phone's OS, the commands and each question answered or not.
 - **Raw data:** traces and captures stay in `$PLAYPORT_BUILD`.
 - **Code:** a fix is a patch in `patches/<target>/`, checked by a Hollow
   Knight play; the Mac only analyses.
 
-### Open questions
+### What the sessions answered
 
-Answer these in the session and record the answers here:
-- Can Xcode, Instruments or `gpucapture` attach to Playport after the JIT
-  helper's turn?
-- Can the workstation drive `pp ui` while the phone is cabled to the Mac?
-- Does `gpudebug -d` replay on the phone, or only Xcode?
-- Does Settings' GPU capture (`MTL_CAPTURE_ENABLED` at start) suffice for
-  Xcode's capture button?
+The first session ([evidence](evidence/2026-10-28-mac-tools-and-w3-frame.md)):
+- **Can the tools attach after the JIT helper's turn?** Xcode's Attach to Process attaches, but the app
+  stays stopped until Continue, and Xcode offers no GPU capture there. `xctrace --attach` cannot find the
+  process. `xctrace --all-processes` records Time Profiler and Metal System Trace with Playport's threads
+  and GPU work: use that, with `--device-name`, not `--device`.
+- **Can `pp ui` drive the phone cabled to the Mac?** Yes, from the Mac
+  ([0164](decisions/0164-pp-ui-from-the-mac.md)), with `PLAYPORT_USBMUX_SOCKET=/var/run/usbmuxd` and
+  `pymobiledevice3`. Put `wait:5` after a `set:` whose value the next launch must read.
+- **Does replay work on the phone?** Xcode replays and profiles a `pp gpu capture` trace there. A full
+  W3 frame profiles in Lite mode only: encoder times, no limiters. `gpudebug` sees the phone only while
+  Xcode has a replay connection to it. Never run `gpudebug` against the phone at the same time: an
+  abandoned `gpudebug` session left a profiling session on the phone that only a phone restart cleared.
+  Export from Xcode, then read the exported trace with `gpudebug --oneshot … profile load`, which needs no
+  phone.
+- **Does Settings' GPU capture suffice for Xcode's capture button?** No: the capture layer needs
+  `MTL_CAPTURE_ENABLED=1` at launch, which `pp ui --capture-layer` gives (second session, above).
+- **How do we get full counters for one heavy pass?** A live capture (`pp gpu live --capture`) of only
+  the used resources profiles with every counter, serially; the first session's Lite mode came from
+  Xcode's profile of a full `pp gpu capture` trace.

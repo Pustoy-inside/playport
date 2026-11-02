@@ -5,7 +5,6 @@
 
 import Foundation
 import SwiftUI
-import TouchPad
 import UIKit
 
 @main
@@ -22,11 +21,13 @@ struct PlayportApp: App {
         // driver session changed go back before anything reads them.
         DriverContinuation.adoptAtStart()
         DriverUndo.restoreAtStart()
+        // A text bar secret a run pushed and never got to read goes, unread (Dev/TextBarDriver.swift).
+        TextBarDriver.clearAtStart()
         #endif
         // A restart after a game (AppRestart): why that game did not end cleanly, once.
         TitleLaunch.shared.message = AppRestart.noteLaunch()
-        MetalHUD.loadAtStart()
         #if !PLAYPORT_RELEASE
+        MetalHUD.loadAtStart()
         GPUCapture.loadAtStart()
         MetalValidation.loadAtStart()
         RuntimeCounters.loadAtStart()
@@ -34,8 +35,6 @@ struct PlayportApp: App {
         MemoryLimit.logAtStart()
         // The external drive's folder, open before the library and the runtime use it.
         ExternalStorage.shared.activate()
-        // The on-screen controller sets itself up from its constructor (Sources/TouchPad).
-        playport_touchpad_linked()
     }
 
     var body: some Scene {
@@ -48,6 +47,7 @@ struct PlayportApp: App {
 struct RootView: View {
     @ObservedObject private var launch = TitleLaunch.shared
     @ObservedObject private var menu = InGameMenu.shared
+    @ObservedObject private var textBar = GameTextBar.shared
     @ObservedObject private var web = GameWebSheet.shared
     @ObservedObject private var restart = AppRestart.shared
     @ObservedObject private var setup = JitSetup.shared
@@ -79,11 +79,18 @@ struct RootView: View {
                         }
                         .animation(LaunchMotion.sheetOut, value: launch.showsSheet)
                     }
+                    // The text bar over the running game, above the iOS keyboard (UI/TextBarView.swift).
+                    .overlay { if textBar.isOpen { TextBarView() } }
                     // Playport's menu over the paused game, on a long press of Home (UI/InGameMenuView.swift).
                     .overlay { if menu.isOpen || menu.quitting { InGameMenuView() } }
                     // A web page the game opened, over the running game (UI/GameWebSheet.swift).
                     .overlay { if web.isUp { GameWebSheetView() } }
                     .statusBarHidden().persistentSystemOverlays(.hidden)
+                    // A swipe from the top or bottom edge reaches the game and its on-screen controls
+                    // first; a second swipe opens Control Centre or goes Home. SwiftUI sets the hosting
+                    // controller's preferredScreenEdgesDeferringSystemGestures and asks for an update
+                    // as the game starts and stops.
+                    .defersSystemGestures(on: .vertical)
                     .transition(.identity)
             } else if restart.restarting {
                 // After a game, until the phone replaces this process (AppRestart): black
@@ -126,6 +133,10 @@ struct RootView: View {
         .sheet(isPresented: Binding(get: { setup.presented }, set: { if !$0 && setup.phase != .ready && setup.phase != .cancelled { setup.cancel() } }),
                onDismiss: { setup.dismissed() }) { JitSetupSheet() }
         .onChange(of: scenePhase) { _, phase in
+            #if !PLAYPORT_RELEASE
+            // AppShell is removed during play; the root must revoke driver input too.
+            UIDriver.sceneChanged(active: phase == .active)
+            #endif
             if phase == .active {
                 restart.sceneBecameActive()
                 setup.sceneBecameActive()

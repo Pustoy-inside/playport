@@ -4,9 +4,9 @@
 // command-line arguments, which steam_api it loads, FEX's x86 memory
 // ordering over the game's profile, FEX's block size and x87 precision (FEXProfile).
 // A game's own value wins over the global one, which wins over the defaults:
-// 720 rows at 60 FPS on DXMT (Vulkan for i386 and detected DX12 games; `defaultScreen`, `defaultFrameLimit`,
-// GraphicsBackend.default). A cohort title's screen (LaunchPlan.screen) no
-// longer sets it (decision 0034). Native and no limit are a
+// 720 rows at 60 FPS on Vulkan (`defaultScreen`, `defaultFrameLimit`, GraphicsBackend.default),
+// with LaunchSettings.everyGame's services, pool, loader, Steam client and runtime keys
+// (decision 0153). A cohort title's screen (LaunchPlan.screen) no longer sets it (decision 0034). Native and no limit are a
 // choice in Settings or on a game's page. A limit of 0 runs presents free, with
 // no vsync lock (TitleScreen.swift).
 
@@ -27,8 +27,10 @@ public struct LaunchSettings: Codable, Equatable, Sendable {
     /// gives it (per game only), as the player typed them: split by
     /// LaunchSettings.splitArguments. `-DX12`, `-force-d3d12` and the like.
     public var arguments: String
-    /// The Steam API emulator or the game's own steam_api (per game only); nil
-    /// is the emulator (SteamAPISwap).
+    /// Playport's Steam client, the Steam API emulator or the game's own
+    /// steam_api (per game only); nil inherits the compatibility default, then
+    /// every game's `.client` (decision 0153), and is the emulator only when
+    /// neither sets one (SteamAPISwap).
     public var steamAPI: SteamAPISwap.Mode?
     /// Sync the game's saves with Steam Cloud (per game only); nil is on.
     public var cloudSync: Bool?
@@ -43,7 +45,7 @@ public struct LaunchSettings: Codable, Equatable, Sendable {
     /// game only); nil takes the game's profile (FEXProfile.defaultX87Reduced).
     public var x87Reduced: Bool?
     /// FEX's disk cache of translated code (FEX `DiskCache`, per game only); nil
-    /// takes the default, off for now (FEXProfile.defaultDiskCache, decision 0056).
+    /// takes the default, on (FEXProfile.defaultDiskCache, decision 0056).
     public var diskCache: Bool?
     /// What scales the game's picture up to the screen (Upscaler); nil inherits.
     public var upscaler: Upscaler?
@@ -53,14 +55,28 @@ public struct LaunchSettings: Codable, Equatable, Sendable {
     /// `key=value` items split at spaces (`vram-mb=1024 totalphys=6144 inproc-sync=1`).
     /// LaunchSettings.runtimeKeys parses them; TitleConfig writes them after the title's.
     public var runtime: String
-    /// The Vulkan layers' options (per game only; a dev build's, decision 0060), as typed:
-    /// items split at spaces, each `NAME=value` for an allowlisted variable
-    /// (LaunchSettings.graphicsVariables) or a DXVK option (`dxvk.tilerMode=False`), which
-    /// goes into DXVK_CONFIG. LaunchSettings.graphicsEnvironment parses them.
+    /// The game's environment variables and Vulkan layers' options (per game only; a dev
+    /// build's, decisions 0060 and 0137), as typed: items split at spaces, each `NAME=value`
+    /// for any variable or a DXVK option (`dxvk.tilerMode=False`), which goes into
+    /// DXVK_CONFIG. LaunchSettings.graphicsEnvironment parses them.
     public var graphicsOptions: String
-    /// The JIT memory set aside for the game, in MiB (JitPool.choicesMB, per game only); nil
-    /// takes JitPool.sizeMB. A game whose program files fill the 512 MiB needs more.
+    /// Start Windows services for the game (services.exe, Wine's SCM, and the services it
+    /// starts; per game only, decision 0107): a launcher that installs and uses one. Nil is off.
+    public var windowsServices: Bool?
+    /// The game's JIT pool in MiB (per game only, the compatibility table's; decision 0108):
+    /// a launcher's many processes outgrow JitPool.minimumMB. Nil is the default pool.
     public var jitPoolMB: Int?
+    /// The Khronos Vulkan loader in place of Wine's vulkan-1.dll (per game only, decision 0131):
+    /// a game whose own Vulkan layer (RDR2's Social Club) must load, which Wine's does not do.
+    /// A dev build's game page and `set:` change it; a release build shows no row, so the
+    /// compatibility table decides. Nil is off: Wine's own.
+    public var khronosVulkanLoader: Bool?
+    /// End the publisher launcher a game's Play starts, its whole tree but never the game or a
+    /// process under it, once the game has signed in, or before that near the memory limit
+    /// (decision 0130, amending 0125): the compatibility table's alone. over() takes it from the game's
+    /// compatibility default and never from a person's settings, so no saved value, `set:`
+    /// or `--settings` reaches it, and no page shows it. Nil is off.
+    public var endLauncherAfterSignIn: Bool?
     /// The language a Steam game downloads and runs in, a Steam API code (GameLanguage);
     /// nil inherits: a game's from the global one, the global one English.
     public var language: String?
@@ -69,7 +85,9 @@ public struct LaunchSettings: Codable, Equatable, Sendable {
                 arguments: String = "", steamAPI: SteamAPISwap.Mode? = nil,
                 cloudSync: Bool? = nil, ordering: MemoryOrdering = MemoryOrdering(), maxInst: Int? = nil,
                 x87Reduced: Bool? = nil, diskCache: Bool? = nil, runtime: String = "", graphicsOptions: String = "",
-                upscaler: Upscaler? = nil, sharpness: Int? = nil, jitPoolMB: Int? = nil, language: String? = nil) {
+                windowsServices: Bool? = nil, jitPoolMB: Int? = nil, khronosVulkanLoader: Bool? = nil,
+                endLauncherAfterSignIn: Bool? = nil,
+                upscaler: Upscaler? = nil, sharpness: Int? = nil, language: String? = nil) {
         self.screen = screen
         self.aspect = aspect
         self.frameLimit = frameLimit
@@ -83,9 +101,12 @@ public struct LaunchSettings: Codable, Equatable, Sendable {
         self.diskCache = diskCache
         self.runtime = runtime
         self.graphicsOptions = graphicsOptions
+        self.windowsServices = windowsServices
+        self.jitPoolMB = jitPoolMB
+        self.khronosVulkanLoader = khronosVulkanLoader
+        self.endLauncherAfterSignIn = endLauncherAfterSignIn
         self.upscaler = upscaler
         self.sharpness = sharpness
-        self.jitPoolMB = jitPoolMB
         self.language = language
     }
 
@@ -106,20 +127,25 @@ public struct LaunchSettings: Codable, Equatable, Sendable {
         diskCache = try c.decodeIfPresent(Bool.self, forKey: .diskCache)
         runtime = try c.decodeIfPresent(String.self, forKey: .runtime) ?? ""
         graphicsOptions = try c.decodeIfPresent(String.self, forKey: .graphicsOptions) ?? ""
+        windowsServices = try c.decodeIfPresent(Bool.self, forKey: .windowsServices)
+        jitPoolMB = try c.decodeIfPresent(Int.self, forKey: .jitPoolMB)
+        khronosVulkanLoader = try c.decodeIfPresent(Bool.self, forKey: .khronosVulkanLoader)
+        endLauncherAfterSignIn = try c.decodeIfPresent(Bool.self, forKey: .endLauncherAfterSignIn)
         // As graphics: an upscaler this build does not know inherits.
         upscaler = try c.decodeIfPresent(String.self, forKey: .upscaler).flatMap(Upscaler.init(rawValue:))
         sharpness = try c.decodeIfPresent(Int.self, forKey: .sharpness)
-        jitPoolMB = try c.decodeIfPresent(Int.self, forKey: .jitPoolMB)
         language = try c.decodeIfPresent(String.self, forKey: .language)
     }
 
+    /// Whether a person set nothing; endLauncherAfterSignIn, which no person sets, does not count.
     public var isEmpty: Bool {
         screen == nil && aspect == nil && frameLimit == nil && graphics == nil
             && arguments.trimmingCharacters(in: .whitespaces).isEmpty && steamAPI == nil && cloudSync == nil
             && ordering.isEmpty && maxInst == nil && x87Reduced == nil && diskCache == nil
             && runtime.trimmingCharacters(in: .whitespaces).isEmpty
-            && graphicsOptions.trimmingCharacters(in: .whitespaces).isEmpty
-            && upscaler == nil && sharpness == nil && jitPoolMB == nil && language == nil
+            && graphicsOptions.trimmingCharacters(in: .whitespaces).isEmpty && windowsServices == nil
+            && jitPoolMB == nil && khronosVulkanLoader == nil
+            && upscaler == nil && sharpness == nil && language == nil
     }
 
     /// Arguments as a command line splits them: at spaces, except inside
@@ -135,6 +161,53 @@ public struct LaunchSettings: Codable, Equatable, Sendable {
         return out
     }
 
+    /// What every game launches with unless its compatibility default or a person's choice for it
+    /// says otherwise (decision 0153): Red Dead Redemption 2's settings, which work, made everyone's,
+    /// as the base under each title's compatibility default (overEveryGame). Each acts only where its
+    /// trigger exists: Windows services start the service manager, which runs only the services a
+    /// game installed; the launcher's end needs a publisher's launcher (PublisherLauncher.startedBy);
+    /// the Khronos loader loads only the layers a game asks for; Playport's Steam client serves only a
+    /// Steam app; `env.PLAYPORT_SC_BLOCK_CRASHPAD=1` refuses only Rockstar's and Chromium's crash
+    /// reporters. The backend is GraphicsBackend.default, below Settings' own choice. The runtime keys
+    /// merge by key (keyItems), so a game's `env.MADEIRA_FEX_BATCH2=0` turns one off. FEX runs x64
+    /// code without AFP and with FPCR.FIZ from MXCSR.DAZ (decision 0154: Hollow Knight draws black
+    /// without AFP unless FIZ follows DAZ); a game's `env.FEX_HOSTFEATURES=enableafp` keeps AFP.
+    /// `avail-phys-cef-mb=300` tells only SocialClubHelper.exe 300 MB of available memory, so
+    /// Chromium's memory-pressure evaluator purges (decision 0168; `avail-phys-cef-mb=0` turns it off).
+    public static let everyGame = LaunchSettings(
+        steamAPI: .client,
+        runtime: "jumbo-mb=8960 env.PLAYPORT_VK_HEAP_MB=3072 "
+            + "env.MADEIRA_X64_CS_FASTPATH=1 env.MADEIRA_FEX_BATCH2=1 env.PLAYPORT_SC_BLOCK_CRASHPAD=1 "
+            + "env.FEX_HOSTFEATURES=disableafp env.MADEIRA_FEX_AFPOFF_FPCR=fiz avail-phys-cef-mb=300",
+        windowsServices: true, jitPoolMB: 896, khronosVulkanLoader: true, endLauncherAfterSignIn: true)
+
+    /// A title's compatibility default (nil for none) over everyGame: each setting the title's
+    /// entry has wins; the launcher's end is the entry's, else everyGame's. The runtime keys stay the
+    /// entry's own: everyGame's go under the title's madeira.cfg keys too (Effective.config), so a
+    /// cohort title's `jumbo-mb=32768` keeps its value.
+    public static func overEveryGame(_ compat: LaunchSettings?) -> LaunchSettings {
+        var s = (compat ?? LaunchSettings()).over(everyGame)
+        s.runtime = compat?.runtime ?? ""
+        s.endLauncherAfterSignIn = compat?.endLauncherAfterSignIn ?? everyGame.endLauncherAfterSignIn
+        return s
+    }
+
+    /// everyGame's runtime keys, the lowest level of a launch's madeira.cfg keys (Effective.config).
+    public static let everyGameKeys: [String: String] = runtimeKeys(everyGame.runtime) ?? [:]
+
+    /// The runtime keys a release build launches with (decision 0126): the game's compatibility
+    /// default's, never a person's (a dev build's Runtime keys row); everyGame's go under them and
+    /// the title's own in Effective.config (decision 0153).
+    public static func releaseRuntime(compat: LaunchSettings?) -> [String: String] {
+        runtimeKeys(compat?.runtime ?? "") ?? [:]
+    }
+
+    /// The Steam API a release build launches a Steam app with (decisions 0115, 0153): the game's
+    /// compatibility default's, else everyGame's, never a person's.
+    public static func releaseSteamAPI(compat: LaunchSettings?) -> SteamAPISwap.Mode {
+        overEveryGame(compat).steamAPI ?? .emulated
+    }
+
     /// Runtime keys as typed (`vram-mb=1024 inproc-sync=1`): `key=value` items at spaces,
     /// a later item for a key winning. nil when an item has no `=` or TitleConfig refuses it.
     public static func runtimeKeys(_ line: String) -> [String: String]? {
@@ -146,29 +219,39 @@ public struct LaunchSettings: Codable, Equatable, Sendable {
         return (try? TitleConfig.validate(out)) == nil ? nil : out
     }
 
-    /// The variables a game's Graphics options may set (decision 0060): DXVK's and
-    /// vkd3d-proton's option strings and KosmicKrisp's debug, experimental and
-    /// workaround switches. Nothing else reaches a game's environment this way.
+    /// The list variables a game's Graphics options join when repeated (decision 0060):
+    /// DXVK's and vkd3d-proton's option strings and KosmicKrisp's debug, experimental and
+    /// workaround switches. Any other variable may be set too (decision 0137); repeated,
+    /// its last item wins.
     public static let graphicsVariables = ["DXVK_CONFIG", "VKD3D_CONFIG", "MESA_KK_DEBUG",
                                            "MESA_KK_EXPERIMENTAL", "MESA_KK_DISABLE_WORKAROUNDS"]
     /// The sections of a DXVK option an item may name without DXVK_CONFIG= (dxvk.conf's).
     public static let dxvkSections = ["dxvk", "dxgi", "d3d11", "d3d10", "d3d9", "d3d8"]
 
+    /// An environment variable name: `[A-Za-z_][A-Za-z0-9_]*`.
+    static func isVariableName(_ name: String) -> Bool {
+        guard let first = name.unicodeScalars.first, first == "_" || (first.isASCII && first.properties.isAlphabetic)
+        else { return false }
+        return name.unicodeScalars.allSatisfy { $0 == "_" || ($0.isASCII && ($0.properties.isAlphabetic || ("0"..."9").contains($0))) }
+    }
+
     /// Graphics options as typed (`dxvk.tilerMode=False VKD3D_CONFIG=one_time_submit`):
-    /// items at spaces (double quotes keep spaces), each `NAME=value` for a variable in
-    /// graphicsVariables or `section.option=value` for DXVK. DXVK options join DXVK_CONFIG
-    /// with `;`, as DXVK splits it; a repeated other variable joins with `,`, as vkd3d-proton
-    /// and Mesa split theirs. nil when an item is neither, or names another variable.
+    /// items at spaces (double quotes keep spaces), each `NAME=value` for any variable (NAME
+    /// `[A-Za-z_][A-Za-z0-9_]*`) or `section.option=value` for DXVK. DXVK options join
+    /// DXVK_CONFIG with `;`, as DXVK splits it; another of graphicsVariables repeated joins
+    /// with `,`, as vkd3d-proton and Mesa split theirs; any other variable repeated takes its
+    /// last value. nil when an item is neither.
     public static func graphicsEnvironment(_ line: String) -> [String: String]? {
         var out: [String: String] = [:]
         func add(_ name: String, _ value: String) {
             guard !value.isEmpty else { return }
+            guard graphicsVariables.contains(name) else { out[name] = value; return }
             out[name] = out[name].map { $0 + (name == "DXVK_CONFIG" ? ";" : ",") + value } ?? value
         }
         for item in splitArguments(line) {
             guard let eq = item.firstIndex(of: "="), eq != item.startIndex else { return nil }
             let name = String(item[..<eq]), value = String(item[item.index(after: eq)...])
-            if graphicsVariables.contains(name) {
+            if isVariableName(name) {
                 add(name, value)
             } else if let dot = name.firstIndex(of: "."), dxvkSections.contains(String(name[..<dot])),
                       name.index(after: dot) < name.endIndex {
@@ -203,18 +286,25 @@ public struct LaunchSettings: Codable, Equatable, Sendable {
         public var runtime: [String: String]
         /// The Vulkan layers' variables from the game's Graphics options; empty for none.
         public var graphicsEnvironment: [String: String]
+        /// Windows services for the game (decision 0107).
+        public var windowsServices: Bool
+        /// The game's JIT pool in MiB (decision 0108); nil for the default (JitPool.sizeMB).
+        public var jitPoolMB: Int?
+        /// The Khronos Vulkan loader in place of Wine's vulkan-1.dll (decision 0131).
+        public var khronosVulkanLoader: Bool
+        /// End the launcher the game's Play starts at the game's sign-in (decision 0130).
+        public var endLauncherAfterSignIn: Bool
         public var upscaler: Upscaler
         /// FSR 1's sharpening, a percentage (LaunchSettings.rcasStops).
         public var sharpness: Int
-        /// The game's JIT memory in MiB; nil for JitPool.sizeMB's.
-        public var jitPoolMB: Int?
 
         public init(screen: String?, aspect: ScreenAspect = .phone, frameLimit: Int, graphics: GraphicsBackend = .default,
                     arguments: [String] = [], steamAPI: SteamAPISwap.Mode = .emulated,
                     ordering: MemoryOrdering = MemoryOrdering(), maxInst: Int? = nil,
                     x87Reduced: Bool? = nil, diskCache: Bool? = nil, runtime: [String: String] = [:],
-                    graphicsEnvironment: [String: String] = [:], upscaler: Upscaler = .default,
-                    sharpness: Int = LaunchSettings.defaultSharpness, jitPoolMB: Int? = nil) {
+                    graphicsEnvironment: [String: String] = [:], windowsServices: Bool = false,
+                    jitPoolMB: Int? = nil, khronosVulkanLoader: Bool = false, endLauncherAfterSignIn: Bool = false,
+                    upscaler: Upscaler = .default, sharpness: Int = LaunchSettings.defaultSharpness) {
             self.screen = screen
             self.aspect = aspect
             self.frameLimit = frameLimit
@@ -227,18 +317,27 @@ public struct LaunchSettings: Codable, Equatable, Sendable {
             self.diskCache = diskCache
             self.runtime = runtime
             self.graphicsEnvironment = graphicsEnvironment
+            self.windowsServices = windowsServices
+            self.jitPoolMB = jitPoolMB
+            self.khronosVulkanLoader = khronosVulkanLoader
+            self.endLauncherAfterSignIn = endLauncherAfterSignIn
             self.upscaler = upscaler
             self.sharpness = sharpness
-            self.jitPoolMB = jitPoolMB
+        }
+
+        /// PLAYPORT_DLL_OVERLAY for this launch (wine_host.c, dll_overlay.h).
+        public var runtimeOverlays: String? {
+            GraphicsBackend.runtimeOverlays(graphics: graphics, khronosVulkanLoader: khronosVulkanLoader)
         }
 
         /// The guest screen's spec for HostIOKit Display.guestSize: the resolution in the shape
         /// (ScreenAspect.spec(level:)); an old `WxH` or `4:3` resolution as it is.
         public var guestScreen: String? { aspect.spec(level: screen) }
 
-        /// The title's madeira.cfg keys (its cohort entry's) with these over them.
+        /// The title's madeira.cfg keys (its cohort entry's) with these over them, all over
+        /// every game's runtime keys (LaunchSettings.everyGameKeys, decision 0153).
         public func config(over base: [String: String]) -> [String: String] {
-            base.merging(runtime) { _, own in own }
+            LaunchSettings.everyGameKeys.merging(base) { _, title in title }.merging(runtime) { _, own in own }
         }
     }
 
@@ -250,8 +349,8 @@ public struct LaunchSettings: Codable, Equatable, Sendable {
     public static let defaultFrameLimit = 60
 
     /// The game's value, else the global one, else the defaults (720 rows,
-    /// 60 FPS, Vulkan for an i386 executable (decision 0047) or DX12 (0044), DXMT
-    /// otherwise). Explicit graphics choices still win. `arguments` are the title's
+    /// 60 FPS, Vulkan (decision 0153; before it, only for an i386 executable, 0047, or
+    /// DX12, 0044)). `game` is a person's own over overEveryGame's (LaunchSettingsStore). Explicit graphics choices still win. `arguments` are the title's
     /// base arguments, before the player's; they do not move an i386 title off Vulkan,
     /// since DXMT has no i386 build. Invalid values are skipped as if unset.
     public static func resolve(game: LaunchSettings?, global: LaunchSettings,
@@ -273,8 +372,10 @@ public struct LaunchSettings: Codable, Equatable, Sendable {
                          x87Reduced: game?.x87Reduced, diskCache: game?.diskCache,
                          runtime: runtimeKeys(game?.runtime ?? "") ?? [:],
                          graphicsEnvironment: graphicsEnvironment(game?.graphicsOptions ?? "") ?? [:],
-                         upscaler: game?.upscaler ?? global.upscaler ?? .default, sharpness: sharpness,
-                         jitPoolMB: game?.jitPoolMB.flatMap { JitPool.choicesMB.contains($0) ? $0 : nil })
+                         windowsServices: game?.windowsServices ?? false, jitPoolMB: game?.jitPoolMB,
+                         khronosVulkanLoader: game?.khronosVulkanLoader ?? false,
+                         endLauncherAfterSignIn: game?.endLauncherAfterSignIn ?? false,
+                         upscaler: game?.upscaler ?? global.upscaler ?? .default, sharpness: sharpness)
     }
 
     /// The resolutions the pickers offer, the same in every aspect ratio, as screen specs;
@@ -325,13 +426,16 @@ public enum Upscaler: String, Codable, CaseIterable, Sendable {
 
 /// The layer that turns a game's Direct3D into Metal (decision 0014).
 public enum GraphicsBackend: String, Codable, CaseIterable, Sendable {
-    /// DXMT: Direct3D 10 and 11 straight to Metal. What every tested game runs on.
+    /// DXMT: Direct3D 10 and 11 straight to Metal. A choice since Vulkan became
+    /// every game's default (decision 0153).
     case dxmt
     /// DXVK (Direct3D 8 to 11) and vkd3d-proton (Direct3D 12) on Vulkan, on
     /// KosmicKrisp, Mesa's Vulkan driver on Metal.
     case vulkan
 
-    public static let `default`: GraphicsBackend = .dxmt
+    /// Every game's backend unless Settings or its page says otherwise (decision 0153,
+    /// LaunchSettings.everyGame); DXMT stays a choice.
+    public static let `default`: GraphicsBackend = .vulkan
 
     /// The directory under the runtime whose <arch>-windows builtins go
     /// before the runtime's own for this backend (WINEDLLPATH); nil for none.
@@ -340,6 +444,18 @@ public enum GraphicsBackend: String, Codable, CaseIterable, Sendable {
         case .dxmt: nil
         case .vulkan: "vulkan"
         }
+    }
+
+    /// The runtime directory of the Khronos Vulkan loader (decision 0131): its vulkan-1.dll
+    /// and winevulkan's ICD manifest, linked into system32 after the backend's set.
+    public static let khronosVulkanLoaderOverlay = "vulkan-loader"
+
+    /// PLAYPORT_DLL_OVERLAY for a launch: the runtime directories whose <arch>-windows sets go
+    /// over the runtime's own, in order (a later one's file wins), comma-separated: the
+    /// backend's, then the Khronos Vulkan loader's. Nil for none.
+    public static func runtimeOverlays(graphics: GraphicsBackend, khronosVulkanLoader: Bool) -> String? {
+        let list = [graphics.runtimeOverlay, khronosVulkanLoader ? khronosVulkanLoaderOverlay : nil].compactMap { $0 }
+        return list.isEmpty ? nil : list.joined(separator: ",")
     }
 
     /// Environment this backend's launches start with.

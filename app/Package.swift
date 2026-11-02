@@ -60,12 +60,15 @@ let package = Package(
         .package(path: "GOGClient"),
         // The Epic Games client (app/EpicClient): sign-in, library and content (decision 0058).
         .package(path: "EpicClient"),
+        // The Battle.net store client (app/BattleNetClient): offered WoW products and their installs (decision 0174).
+        .package(path: "BattleNetClient"),
         // The product UI's catalogue, adoption and launch options, tested on the Linux host.
         .package(path: "PlayportKit"),
     ],
     targets: [
         .target(
             name: "WineHost",
+            cSettings: release ? [.define("PLAYPORT_RELEASE")] : [],
             linkerSettings: [
                 // Every archive the reference app links (Madeira.xcodeproj),
                 // in its order. libdxmt_combined.a is the DXMT unix slice plus
@@ -127,20 +130,6 @@ let package = Package(
         // and the declarations of the runtime extensions HostIO.swift calls
         // (docs/ARCHITECTURE.md, HostIO).
         .target(name: "HostIO", dependencies: ["WinIOS"]),
-        // The on-screen controller (Pavel Demyanov's touch pad prototype, issue #5):
-        // the system's GCVirtualController handed to the game as a pad, with Home,
-        // Back, Start, a D-pad and an opacity button of its own (Sources/TouchPad).
-        .target(
-            name: "TouchPad",
-            dependencies: ["HostIO"],
-            cSettings: [.unsafeFlags(["-fobjc-arc"])],
-            linkerSettings: [
-                .linkedFramework("GameController"),
-                .linkedFramework("UIKit"),
-                .linkedFramework("QuartzCore"),
-                .linkedFramework("CoreGraphics"),
-            ]
-        ),
         // The upscaler (Sources/Upscale): MetalFX's spatial scaler or AMD's FSR 1 over
         // every game's frames as they are presented, whatever draws them.
         .target(
@@ -155,6 +144,8 @@ let package = Package(
         ),
         // Only the dev app depends on this synthetic native-authentication probe.
         .target(name: "AuthProbe", linkerSettings: [.linkedFramework("GSS")]),
+        // Only the dev app depends on this: the task's memory ledger for the footprint-jump sampler.
+        .target(name: "MemoryLedger"),
         // The JIT helper extension: StikJIT's prebuilt framework (MPL-2.0,
         // embedded unmodified in the extension's Frameworks/), the XPC contract
         // it shares with the app, and its entry point (PlayportJITEntry/entry.c).
@@ -168,11 +159,13 @@ let package = Package(
         // links MesaGallium, and win32u's EGL backend dlopens MesaEGL.
         .binaryTarget(name: "MesaEGL", path: "Staged/MesaEGL.xcframework"),
         .binaryTarget(name: "MesaGallium", path: "Staged/MesaGallium.xcframework"),
-        .target(name: "JITHelperXPC", swiftSettings: release ? [.define("PLAYPORT_RELEASE")] : []),
+        .target(name: "SharedMemory", cSettings: [.unsafeFlags(["-fobjc-arc", "-O2"])]),
+        .target(name: "JITHelperXPC", dependencies: ["SharedMemory"],
+                swiftSettings: release ? [.define("PLAYPORT_RELEASE")] : []),
         .target(name: "PlayportJITEntry"),
         .target(
             name: "PlayportJIT",
-            dependencies: ["StikJIT", "JITHelperXPC", "PlayportJITEntry"],
+            dependencies: ["StikJIT", "JITHelperXPC", "PlayportJITEntry", "SharedMemory"],
             swiftSettings: [.swiftLanguageMode(.v5)] + (release ? [.define("PLAYPORT_RELEASE")] : []),
             linkerSettings: [
                 // Nothing references the principal class but the Objective-C
@@ -183,13 +176,14 @@ let package = Package(
         ),
         .target(
             name: app,
-            dependencies: ["WineHost", "WinIOS", "HostIO", "TouchPad", "Upscale", "JITHelperXPC", "KosmicKrisp", "MesaEGL", "MesaGallium",
+            dependencies: ["WineHost", "WinIOS", "HostIO", "Upscale", "JITHelperXPC", "KosmicKrisp", "MesaEGL", "MesaGallium",
                            .product(name: "HostIOKit", package: "HostIOKit"),
                            .product(name: "SteamClientKit", package: "SteamClient"),
                            .product(name: "GOGClientKit", package: "GOGClient"),
                            .product(name: "EpicClientKit", package: "EpicClient"),
+                           .product(name: "BattleNetClientKit", package: "BattleNetClient"),
                            .product(name: "PlayportKit", package: "PlayportKit")]
-                + ["Relaunch"] + (release ? [] : ["AuthProbe"]),
+                + ["Relaunch", "SharedMemory"] + (release ? [] : ["AuthProbe", "MemoryLedger"]),
             path: "Sources/S1Probe",
             // Runtime/ ships at the app root through xtool.yml `resources`, not
             // as a SwiftPM resource bundle: ntdll resolves nls/ and <arch>-windows/
@@ -199,6 +193,8 @@ let package = Package(
             linkerSettings: [
                 .linkedFramework("GameController"),
                 .linkedFramework("AVFAudio"),
+                // Gyro aim's iPhone gyro (GyroSensors.swift).
+                .linkedFramework("CoreMotion"),
                 // The Steam sign-in QR code (UI/SteamSupport.swift).
                 .linkedFramework("CoreImage"),
                 // GOG's and Epic's sign-in pages (UI/GOGAccount.swift, UI/EpicAccount.swift).

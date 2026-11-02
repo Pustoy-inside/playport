@@ -89,7 +89,7 @@ jobs:
       - name: Controller input tests (the pad as a mouse, a dialog's keys)
         run: |
           set -o pipefail
-          swift test --package-path app/HostIOKit --filter 'HostIOKitTests\.(PadMouseTests|WindowKeysTests|PadNavigationTests)' \
+          swift test --package-path app/HostIOKit --filter 'HostIOKitTests\.(WindowKeysTests|PadNavigationTests)' \
               2>&1 | tee "$RUNNER_TEMP/hostio.log" || {
             grep -E 'error:|failed' "$RUNNER_TEMP/hostio.log" | head -30 | sed 's/^/::error::/'; exit 1; }
   build:

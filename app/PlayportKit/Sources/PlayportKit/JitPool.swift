@@ -46,10 +46,33 @@ public enum JitPool {
     /// often one large executable, little else, so the largest pool.
     public static let programMB = maximumMB
 
-    /// The pool a Play gets: `minimumMB`, whatever the memory limit (decision 0036).
-    /// The limit is still taken, for the day a size depends on it again.
-    public static func sizeMB(limitMB: Int?) -> Int {
-        minimumMB
+    /// How long a title still running after it ran the pool out gets before its launch ends and
+    /// the restart ends it (decisions 0022, 0030). A publisher's launcher Open may carry its own
+    /// (`PublisherLauncher.exhaustionGrace`, decision 0112).
+    public static let exhaustionGrace: TimeInterval = 10
+
+    /// The pool a Play gets: `minimumMB`, whatever the memory limit (decision 0036), unless the
+    /// game's compatibility entry asks for more (`gameMB`, decision 0108).
+    public static func sizeMB(limitMB: Int?, gameMB: Int? = nil) -> Int {
+        size(limitMB: limitMB, gameMB: gameMB).mb
+    }
+
+    /// The least memory limit, in MB, under which a game's larger pool is granted (decision 0108):
+    /// the reference phone's limit with the Increased Memory Limit entitlement before Game Mode.
+    /// Under it (a signer that dropped the entitlement, a phone with less RAM) the Play keeps
+    /// `minimumMB`, since every byte of the pool comes out of the game's memory. The limit
+    /// reads a little under a whole GiB (8,191 for 8 GiB, decision 0105), so 64 MB of slack count.
+    public static let largerPoolLimitMB = 6144
+
+    /// The pool for a game, and why when it is not the one the game asked for.
+    public static func size(limitMB: Int?, gameMB: Int?) -> (mb: Int, note: String?) {
+        guard let gameMB, gameMB > minimumMB else { return (minimumMB, nil) }
+        let wanted = min(gameMB, maximumMB)
+        guard let limitMB, limitMB + 64 >= largerPoolLimitMB else {
+            return (minimumMB, "the game's \(wanted) MiB not granted: a memory limit of "
+                    + (limitMB.map { "\($0) MB" } ?? "not reported") + ", under \(largerPoolLimitMB) MB")
+        }
+        return (wanted, wanted < gameMB ? "the game's \(gameMB) MiB capped at \(maximumMB) MiB" : nil)
     }
 
     /// What ran out, from the runtime's refusal counts.
@@ -82,11 +105,14 @@ public enum JitPool {
         public var tailRefused: UInt64
         public var tailFatal: UInt64
         public var aliasFull: UInt64
+        /// The bytes image copies left out of their images since the runtime started: a
+        /// builtin's trailing .rsrc and .reloc, which no code reaches (PLA-377).
+        public var headTrimmed: UInt64
 
         public init(size: UInt64, head: UInt64, headLive: UInt64 = 0, headFree: UInt64 = 0, tail: UInt64,
                     tailLive: UInt64 = 0, aliasLive: UInt64 = 0, aliasSlots: UInt64 = 0, aliasCap: UInt64 = 0,
                     images: UInt64 = 0, childCopies: UInt64 = 0, childBytes: UInt64 = 0, headExhausted: UInt64 = 0,
-                    tailRefused: UInt64 = 0, tailFatal: UInt64 = 0, aliasFull: UInt64 = 0) {
+                    tailRefused: UInt64 = 0, tailFatal: UInt64 = 0, aliasFull: UInt64 = 0, headTrimmed: UInt64 = 0) {
             self.size = size
             self.head = head
             self.headLive = headLive
@@ -103,6 +129,7 @@ public enum JitPool {
             self.tailRefused = tailRefused
             self.tailFatal = tailFatal
             self.aliasFull = aliasFull
+            self.headTrimmed = headTrimmed
         }
 
         /// Room between the head and the tail.
@@ -133,7 +160,7 @@ public enum JitPool {
                 ("head_free_mb", Self.mb(headFree)), ("tail_mb", Self.mb(tail)), ("tail_live_mb", Self.mb(tailLive)),
                 ("room_mb", room >> 20), ("alias", aliasLive), ("alias_slots", aliasSlots), ("alias_cap", aliasCap),
                 ("images", images), ("children", childCopies), ("children_mb", Self.mb(childBytes)),
-                ("head_exhausted", headExhausted), ("tail_refused", tailRefused), ("tail_fatal", tailFatal),
+                ("trimmed_mb", Self.mb(headTrimmed)), ("head_exhausted", headExhausted), ("tail_refused", tailRefused), ("tail_fatal", tailFatal),
                 ("alias_full", aliasFull),
             ]
             return "pool: " + fields.map { "\($0.0)=\($0.1)" }.joined(separator: " ")

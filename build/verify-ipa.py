@@ -40,6 +40,9 @@ any mismatch:
                 bundle); the bundled artifacts.tsv equals the committed one;
                 every `resource` row present with its size and sha256; no
                 extras
+  cef           no CEF payload, in a dev or a release IPA: no libcef.dll or
+                chrome_elf.dll and no directory named cef anywhere in the app
+                (decision 0169: Social Club runs on Rockstar's own CEF)
   dxmt          the unix dispatch table linked into the executable has
                 TABLE_SLOTS entries and upstream's handler for
                 MTLDevice_newLibraryWithSource at slot 144, the bundled
@@ -59,6 +62,15 @@ any mismatch:
                 wow64.dll, wow64win.dll and xtajit.dll are ARM64 PE32+
                 builtins; xtajit exports FEX's WoW64 CPU interface.
                 Build scaffolding only: does not claim 32-bit execution works.
+  arm64-vulkan  the Vulkan backend's aarch64 set a native ARM64 child loads
+                (PLA-513): vkd3d-proton's d3d12.dll and d3d12core.dll and
+                DXVK's dxgi.dll under Runtime/vulkan/aarch64-windows, the
+                Khronos vulkan-1.dll and winevulkan.json under
+                Runtime/vulkan-loader/aarch64-windows; each DLL a PE32+
+                ARM64 (0xAA64) Wine builtin
+  steamclient   Playport's Steam client (P9-steamclient): steamclient64.dll and
+                steamclient.dll, native x86-64 and i386 DLLs exporting what a
+                genuine steam_api resolves
   steamapi      the Steam API emulator (P8-steamapi): steam_api64.dll (x86-64)
                 and steam_api.dll (i386) under Runtime/steamapi, native (not
                 marked Wine builtins) and exporting SteamAPI_Init,
@@ -103,10 +115,12 @@ any mismatch:
                 release executable holds no dev code: no Dev/ type, no Swift
                 symbol of the S1Probe module, none of the UI driver's or the
                 scripted pad's environment names or files (S1_MODE, TITLE_NONCE,
-                UI_ACTIONS, HIO_VPAD, s1-host.log, run-events.jsonl), and its
+                UI_ACTIONS, HIO_VPAD, s1-host.log, run-events.jsonl, the text
+                bar's secret file ui-text-) and no Metal HUD (MTL_HUD_ENABLED), and its
                 Info.plist queries no URL scheme; it carries
                 the quiet-runtime switch MADEIRA_NO_DIAGNOSTICS and its log,
-                playport.log
+                playport.log, and links the donor pool (decision 0153:
+                pp_guest_pool_install, playport_guest_memory_backing)
 
 Identifiers (team, profile, UDID, certificate subject) are not printed.
 Needs: openssl, llvm-nm, llvm-objdump (host LLVM), and llvm-mingw's llvm-objdump
@@ -146,10 +160,12 @@ EXECUTABLE = {"dev": "S1Probe", "release": "Playport"}
 # What only a dev build's code holds (Sources/S1Probe/Dev/).
 DEV_MODULES = ["7S1Probe"]
 DEV_TYPES = ["UIDriver", "VirtualPad", "RunEvents", "WebSheetDriver",
-             "DeveloperSettings"]
-DEV_STRINGS = [b"S1_MODE", b"TITLE_NONCE", b"UI_ACTIONS", b"UI_SETTINGS", b"HIO_VPAD", b"s1-host.log",
-               b"run-events.jsonl", b"steam-drive.log"]
+             "DeveloperSettings", "TextBarDriver", "MetalHUD"]
+DEV_STRINGS = [b"S1_MODE", b"TITLE_NONCE", b"UI_ACTIONS", b"UI_SETTINGS", b"UI_CONTROLS", b"HIO_VPAD", b"s1-host.log",
+               b"run-events.jsonl", b"steam-drive.log", b"ui-text-", b"ui-secret-wanted", b"MTL_HUD_ENABLED"]
 RELEASE_STRINGS = [b"MADEIRA_NO_DIAGNOSTICS", b"playport.log"]
+# The donor pool, in both builds since decision 0153: GuestPool.m's install and 0148's hook.
+RELEASE_SYMBOLS = ["_pp_guest_pool_install", "_playport_guest_memory_backing"]
 
 
 def check(ok, what):
@@ -488,6 +504,31 @@ def steamapi_checks(rt, rows):
               "SteamAPI_RunCallbacks and SteamInternal_CreateInterface")
 
 
+def steamclient_checks(rt, rows):
+    """Playport's Steam client (P9-steamclient, decision 0115): native x86-64 and i386 DLLs whose
+    export names hold `steamclient` (the runtime gives them its unix table by that name) and that
+    export what a genuine steam_api resolves."""
+    want_rows = {"Runtime/steamclient/x86_64-windows/steamclient64.dll": ("steamclient64.dll", (0x8664, 0x20b), "x86-64"),
+                 "Runtime/steamclient/i386-windows/steamclient.dll": ("steamclient.dll", (0x14c, 0x10b), "i386")}
+    got = {r[1] for r in rows if r[0] == "resource" and r[6] == "P9-steamclient"}
+    if not got:
+        print("      steamclient: no P9-steamclient rows (an IPA from before Playport's Steam client)")
+        return
+    if got == {"Runtime/steamclient/x86_64-windows/steamclient64.dll"}:
+        print("      steamclient: no i386 steamclient.dll (an IPA from before the i386 Steam client)")
+    else:
+        check(got == set(want_rows), "steamclient: the rows are " + " and ".join(sorted(want_rows)))
+    want = {"CreateInterface", "Steam_BGetCallback", "Steam_FreeLastCallback", "Steam_GetAPICallResult",
+            "Steam_ReleaseThreadLocalMemory", "Steam_IsKnownInterface", "Steam_NotifyMissingInterface"}
+    for k in sorted(got & set(want_rows)):
+        name, machine, label = want_rows[k]
+        body = rt(k).read_bytes()
+        ex = pe_table(rt(k), "export")
+        check(pe_machine_magic(body) == machine and b"Wine builtin DLL" not in body[:0x200]
+              and name.encode() + b"\0" in body and want <= ex,
+              f"steamclient: {name} is a native {label} DLL named {name} exporting " + ", ".join(sorted(want)))
+
+
 def pe_machine_magic(body):
     """COFF machine and optional-header magic, or None for a malformed PE."""
     if len(body) < 0x40 or body[:2] != b"MZ":
@@ -526,6 +567,23 @@ def wow64_checks(rt, rows):
             dlls = pe_import_dlls(path)
             check(dlls == {"ntdll.dll", "wow64.dll"},
                   f"wow64: xtajit.dll imports only ntdll.dll and wow64.dll (imports {', '.join(sorted(dlls))})")
+
+
+def arm64_vulkan_checks(rt, rows):
+    """The Vulkan backend's aarch64 set for a native ARM64 child (PLA-513, decision 0170; World of
+    Warcraft plays its x64 client since 0177, so this serves the probes and other ARM64 programs):
+    vkd3d-proton's d3d12 and d3d12core and DXVK's dxgi under Runtime/vulkan, the Khronos loader and
+    winevulkan's ICD manifest under Runtime/vulkan-loader, each DLL an ARM64 PE32+ Wine builtin.
+    An ARM64EC build (machine AMD64) is the wrong machine here."""
+    staged = {r[1] for r in rows if r[0] == "resource"}
+    for name in ("Runtime/vulkan/aarch64-windows/d3d12.dll", "Runtime/vulkan/aarch64-windows/d3d12core.dll",
+                 "Runtime/vulkan/aarch64-windows/dxgi.dll", "Runtime/vulkan-loader/aarch64-windows/vulkan-1.dll"):
+        path = rt(name)
+        body = path.read_bytes() if name in staged and path.is_file() else b""
+        check(pe_machine_magic(body) == (0xaa64, 0x20b) and b"Wine builtin DLL" in body[:0x200],
+              f"arm64-vulkan: {name} bundled, a PE32+ ARM64 (0xAA64) Wine builtin")
+    name = "Runtime/vulkan-loader/aarch64-windows/winevulkan.json"
+    check(name in staged and rt(name).is_file(), f"arm64-vulkan: {name} bundled")
 
 
 def host_io_checks(exe, rt, rows):
@@ -572,6 +630,18 @@ def release_checks(exe, info):
     missing = [d.decode() for d in RELEASE_STRINGS if d not in body]
     check(not missing, "variant: the quiet-runtime switch and playport.log are in the executable"
           + (f" (missing {', '.join(missing)})" if missing else ""))
+    missing = [n for n in RELEASE_SYMBOLS if n not in syms]
+    check(not missing, "variant: the donor pool is linked (decision 0153)"
+          + (f" (missing {', '.join(missing)})" if missing else ""))
+
+
+def cef_checks(app):
+    """No IPA, dev or release, carries a CEF payload: Social Club runs on Rockstar's own CEF
+    (decision 0169). libcef.dll and chrome_elf.dll are in every CEF build."""
+    found = [p for p in app.rglob('*') if p.name.lower() in ('libcef.dll', 'chrome_elf.dll')
+             or (p.is_dir() and p.name.lower() == 'cef')]
+    check(not found, 'cef: no CEF payload in the app (decision 0169)'
+          + (f" (found {', '.join(str(p.relative_to(app)) for p in found[:3])})" if found else ''))
 
 
 def icon_checks(app, info, variant):
@@ -750,7 +820,8 @@ def main():
         # carried it in the SwiftPM resource bundle. A row's Runtime/x is base/x.
         if (app / "artifacts.tsv").exists():
             base, where, dirs = app, "app root", ["arm64ec-windows", "aarch64-windows", "nls", "fonts", "etc", "winsxs", "registry", "vulkan",
-                                                  "steamapi", "i386-windows", "certs", "mono"]
+                                                  "vulkan-loader",
+                                                  "steamapi", "steamclient", "i386-windows", "certs", "mono"]
             check(not any(b.joinpath("Runtime").exists() for b in app.glob("*.bundle")),
                   "resources: Runtime/ at the app root only, not also in a resource bundle")
         else:
@@ -772,6 +843,7 @@ def main():
                 or sha256(rt(k).read_bytes()) != h]
         check(not miss and got == set(res), f"resources: all {len(res)} rows match, no extras; gaps absent: "
               f"{sum(r[0] == 'gap' and not rt(r[1]).exists() for r in rows)}/{sum(r[0] == 'gap' for r in rows)}")
+        cef_checks(app)
         empty = [p for p in app.rglob("*") if p.is_dir() and not any(p.iterdir())]
         check(not empty, "resources: no empty directories")
 
@@ -805,7 +877,9 @@ def main():
                     check(same, f"dxmt: bundled {r[1]} is byte-identical to the patched build's {r[5]}")
         host_io_checks(exe, rt, rows)
         steamapi_checks(rt, rows)
+        steamclient_checks(rt, rows)
         wow64_checks(rt, rows)
+        arm64_vulkan_checks(rt, rows)
         steam_checks(exe)
         workstation_path_checks(app)
         jit_helper_checks(app, info, not a.app, profile=not a.unsigned)

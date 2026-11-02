@@ -3,7 +3,7 @@
 **Date:** 2026-10-06. **Branch:** `maxinst-500`. **Phone:** iPhone18,4, iOS 27.0, on
 battery. **Title:** The Witcher 3 1.32 (classic branch, `bin/x64`), app 292030, on DXMT.
 Closes the precondition of alignment item B1
-([plan](../plans/2026-10-05-proton-arm64-alignment.md)): the warm-start crash
+([plan](https://linear.app/playportdev/issue/PLA-76)): the warm-start crash
 recorded in [2026-09-26-first-run-stutter.md](2026-09-26-first-run-stutter.md).
 
 ## How the cache was turned on
@@ -85,3 +85,9 @@ FEX reads the cache database into memory at start-up (the file mapper returns
 nothing on iOS, `FEXUnixLib.cpp` `MapFile`), and Hollow Knight's database, with
 Mono's anonymous code, may take a path through rpmalloc the iOS port mishandles.
 
+
+**Later (2026-10-14):** the Hollow Knight crash was rpmalloc's, not the cache's: a full
+page of one 7–8 MB block (class `0x74`) freed as if it were on the available list,
+fixed by `patches/rpmalloc` 0004; the cache is on by default
+([record](2026-10-14-fex-disk-cache-on.md)). The inference above (the file mapper) was
+not the cause.

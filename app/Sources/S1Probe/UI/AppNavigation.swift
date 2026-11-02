@@ -21,6 +21,8 @@ final class AppNavigation: ObservableObject {
     var setup: Bool { routes.setup }
     var signIn: Bool { routes.signIn }
     var licences: [LicencePage] { routes.licences }
+    /// Settings › Controls › Controller is up in Settings' place (UI/ControllerMapView.swift).
+    var settingsControllerMap: Bool { routes.settingsControllerMap }
     var onGamePage: Bool { routes.onGamePage }
     var canGoBack: Bool { routes.canGoBack && (signIn || !setupBlocksLeaving) }
     private var setupBlocksLeaving: Bool { setup && !SetupState.shared.canLeave }
@@ -50,14 +52,23 @@ final class AppNavigation: ObservableObject {
         }
     }
 
-    static let screens = ["home", "library", "games", "downloads", "settings", "account", "setup", "signin"]
+    static let screens = ["home", "library", "installed", "games", "gog", "epic", "battlenet", "downloads", "settings", "account", "setup", "signin"]
 
     @discardableResult
     func open(_ screen: String) -> Bool {
+        let grid = LibraryGrid.shared
         switch screen {
+        case "installed":
+            // The Library on All, Installed only.
+            show(.library)
+            grid.show(.all, installedOnly: true)
         case "games":
             show(.library)
-            LibraryGrid.shared.filter = .steam
+            grid.show(.steam)
+        case "gog", "epic", "battlenet":
+            // A store: the Library on its column button (Battle.net's offered products).
+            show(.library)
+            grid.show(LibraryFilter(rawValue: screen)!)
         case "settings", "account":
             openSettings(section: screen == "account" ? .accounts : nil)
         case "setup":
@@ -67,7 +78,7 @@ final class AppNavigation: ObservableObject {
         default:
             guard let p = Page(rawValue: screen) else { return false }
             show(p)
-            if p == .library { LibraryGrid.shared.filter = .all }
+            if p == .library { grid.show(.all) }
         }
         return true
     }
@@ -83,6 +94,12 @@ final class AppNavigation: ObservableObject {
     }
 
     func closeLicences() { routes.closeLicences() }
+
+    /// Settings › Controls › Controller: the default controller map's page.
+    func openSettingsControllerMap() {
+        routes.openSettingsControllerMap()
+        PadFocus.shared.reset(start: ControllerMapView.modeID)
+    }
 
     func showLicences(_ pages: [LicencePage] = []) {
         if signIn { closeSignIn() }
@@ -152,6 +169,11 @@ final class AppNavigation: ObservableObject {
         // Steam can always cancel/return to setup, but an unfinished first run
         // cannot pop the checklist itself (footer, controller or native Back).
         guard signIn || !setupBlocksLeaving else { return false }
+        if settings && !signIn && settingsControllerMap {
+            _ = routes.back()
+            PadFocus.shared.reset(start: ControllerMapView.settingsRowID)
+            return true
+        }
         if settings && !signIn && !licences.isEmpty {
             closeLicence()
             return true

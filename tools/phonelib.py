@@ -49,6 +49,7 @@ import contextlib
 import datetime
 import fcntl
 import glob
+import importlib.util
 import json
 import os
 import re
@@ -94,6 +95,12 @@ def pmd_python():
     exe = shutil.which("pymobiledevice3")
     if not exe:
         raise PhoneError("pymobiledevice3 is not on PATH (docs/DEVICE.md)")
+    exe = os.path.realpath(exe)
+    # A venv whose path has a space (pipx on macOS: Application Support) starts its launcher with
+    # a /bin/sh trampoline, not the interpreter: the venv's python beside it is the one.
+    beside = os.path.join(os.path.dirname(exe), "python")
+    if os.access(beside, os.X_OK):
+        return beside
     with open(exe, "rb") as f:
         line = f.readline()
     if not line.startswith(b"#!"):
@@ -385,6 +392,17 @@ def netmuxd_restart():
     return True, "no phone listed"
 
 
+def one_per_phone(listed):
+    """usbmux's list with one entry per phone: macOS's usbmuxd lists a cabled phone twice, over
+    USB and over the network, under one Identifier; the USB entry is kept."""
+    seen = {}
+    for d in listed:
+        key = d.get("Identifier") or id(d)
+        if key not in seen or (d.get("ConnectionType") == "USB" and seen[key].get("ConnectionType") != "USB"):
+            seen[key] = d
+    return list(seen.values())
+
+
 class Phone:
     """One paired phone over netmuxd, and the Playport app on it."""
 
@@ -436,9 +454,10 @@ class Phone:
         with contextlib.suppress(OSError):
             os.remove(os.path.join(self.cmd_dir, "usbmux.out"))  # it carries the UDID
         try:
-            return json.loads(text[text.index("["):text.rindex("]") + 1])
+            listed = json.loads(text[text.index("["):text.rindex("]") + 1])
         except ValueError:
             return []
+        return one_per_phone(listed)
 
     def ensure(self):
         """Exactly one phone answers; when none does, restarts netmuxd once if netmuxd_restart
@@ -513,6 +532,14 @@ class Phone:
         pid = int((re.findall(r"pid (\d+)", text) or ["0"])[-1])
         return pid
 
+    def activate(self):
+        """Bring the running app to the front without ending it (a launch with
+        --no-kill-existing and no environment); the pid the launch names, or None."""
+        text = self.pmd("activate", "developer", "dvt", "launch", "--no-kill-existing", self.bundle_id(),
+                        secs=self.LAUNCH_S, check=False)
+        found = re.findall(r"pid (\d+)", text)
+        return int(found[-1]) if found else None
+
     def pull(self, remote, dest):
         """One named file into DEST (a directory); its path, or None, with the reason in
         self.pull_error. Never a directory: Documents holds the prefix, whose z: drive links to /."""
@@ -521,16 +548,24 @@ class Phone:
         with contextlib.suppress(OSError):
             os.remove(local)
         name = "pull-" + os.path.basename(remote)
-        self.pmd(name, "apps", "pull", self.bundle_id(), remote, dest, secs=300, check=False)
+        # afc.py pull, not pymobiledevice3's apps pull: that one's 4 MB reads lost the
+        # connection on large files and left a 0-byte file behind (afc.py PULL_CHUNK).
+        cmd = ["timeout", "600", pmd_python(), os.path.join(HERE, "afc.py"), self.bundle_id(), "pull", remote, local]
         self.pull_error = None
-        if os.path.exists(local):
+        if self.dry:
+            print("DRY " + shlex.join(cmd), flush=True)
+            return None
+        with open(os.path.join(self.cmd_dir, name + ".out"), "wb") as out, \
+                open(os.path.join(self.cmd_dir, name + ".err"), "wb") as err:
+            rc = subprocess.run(cmd, stdout=out, stderr=err, env=pmd_env()).returncode
+        if rc == 0 and os.path.exists(local):
             return local
         try:
             with open(os.path.join(self.cmd_dir, name + ".err"), errors="replace") as f:
                 tail = [x.strip() for x in f if x.strip()]
         except OSError:
             tail = []
-        self.pull_error = (tail[-1][:300] if tail else "no file came back") + f" (see {self.cmd_dir}/{name}.err)"
+        self.pull_error = (tail[-1][:300] if tail else f"no file came back (exit {rc})") + f" (see {self.cmd_dir}/{name}.err)"
         return None
 
     def pull_bundle(self, remote, dest):
@@ -609,9 +644,29 @@ class Phone:
         """Write bytes to a file in the container, whole, in one AFC call (no temporary file)."""
         self.afc("put", "put", remote, data=data)
 
-    def remove(self, remote):
-        """Delete one Documents/NAME.zip (afc.py rm refuses anything else); afc.py's reply."""
-        return self.afc("rm", "rm", remote)
+    def put_import(self, local, remote):
+        """Copy the local file LOCAL to Documents/Import/NAME/FILE (the app's import inbox, what a
+        person fills with Files; `pp ui --action import:Import/NAME` adds it); afc.py's reply.
+        Refuses any other path (afc.import_refusal) before the phone is asked."""
+        why = afc_tool().import_refusal(remote)
+        if why:
+            raise PhoneError(f"{remote}: {why}")
+        if not os.path.isfile(local):
+            raise PhoneError(f"{local}: not a file")
+        with open(local, "rb") as f:
+            data = f.read()
+        return self.afc("put-import", "put-import", remote, data=data, secs=600)
+
+    def remove(self, remote, check=True):
+        """Delete one Documents/NAME.zip, text bar secret file or title-cfg/TITLE/NAME.bin
+        diagnostic dump (afc.py rm refuses anything else); afc.py's reply."""
+        return self.afc("rm", "rm", remote, check=check)
+
+    def put_secret(self, remote, data):
+        """The text bar's secret for one action (pp ui --secret-file, PLA-606) to its
+        Documents/ui-text-<nonce>-<n>: on stdin, under a temporary name renamed into place
+        (afc.py put-secret); no argv, no cmd/ file, no event carries it."""
+        self.afc("put-secret", "put-secret", remote, data=data, secs=30)
 
     def run_events(self, nonce):
         """This launch's events from the app's Documents/run-events.jsonl ([] if none yet)."""
@@ -624,6 +679,15 @@ class Phone:
                     if o.get("nonce") == nonce:
                         out.append(o)
         return out
+
+
+def afc_tool():
+    """tools/afc.py as a module (its path rules; the AFC calls themselves run under
+    pymobiledevice3's Python through Phone.afc)."""
+    spec = importlib.util.spec_from_file_location("afc_tool", os.path.join(HERE, "afc.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
 
 
 LOW_BATTERY_PCT = 30

@@ -23,6 +23,7 @@
 
 import Foundation
 import JITHelperXPC
+import SharedMemory
 import ObjectiveC
 import os
 import PlayportKit
@@ -392,6 +393,8 @@ final class JitHelper: NSObject, NSXPCListenerDelegate, JITHost, @unchecked Send
         c.exportedInterface = NSXPCInterface(with: JITHost.self)
         c.exportedObject = self
         c.remoteObjectInterface = NSXPCInterface(with: JITHelping.self)
+        c.remoteObjectInterface?.setClasses(NSSet(object: PPMemoryRegion.self) as! Set<AnyHashable>,
+            for: #selector(JITHelping.memoryAllocate(bytes:token:purgeable:reply:)), argumentIndex: 0, ofReply: true)
         c.resume()
         connection = c
         connected.signal()

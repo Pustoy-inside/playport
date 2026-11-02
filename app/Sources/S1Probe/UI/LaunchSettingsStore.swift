@@ -47,11 +47,12 @@ final class LaunchSettingsStore: ObservableObject {
     /// A game's compatibility default, nil for none.
     func compat(for id: String) -> CompatDefaults.Entry? { Self.compat.entry(for: id) }
 
-    /// The person's own settings for a game over its compatibility default.
+    /// The person's own settings for a game over its compatibility default, over Playport's
+    /// defaults for every game (LaunchSettings.everyGame, decision 0153).
     func effective(for title: InstalledTitle, inheritingGraphics: Bool = false) -> LaunchSettings.Effective {
-        let compat = Self.compat.entry(for: title.id)?.settings
-        var game = games[title.id].map { $0.over(compat) } ?? compat
-        if inheritingGraphics { game?.graphics = compat?.graphics }
+        let compat = LaunchSettings.overEveryGame(Self.compat.entry(for: title.id)?.settings)
+        var game: LaunchSettings? = games[title.id].map { $0.over(compat) } ?? compat
+        if inheritingGraphics { game?.graphics = compat.graphics }
         let arguments = (try? title.launchPlan(cohort: LibraryModel.cohort))?.args ?? []
         return LaunchSettings.resolve(game: game, global: global,
                                       importsDirect3D12: title.detectsDirect3D12, i386: title.isI386,
@@ -111,7 +112,7 @@ enum LaunchSettingsText {
     static func graphicsDetail(_ g: GraphicsBackend) -> String {
         switch g {
         case .dxmt: "Direct3D 10 and 11 on Metal"
-        case .vulkan: "Direct3D 8 to 12, experimental"
+        case .vulkan: "Direct3D 8 to 12"
         }
     }
 
@@ -164,9 +165,8 @@ enum LaunchSettingsText {
         + "with an upscaler looks closer to Native for less power. MetalFX and FSR 1 work in every game; FSR 1's "
         + "sharpness sets how much it sharpens after scaling. At Native there is nothing to scale."
 
-    static let graphicsFooter = "DXMT runs Direct3D 10 and 11 on Metal. The default is Vulkan for 32-bit games and detected Direct3D 12 games, DXMT otherwise. "
-        + "Vulkan runs Direct3D 8 to 11 through DXVK and Direct3D 12 through vkd3d-proton, on Mesa's "
-        + "KosmicKrisp driver; it is experimental."
+    static let graphicsFooter = "The default is Vulkan: Direct3D 8 to 11 through DXVK and Direct3D 12 through vkd3d-proton, "
+        + "on Mesa's KosmicKrisp driver. DXMT runs Direct3D 10 and 11 straight on Metal."
 
     static func ordering(_ s: MemoryOrdering.Setting) -> String {
         switch s {
@@ -200,42 +200,3 @@ enum LaunchSettingsText {
     }
 }
 
-/// How Settings and the in-game menu name the performance HUD's choices.
-enum PerformanceHUDText {
-    static func preset(_ p: HUDPreset) -> String {
-        switch p {
-        case .off: "Off"
-        case .fps: "FPS"
-        case .compact: "Compact"
-        case .full: "Full"
-        case .custom: "Custom"
-        }
-    }
-
-    static func position(_ p: HUDPosition) -> String {
-        switch p {
-        case .topLeft: "Top left"
-        case .topCenter: "Top"
-        case .topRight: "Top right"
-        case .bottomLeft: "Bottom left"
-        case .bottomRight: "Bottom right"
-        }
-    }
-
-    static func item(_ i: HUDItem) -> String {
-        switch i {
-        case .fps: "Frame rate"
-        case .frameTime: "Frame time"
-        case .cpu: "CPU load"
-        case .gpu: "GPU time and load"
-        case .thermal: "Heat"
-        case .battery: "Battery"
-        case .memory: "Memory"
-        case .resolution: "Resolution and upscaler"
-        }
-    }
-
-    static let footer = "Playport's HUD over a game: FPS shows the frame rate; Compact adds frame time, CPU and GPU; "
-        + "Full adds heat, battery, memory and the resolution. GPU load is the share of the time the GPU was busy, "
-        + "as iOS gives no exact figure. The in-game menu's Performance HUD row changes it for the game in play."
-}

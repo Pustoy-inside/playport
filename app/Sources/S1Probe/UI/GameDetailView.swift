@@ -8,13 +8,17 @@
 //   Steam has a newer build on the install's branch; a running update or
 //   repair takes Play's place with its progress, Pause and Cancel;
 // - not installed: Install with the size (Resume or Discard a stopped
-//   download), and Version (X) when Steam lists betas.
+//   download), and Version (X) when Steam lists betas; a Battle.net product
+//   (PLA-519) Install with its download size and Region (X), the store
+//   region picker, its Install refused up front when the space it needs is
+//   not free.
 //
 // At the right a card of facts: last played, cloud saves and the size on the
 // phone, or the download size, the version and the achievements. Under the
 // buttons one or two lines say what stands in the way of a Play (another game
 // ran in this process, the memory limit, a download that pauses) and whether a
-// controller is connected.
+// controller is connected; an installed Battle.net copy's ban-risk notice
+// (PLA-514), which its first Play asks the player to accept.
 //
 // Game options (GameOptions.dc.html) is a panel over the dimmed page: the
 // game's resolution, frame rate limit and Direct3D, each "Default · X" until
@@ -32,6 +36,7 @@
 // (decision 0009). A dev build's `open:ID#SECTION` opens the options at a
 // section (graphics, game, files, developer, ordering, steam).
 
+import BattleNetClientKit
 import GameController
 import HostIOKit
 import GOGClientKit
@@ -73,6 +78,8 @@ private struct GameDetailPage: View {
     @ObservedObject private var gog = GOGAccount.shared
     @ObservedObject private var epic = EpicAccount.shared
     @ObservedObject private var mods = GameMods.shared
+    @ObservedObject private var bnet = BattleNetStore.shared
+    @ObservedObject private var bnetInstalled = BattleNetInstalled.shared
     @State private var playError: String?
     @State private var controllers = GCController.controllers().count
     @State private var stageOnDisk = false
@@ -136,7 +143,7 @@ private struct GameDetailPage: View {
         pickedBranch ?? installed?.branch ?? (installed == nil ? cohortBranch : nil) ?? Branch.publicName
     }
 
-    private var name: String { installed?.name ?? game?.info.name ?? gogGame?.title ?? epicGame?.title ?? "" }
+    private var name: String { installed?.name ?? game?.info.name ?? gogGame?.title ?? epicGame?.title ?? bnetProduct?.name ?? "" }
 
     /// The GOG listing of this game, when GOG is signed in and owns it.
     private var gogGame: GOGGame? { key.flatMap { $0.store == .gog ? gog.game($0.id) : nil } }
@@ -148,12 +155,20 @@ private struct GameDetailPage: View {
 
     private var canDownloadEpic: Bool { epic.state == .signedIn && !installs.suspended }
 
+    /// A Battle.net product not installed: the store offers it (no sign-in).
+    private var bnetProduct: BattleNetProduct? { installed == nil ? key.flatMap { bnet.offered($0) } : nil }
+
+    /// An installed Battle.net product: its region and language change on the page (PLA-520).
+    private var installedBnet: BattleNetProduct? {
+        installed.flatMap { $0.store == .battlenet && $0.source == .installed ? BattleNet.product($0.key) : nil }
+    }
+
     private var stats: UserStatsSnapshot? { appID.flatMap { model.userStats[$0]?.steam } }
 
     var body: some View {
         let t = installed, g = game
         Group {
-            if t == nil, g == nil, gogGame == nil, epicGame == nil {
+            if t == nil, g == nil, gogGame == nil, epicGame == nil, bnetProduct == nil {
                 VStack(spacing: 8) {
                     Text("Not installed").font(PP.display(28)).foregroundStyle(PP.text)
                     #if PLAYPORT_RELEASE
@@ -180,32 +195,46 @@ private struct GameDetailPage: View {
             page(t, g)
                 // Under a panel the page's controls leave the ring.
                 .transformPreference(PadItemsKey.self) { if panel != nil { $0 = [:] } }
-            if let panel {
+            if panel == .controller, let t {
+                // The Controller page covers the whole page (ControllerMapping.dc.html).
+                ControllerMapView(target: .game(t.id), context: name)
+                    .transition(.move(edge: .trailing))
+            } else if let panel {
                 Color(hex: 0x05070A).opacity(0.72).ignoresSafeArea()
                     .contentShape(Rectangle())
                     .onTapGesture { _ = navigation.back() }
                 HStack(spacing: 0) {
-                    // The note sits low at the left, just above the footer the shell
-                    // draws there (36 pt), clear of the page's dimmed title and
-                    // subtitle (GameOptions.dc.html puts it under the title).
-                    VStack(alignment: .leading) {
-                        Spacer()
-                        if panel == .options {
-                            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                                Circle().fill(PP.accent).frame(width: 7, height: 7)
-                                Text("Changed for this game. The rest follow Settings › Graphics.")
-                                    .fixedSize(horizontal: false, vertical: true)
-                            }
-                            .font(.system(size: 13)).foregroundStyle(PP.soft)
+                    if panel == .gyro, let t {
+                        // Gyro aim's test area at the left, over the page's dimmed title (GyroAim.dc.html).
+                        GyroTestArea(target: .game(t.id))
+                            .frame(maxWidth: 330)
+                            .padding(.leading, 24).padding(.trailing, 20).padding(.top, 70)
                             .padding(.bottom, AppShell.footerBottom + 36 + 12)
+                    } else {
+                        // The note sits low at the left, just above the footer the shell
+                        // draws there (36 pt), clear of the page's dimmed title and
+                        // subtitle (GameOptions.dc.html puts it under the title).
+                        VStack(alignment: .leading) {
+                            Spacer()
+                            if panel == .options {
+                                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                                    Circle().fill(PP.accent).frame(width: 7, height: 7)
+                                    Text("Changed for this game. The rest follow Settings.")
+                                        .fixedSize(horizontal: false, vertical: true)
+                                }
+                                .font(.system(size: 13)).foregroundStyle(PP.soft)
+                                .padding(.bottom, AppShell.footerBottom + 36 + 12)
+                            }
                         }
+                        .allowsHitTesting(false)
                     }
-                    .allowsHitTesting(false)
                     Spacer(minLength: 0)
                     Group {
                         switch panel {
                         case .options: if let t { optionsPanel(t, g) }
                         case .achievements: achievementsPanel
+                        case .gyro: if let t { GyroAimPanel(titleID: t.id, context: name) }
+                        case .controller: EmptyView()
                         }
                     }
                     .frame(width: 410)
@@ -230,9 +259,33 @@ private struct GameDetailPage: View {
             if let t, t.store == .gog, t.source == .installed { await gog.checkUpdate(t.key.id) }
             if let t, t.store == .epic, t.source == .installed { await epic.checkUpdate(t.key.id) }
         }
+        // A Battle.net product's sizes in its region and locale (again after the region picker).
+        .task(id: bnetProduct.map { "\($0.code)/\(bnet.region($0).rawValue)" }) {
+            if let p = bnetProduct { await bnet.loadSizes(p) }
+        }
+        // An installed Battle.net product's region and language, again after a language download.
+        .task(id: installedBnet.map { "\($0.code)/\(job == nil)" }) {
+            if let p = installedBnet { bnetInstalled.load(p) }
+        }
         .task(id: navigation.pageSection) {
             // A dev build's `open:ID#SECTION`: the options, at that section.
+            #if !PLAYPORT_RELEASE
+            guard UIDriver.allowsDeferredNavigation else { return }
+            #endif
             guard navigation.onGamePage, navigation.pageSection != nil, t != nil else { return }
+            if let page = ["gyro": AppNavigation.GamePanel.gyro, "controller": .controller][navigation.pageSection ?? ""] {
+                // Its Controls › Gyro aim or Controller page, over Game options.
+                navigation.gamePanels = [.options, page]
+                navigation.pageSection = nil
+                return
+            }
+            if navigation.pageSection == "layout", let t {
+                // Its Controls › Edit on-screen layout: the layout editor over the game's art.
+                if navigation.gamePanels != [.options] { navigation.gamePanels = [.options] }
+                navigation.pageSection = nil
+                LayoutEditorSession.shared.openOverArt(titleID: t.id, title: name)
+                return
+            }
             if navigation.gamePanels != [.options] { navigation.gamePanels = [.options] }
         }
         // Again once a restore signs in: a page opened while it ran fetched nothing.
@@ -269,7 +322,8 @@ private struct GameDetailPage: View {
                                 ?? t.map { PageArt(appID: $0.appID, name: $0.name, info: nil, titleID: $0.id,
                                                    storeKey: $0.key) }
                                 ?? gogGame.map { PageArt(appID: nil, name: $0.title, info: nil, storeKey: StoreGameKey(store: .gog, id: $0.id)) }
-                                ?? epicGame.map { PageArt(appID: nil, name: $0.title, info: nil, storeKey: StoreGameKey(store: .epic, id: $0.id)) })
+                                ?? epicGame.map { PageArt(appID: nil, name: $0.title, info: nil, storeKey: StoreGameKey(store: .epic, id: $0.id)) }
+                                ?? bnetProduct.map { PageArt(appID: nil, name: $0.name, info: nil, storeKey: BattleNet.key($0)) })
 
             HStack(alignment: .top, spacing: 24) {
                 VStack(alignment: .leading, spacing: 8) {
@@ -279,8 +333,9 @@ private struct GameDetailPage: View {
                         if let line = subtitle(t, g) {
                             Text(line).font(.system(size: 13)).foregroundStyle(PP.soft)
                         }
-                        HStack(spacing: 12) {
-                            if let t { installedButtons(t, g) } else if let g { installButtons(g) } else if let gg = gogGame { gogInstallButtons(gg) } else if let eg = epicGame { epicInstallButtons(eg) }
+                        // One row of buttons that wraps rather than squeezing a label to a letter.
+                        PageButtonRows {
+                            if let t { installedButtons(t, g) } else if let g { installButtons(g) } else if let gg = gogGame { gogInstallButtons(gg) } else if let eg = epicGame { epicInstallButtons(eg) } else if let p = bnetProduct { bnetInstallButtons(p) }
                         }
                         .padding(.top, 14)
                         notes(t, g)
@@ -337,6 +392,21 @@ private struct GameDetailPage: View {
         }
         SecondaryButton(id: "game:options", systemImage: "slider.horizontal.3", title: "Options", glyph: .x, hint: "Game options") {
             navigation.gamePanels = [.options]
+        }
+        // Updates (PLA-521): every Play checks first; Check for update asks by hand, and Update
+        // queues it. Region and Language are rows of the facts card (`bnetLinks`): a phone in
+        // landscape has room for neither another button nor another row of them.
+        if let p = installedBnet, job == nil {
+            let update = bnetInstalled.updates[p]
+            if case .available? = update {
+                SecondaryButton(id: "game:update", systemImage: "arrow.down.circle", title: "Update",
+                                enabled: !launch.running && !installs.suspended,
+                                hint: "Update") { bnetInstalled.update(p, downloads: installs) }
+            } else {
+                SecondaryButton(id: "game:check-update", systemImage: "arrow.triangle.2.circlepath", title: "Check for update",
+                                enabled: !launch.running && update != .checking,
+                                hint: "Check for update") { Task { await bnetInstalled.checkUpdate(p) } }
+            }
         }
         if job == nil, t.store == .gog, t.source == .installed, let newest = gog.newest[t.key.id], newest != t.storeVersion {
             SecondaryButton(id: "game:update", systemImage: "arrow.down.circle", title: "Update", enabled: canDownloadGOG && !launch.running,
@@ -403,6 +473,21 @@ private struct GameDetailPage: View {
         } else {
             PrimaryButton(id: "game:install", title: epic.installer.hasStage(eg.id) ? "Resume download" : "Install",
                           enabled: canDownloadEpic && epic.refusal(eg.id) == nil, hint: "Install") { epic.install(eg.id, name: eg.title) }
+        }
+    }
+
+    /// A Battle.net product not installed: Install with its download size (refused up front when
+    /// it does not fit) and Region, or its download's controls.
+    @ViewBuilder
+    private func bnetInstallButtons(_ p: BattleNetProduct) -> some View {
+        if let job {
+            jobControls(job)
+        } else {
+            let size = bnet.listing(p)?.sizes.map { " · " + ByteCount.format($0.download) } ?? ""
+            PrimaryButton(id: "game:install", title: bnet.hasStage(p) ? "Resume download" : "Install" + size,
+                          enabled: !installs.suspended && !bnet.sizing.contains(p), hint: "Install") { bnet.install(p) }
+            SecondaryButton(id: "game:region", systemImage: nil, title: "Region · \(bnet.region(p).rawValue)", glyph: .x,
+                            hint: "Store region") { bnet.pickRegion(p) }
         }
     }
 
@@ -479,6 +564,10 @@ private struct GameDetailPage: View {
     @ViewBuilder
     private func notes(_ t: InstalledTitle?, _ g: SteamGame?) -> some View {
         VStack(alignment: .leading, spacing: 3) {
+            if let p = installedBnet, let why = bnetInstalled.errors[p] { Text(why).foregroundStyle(.orange) }
+            if let p = installedBnet, case let .unreachable(why)? = bnetInstalled.updates[p] {
+                Text("Couldn't check for an update: \(why)").foregroundStyle(.orange)
+            }
             if let t {
                 if launch.spent {
                     Text(JitProvider.inLiveContainer
@@ -497,13 +586,30 @@ private struct GameDetailPage: View {
                     if installs.isBusy { Text("Starting a game pauses the download. It goes on when Playport reopens after the game.") }
                     controllerLine
                 }
+                riskNotice(t)
             } else if let g {
                 installNote(g)
             } else if let eg = epicGame, let why = epic.refusal(eg.id) {
                 Text(why).foregroundStyle(.orange)
+            } else if let p = bnetProduct {
+                bnetNote(p)
             }
         }
         .fixedSize(horizontal: false, vertical: true)
+    }
+
+    /// A Battle.net copy's ban-risk notice (PLA-514, decision 0175): its text stays on the page, before
+    /// the first Play asks and after it was accepted.
+    @ViewBuilder
+    private func riskNotice(_ t: InstalledTitle) -> some View {
+        if let p = BattleNet.product(t.key) {
+            Text(BattleNetPlay.notice(p).text).foregroundStyle(.orange)
+            if let at = t.riskNoticeAccepted {
+                Text("You accepted this on \(at.formatted(date: .abbreviated, time: .omitted)).")
+            } else {
+                Text("Play asks you to accept it first.")
+            }
+        }
     }
 
     @ViewBuilder
@@ -539,8 +645,32 @@ private struct GameDetailPage: View {
         }
     }
 
+    @ViewBuilder
+    private func bnetNote(_ p: BattleNetProduct) -> some View {
+        if installs.suspended {
+            Text(InstallCopy.afterLaunch)
+        } else if let job {
+            if case let .paused(reason?) = job.phase { Text(reason).foregroundStyle(.orange) }
+            if job.isRunning { Text("Keep Playport open: the download pauses when it leaves the screen.") }
+            Text("Play is available once the download finishes.")
+        } else {
+            if let why = bnet.refusals[p] ?? bnet.spaceRefusal(p) { Text(why).foregroundStyle(.orange) }
+            if let why = bnet.sizeErrors[p] ?? bnet.error { Text(why).foregroundStyle(.orange) }
+            if bnet.sizing.contains(p) {
+                Text("Asking Blizzard for the size in \(BattleNetStore.label(bnet.region(p)))…")
+            } else {
+                let need = bnet.needed(p).map { "Needs \(ByteCount.format($0))" }
+                let free = library.freeBytes.map { "\(ByteCount.format($0)) free" }
+                let parts = [need, free].compactMap { $0 }
+                if !parts.isEmpty { Text(parts.joined(separator: " · ") + " · keep Playport open while it downloads") }
+            }
+            Text("No Battle.net account is needed to install. World of Warcraft asks you to sign in when it starts.")
+        }
+    }
+
     private func facts(_ t: InstalledTitle?, _ g: SteamGame?) -> some View {
         let source: LibrarySource = key?.store ?? (appID == nil ? .local : .steam)
+        var links: [String: FactLink] = [:]
         var rows: [(String, String, Color?)] = [("Store", source.label, nil)]
         if let t {
             if t.badge != .ready { rows.append(("State", t.badge.rawValue, .orange)) }
@@ -550,32 +680,89 @@ private struct GameDetailPage: View {
                 rows.append(("Version", BranchLabel.text(b, in: g?.info), nil))
             }
             if t.appID != nil { rows.append(("Cloud saves", cloudStatus(t).0, cloudStatus(t).1)) }
-            rows.append((ExternalStorage.onDrive(t) ? "On the external drive" : "On this phone",
-                         t.sizeBytes.map(ByteCount.format) ?? "Unknown", nil))
+            rows.append((ExternalStorage.onDrive(t) ? "On the external drive" : "On this phone", t.sizeBytes.map(ByteCount.format) ?? "Unknown", nil))
+            if let p = installedBnet {
+                let now = bnetInstalled.current[p]
+                rows.append(("Region", bnetInstalled.changingRegion.contains(p) ? "Changing…" : now.map { BattleNetStore.label($0.region) } ?? "…", nil))
+                rows.append(("Language", now.map { BattleNetInstalled.name($0.locale) ?? $0.locale } ?? "…", nil))
+                links = bnetLinks(p, now)
+                switch bnetInstalled.updates[p] {
+                case nil: break
+                case .checking?: rows.append(("Update", "Checking…", nil))
+                case let .current(v)?: rows.append(("Update", "Up to date · \(v)", nil))
+                // At the installed build: an install from before decision 0177 getting the x64 client.
+                case let .available(from, to, bytes)?:
+                    rows.append(("Update", (from == to ? "x64 client" : "\(from) → \(to)") + " · \(ByteCount.format(bytes))", .orange))
+                case .unreachable?: rows.append(("Update", "Couldn't check", .orange))
+                }
+            }
         } else if let g {
             if let s = g.info.installSize(branch: selectedBranch) { rows.append(("Download", ByteCount.format(s), nil)) }
             if branches.count > 1 { rows.append(("Version", BranchLabel.text(selectedBranch, in: g.info), nil)) }
             if let s = stats, !s.schema.achievements.isEmpty {
                 rows.append(("Achievements", "\(s.unlockedCount) of \(s.schema.achievements.count)", nil))
             }
+        } else if let p = bnetProduct {
+            let l = bnet.listing(p)
+            if let s = l?.sizes { rows.append(("Download", ByteCount.format(s.download), nil)) }
+            if let n = bnet.needed(p) { rows.append(("Space needed", ByteCount.format(n), nil)) }
+            rows.append(("Region", BattleNetStore.label(bnet.region(p)), nil))
+            rows.append(("Language", bnet.locale(p), nil))
+            if let v = l?.version { rows.append(("Version", v, nil)) }
         }
         return VStack(spacing: 0) {
             ForEach(rows.indices, id: \.self) { i in
-                HStack(spacing: 12) {
-                    Text(rows[i].0).foregroundStyle(PP.muted)
-                    Spacer(minLength: 8)
-                    Text(rows[i].1).foregroundStyle(rows[i].2 ?? PP.text).lineLimit(1)
-                }
-                .font(.system(size: 13))
-                .padding(.vertical, 7)
-                .overlay(alignment: .bottom) {
-                    if i < rows.count - 1 { Rectangle().fill(PP.raised).frame(height: 1) }
-                }
+                factRow(rows[i], link: links[rows[i].0], last: i == rows.count - 1)
             }
         }
         .padding(.horizontal, 16).padding(.top, 8).padding(.bottom, 10)
         .background(PP.surface, in: RoundedRectangle(cornerRadius: 14))
         .opacity(rows.isEmpty ? 0 : 1)
+    }
+
+    /// A fact that opens its picker: an installed Battle.net product's region and language.
+    private struct FactLink {
+        let id: String
+        let hint: String
+        let enabled: Bool
+        let action: () -> Void
+    }
+
+    /// The facts card's Region and Language rows, which change them as the store page's Region
+    /// button does: by their labels, the words a button beside Play had no room for (PLA-519).
+    private func bnetLinks(_ p: BattleNetProduct, _ now: BattleNetInstalled.Choice?) -> [String: FactLink] {
+        let idle = now != nil && job == nil && !launch.running
+        return [
+            "Region": FactLink(id: "game:region", hint: "Store region", enabled: idle && !bnetInstalled.changingRegion.contains(p)) {
+                bnetInstalled.pickRegion(p)
+            },
+            "Language": FactLink(id: "game:language", hint: "Language", enabled: idle && !installs.suspended) {
+                bnetInstalled.pickLanguage(p, downloads: installs)
+            },
+        ]
+    }
+
+    @ViewBuilder
+    private func factRow(_ row: (String, String, Color?), link: FactLink?, last: Bool) -> some View {
+        let line = HStack(spacing: 12) {
+            Text(row.0).foregroundStyle(PP.muted)
+            Spacer(minLength: 8)
+            Text(row.1).foregroundStyle(row.2 ?? PP.text).lineLimit(1).minimumScaleFactor(0.8)
+            if let link {
+                Image(systemName: "chevron.right").font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(link.enabled ? PP.soft : PP.muted)
+            }
+        }
+        .font(.system(size: 13))
+        .padding(.vertical, 7)
+        .overlay(alignment: .bottom) {
+            if !last { Rectangle().fill(PP.raised).frame(height: 1) }
+        }
+        if let link {
+            line.padItem(link.id, hint: link.hint, cornerRadius: 6) { if link.enabled { link.action() } }
+        } else {
+            line
+        }
     }
 
     /// Steam Cloud for the facts card and the options' row.
@@ -599,6 +786,7 @@ private struct GameDetailPage: View {
 
     private func xKey(_ t: InstalledTitle?) -> String {
         if t != nil { return "options" }
+        if t == nil, bnetProduct != nil, job == nil { return "region" }
         return game != nil && job == nil && !stageOnDisk && branches.count > 1 ? "version" : "none"
     }
 
@@ -608,6 +796,8 @@ private struct GameDetailPage: View {
             GamePageState.shared.x = .init(label: "Game options") { navigation.gamePanels = [.options] }
         case "version":
             GamePageState.shared.x = .init(label: "Version") { if let g = game { pickVersion(g) } }
+        case "region":
+            GamePageState.shared.x = .init(label: "Store region") { if let p = bnetProduct { bnet.pickRegion(p) } }
         default:
             GamePageState.shared.x = nil
         }
@@ -617,7 +807,12 @@ private struct GameDetailPage: View {
         switch new.last {
         case .options?:
             let section = navigation.pageSection.flatMap(Self.firstRow(ofSection:))
-            focus.reset(start: section ?? (old.last == .achievements ? "opt:achievements" : "opt:aspect"))
+            focus.reset(start: section ?? (old.last == .achievements ? "opt:achievements" : old.last == .gyro ? "opt:gyro"
+                                           : old.last == .controller ? ControllerMapView.gameRowID : "opt:aspect"))
+        case .gyro?:
+            focus.reset(start: "gyro:output")
+        case .controller?:
+            focus.reset(start: ControllerMapView.modeID)
         case .achievements?:
             focus.reset(start: "ach:0")
         case nil:
@@ -627,14 +822,25 @@ private struct GameDetailPage: View {
 
     /// Where `open:ID#SECTION` rings the options.
     private static func firstRow(ofSection s: String) -> String? {
+        #if !PLAYPORT_RELEASE
+        return UIDriverGameSection(rawValue: s)?.row(firstOrdering: MemoryOrdering.Setting.allCases[0].rawValue)
+        #else
+        // Release has no driver (Dev/ is not in it), so nothing sets pageSection: this copy
+        // is unreachable. It still names the dev enum's sections and rows exactly, so a
+        // section added there is added here too (tools/tests/test_ui.py compares them).
         switch s {
         case "graphics": "opt:aspect"
+        case "controls": "opt:layout"
         case "game": "opt:version"
         case "files": "opt:files"
         case "developer", "ordering": "opt:ordering-\(MemoryOrdering.Setting.allCases[0].rawValue)"
         case "steam": "opt:steamAPI"
+        case "gyro", "controller", "layout": nil
+        case "runtime": "opt:runtime"
+        case "graphicsoptions": "opt:graphicsOptions"
         default: nil
         }
+        #endif
     }
 
     // MARK: Game options
@@ -680,6 +886,7 @@ private struct GameDetailPage: View {
                 ScrollView(.vertical, showsIndicators: false) {
                     VStack(spacing: 2) {
                         graphicsRows(t)
+                        GameControlsOptionRows(titleID: t.id, context: context)
                         gameRows(t, g)
                         #if !PLAYPORT_RELEASE
                         developerRows(t)
@@ -693,7 +900,12 @@ private struct GameDetailPage: View {
                 }
                 .task(id: navigation.pageSection) {
                     guard let s = navigation.pageSection, navigation.onGamePage else { return }
+                    #if !PLAYPORT_RELEASE
+                    do { try await Task.sleep(for: .milliseconds(300)) } catch { return }
+                    guard navigation.pageSection == s, UIDriver.allowsDeferredNavigation else { return }
+                    #else
                     try? await Task.sleep(for: .milliseconds(300))
+                    #endif
                     if let row = Self.firstRow(ofSection: s) {
                         focus.ring(row)
                         proxy.scrollTo(row, anchor: .top)
@@ -737,8 +949,9 @@ private struct GameDetailPage: View {
         let inheritedGraphics = launchSettings.effective(for: t, inheritingGraphics: true).graphics
         let d3d = OptionValue.of(own: own.graphics, compat: cs?.graphics, inherited: inheritedGraphics, name: LaunchSettingsText.graphics)
         PadSectionHeader(text: "Graphics").id("graphics")
-        if let compat {
-            // On the page for touch and in the ring for a controller: what the marker means.
+        if let compat, compat.settings != LaunchSettings() {
+            // On the page for touch and in the ring for a controller: what the marker means. An entry
+            // that sets only the on-screen layout says so in Controls (GameControlsOptionRows).
             PadRow(id: "opt:compat", title: "\(OptionValue.compatMarker) Set for this game's compatibility",
                    subtitle: compat.reason + " Your own choice on a row below wins; Y on that row comes back to this.",
                    subtitleLines: nil, style: .plain, hint: "Info") {}
@@ -973,7 +1186,9 @@ private struct GameDetailPage: View {
             if canCheck, !checking { library.verify(t.id) }
         }
         if t.source == .installed, let app = t.appID, job == nil, !checking, t.lastVerification.map({ !$0.ok }) ?? false {
-            PadRow(id: "opt:repair", title: "Repair from Steam", subtitle: "Downloads the damaged files again",
+            PadRow(id: "opt:repair", title: "Repair from Steam",
+                   subtitle: (t.lastVerification?.depotsToRecheck ?? 0) > 0 ? "Downloads what Steam installs that is missing"
+                                                                            : "Downloads the damaged files again",
                    accessory: .chevron, style: .plain, hint: "Repair") {
                 if !installs.suspended, !launch.running { mods.confirm(t.id, "Repair") { installs.repair(app, name: t.name) } }
             }
@@ -997,6 +1212,7 @@ private struct GameDetailPage: View {
         if !library.canVerify(t) { return "Store installs only" }
         guard let v = t.lastVerification else { return "Not checked yet" }
         let when = v.date.formatted(.relative(presentation: .named))
+        if v.bad == 0, (v.depotsToRecheck ?? 0) > 0 { return "Content to check with Steam" }
         return v.ok ? "Last OK \(when)" : "\(v.bad) of \(v.files) damaged"
     }
 
@@ -1117,7 +1333,46 @@ private struct GameDetailPage: View {
         }
         // A compatibility default's keys stay under the person's own, per key (decision 0091).
         let compat = launchSettings.compat(for: t.id)?.settings
-        let compatKeys = compat?.runtime.trimmingCharacters(in: .whitespaces) ?? ""
+        // Windows services (decision 0107): services.exe and the services it starts, for this play.
+        // Unset, every game's default (decision 0153).
+        let every = LaunchSettings.everyGame
+        let services = OptionValue.of(own: settings.wrappedValue.windowsServices, compat: compat?.windowsServices,
+                                      inherited: every.windowsServices ?? false, name: onOff)
+        PadRow(id: "opt:windowsServices", title: "Windows services", value: services.text, accessory: .chevron,
+               changed: services.changed, style: .plain,
+               reset: services.changed ? { settings.wrappedValue.windowsServices = nil } : nil) {
+            PadModal.shared.picker(
+                title: "Windows services", context: "\(context) · Windows",
+                note: "Starts Wine's service manager (services.exe) before the game, for a launcher that installs "
+                    + "and uses a Windows service; its services stop when the game ends.",
+                options: [PadOption(id: "", label: "Default",
+                                    detail: compat?.windowsServices.map { "\(onOff($0)), for this game" } ?? onOff(every.windowsServices ?? false)),
+                          PadOption(id: "on", label: "On"), PadOption(id: "off", label: "Off")],
+                selected: settings.wrappedValue.windowsServices.map { $0 ? "on" : "off" } ?? "") {
+                settings.wrappedValue.windowsServices = $0.isEmpty ? nil : $0 == "on"
+            }
+        }
+        // The Khronos Vulkan loader (decision 0131): its vulkan-1.dll in place of Wine's, for this play.
+        let khronosName: (Bool) -> String = { $0 ? "Khronos" : "Wine's" }
+        let loader = OptionValue.of(own: settings.wrappedValue.khronosVulkanLoader, compat: compat?.khronosVulkanLoader,
+                                    inherited: every.khronosVulkanLoader ?? false, name: khronosName)
+        PadRow(id: "opt:khronosVulkanLoader", title: "Vulkan loader", value: loader.text, accessory: .chevron,
+               changed: loader.changed, style: .plain,
+               reset: loader.changed ? { settings.wrappedValue.khronosVulkanLoader = nil } : nil) {
+            PadModal.shared.picker(
+                title: "Vulkan loader", context: "\(context) · Windows",
+                note: "The Khronos Vulkan loader loads the Vulkan layers a game asks for, such as its overlay's; "
+                    + "Wine's own loads none.",
+                options: [PadOption(id: "", label: "Default",
+                                    detail: compat?.khronosVulkanLoader.map { "\(khronosName($0)), for this game" }
+                                        ?? khronosName(every.khronosVulkanLoader ?? false)),
+                          PadOption(id: "khronos", label: "Khronos"), PadOption(id: "wine", label: "Wine's")],
+                selected: settings.wrappedValue.khronosVulkanLoader.map { $0 ? "khronos" : "wine" } ?? "") {
+                settings.wrappedValue.khronosVulkanLoader = $0.isEmpty ? nil : $0 == "khronos"
+            }
+        }
+        let compatKeys = LaunchSettings.keyItems(compat?.runtime ?? "", over: LaunchSettings.everyGame.runtime)
+            .trimmingCharacters(in: .whitespaces)
         let compatOptions = compat?.graphicsOptions.trimmingCharacters(in: .whitespaces) ?? ""
         let forThisGame: (String) -> String? = { $0.isEmpty ? nil : "\(OptionValue.compatMarker) For this game: \($0); your own key of the same name wins" }
         let keys = settings.wrappedValue.runtime.trimmingCharacters(in: .whitespaces)
@@ -1130,11 +1385,11 @@ private struct GameDetailPage: View {
                                      placeholder: "For example vram-mb=1024 inproc-sync=1",
                                      maxLength: 200) { settings.wrappedValue.runtime = $0 }
         }
-        // The Vulkan layers' options (decision 0060): an allowlisted set of variables, Vulkan launches only.
+        // The game's environment variables and Vulkan layers' options (decisions 0060, 0137).
         let options = settings.wrappedValue.graphicsOptions.trimmingCharacters(in: .whitespaces)
         PadRow(id: "opt:graphicsOptions", title: "Graphics options",
                subtitle: options.isEmpty || LaunchSettings.graphicsEnvironment(options) != nil ? forThisGame(compatOptions)
-                   : "Not DXVK options or \(LaunchSettings.graphicsVariables.joined(separator: ", ")) items: not used",
+                   : "Not NAME=value or DXVK option items: not used",
                subtitleLines: 2,
                value: options.isEmpty ? "None" : options, accessory: .chevron, changed: !options.isEmpty, style: .plain,
                reset: options.isEmpty ? nil : { settings.wrappedValue.graphicsOptions = "" }) {
@@ -1143,19 +1398,25 @@ private struct GameDetailPage: View {
                                      maxLength: 300) { settings.wrappedValue.graphicsOptions = $0 }
         }
         if let app = t.appID {
-            let mode = settings.wrappedValue.steamAPI ?? .emulated
-            PadRow(id: "opt:steamAPI", title: "Steam API", value: Self.steamAPIModeText(mode), accessory: .chevron,
-                   changed: settings.wrappedValue.steamAPI != nil, style: .plain,
-                   reset: settings.wrappedValue.steamAPI == nil ? nil : { settings.wrappedValue.steamAPI = nil }) {
+            // Playport's Steam client (decision 0115) may be the game's compatibility default.
+            let steamAPI = OptionValue.of(own: settings.wrappedValue.steamAPI, compat: compat?.steamAPI, inherited: every.steamAPI ?? .emulated,
+                                          name: Self.steamAPIModeText)
+            PadRow(id: "opt:steamAPI", title: "Steam API", value: steamAPI.text, accessory: .chevron,
+                   changed: steamAPI.changed, style: .plain,
+                   reset: steamAPI.changed ? { settings.wrappedValue.steamAPI = nil } : nil) {
                 PadModal.shared.picker(
                     title: "Steam API", context: "\(context) · Steam",
-                    note: "The game's own Steam API needs Steam running, which Playport does not run: games that check for "
-                        + "Steam will not start. Changes apply from the game's next launch.",
-                    options: [PadOption(id: SteamAPISwap.Mode.emulated.rawValue, label: Self.steamAPIModeText(.emulated), detail: "Default"),
+                    note: "The game's own Steam API needs Steam running: with Playport's Steam client it finds one that "
+                        + "answers for this game only; alone, games that check for Steam will not start. "
+                        + "Changes apply from the game's next launch.",
+                    options: [PadOption(id: "", label: "Default",
+                                        detail: compat?.steamAPI.map { "\(Self.steamAPIModeText($0)), for this game" }
+                                            ?? Self.steamAPIModeText(every.steamAPI ?? .emulated)),
+                              PadOption(id: SteamAPISwap.Mode.emulated.rawValue, label: Self.steamAPIModeText(.emulated)),
+                              PadOption(id: SteamAPISwap.Mode.client.rawValue, label: Self.steamAPIModeText(.client)),
                               PadOption(id: SteamAPISwap.Mode.original.rawValue, label: Self.steamAPIModeText(.original))],
-                    selected: mode.rawValue) {
-                    let m = SteamAPISwap.Mode(rawValue: $0) ?? .emulated
-                    settings.wrappedValue.steamAPI = m == .emulated ? nil : m
+                    selected: settings.wrappedValue.steamAPI?.rawValue ?? "") {
+                    settings.wrappedValue.steamAPI = SteamAPISwap.Mode(rawValue: $0)
                 }
             }
             developerFacts(t, app)
@@ -1214,14 +1475,15 @@ private struct GameDetailPage: View {
     private static func steamAPIModeText(_ m: SteamAPISwap.Mode) -> String {
         switch m {
         case .emulated: "Playport's emulator"
+        case .client: "Playport's Steam client"
         case .original: "The game's own"
         }
     }
 
     private static func steamStubText(_ site: SteamStub.Site, mode: SteamAPISwap.Mode) -> String {
         if site.info.unsupported != nil { return "\(site.info.label), can't be removed yet" }
-        if site.removed { return mode == .emulated ? "Removed (\(site.info.label))" : "Removed; back at next launch" }
-        return mode == .emulated ? "\(site.info.label), removed at next launch" : site.info.label
+        if site.removed { return mode.removesSteamStub ? "Removed (\(site.info.label))" : "Removed; back at next launch" }
+        return mode.removesSteamStub ? "\(site.info.label), removed at next launch" : site.info.label
     }
 
     private static func steamAPIText(_ s: SteamAPISwap.State) -> String {
@@ -1305,6 +1567,60 @@ private struct GameDetailPage: View {
         .frame(minHeight: 44)
         .background(selected ? PP.text : .clear, in: RoundedRectangle(cornerRadius: 10))
         .padItem(id, hint: "", cornerRadius: 10, ring: false) {}
+    }
+}
+
+/// The page's buttons, each at its full width and in order, starting a new row where the next
+/// would not fit, so no label is cut to a letter on a phone in landscape.
+private struct PageButtonRows: Layout {
+    var spacing: CGFloat = 12
+    var rowSpacing: CGFloat = 10
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let rows = rows(subviews, width: proposal.width ?? .infinity)
+        let width = rows.map(\.width).max() ?? 0
+        let height = rows.map(\.height).reduce(0, +) + rowSpacing * CGFloat(max(rows.count - 1, 0))
+        return CGSize(width: width, height: height)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        var y = bounds.minY
+        for row in rows(subviews, width: bounds.width) {
+            var x = bounds.minX
+            for (i, size) in zip(row.indices, row.sizes) {
+                subviews[i].place(at: CGPoint(x: x, y: y + row.height / 2), anchor: .leading,
+                                  proposal: ProposedViewSize(size))
+                x += size.width + spacing
+            }
+            y += row.height + rowSpacing
+        }
+    }
+
+    private struct Row {
+        var indices: [Int] = []
+        var sizes: [CGSize] = []
+        var width: CGFloat = 0
+        var height: CGFloat = 0
+    }
+
+    /// Each button at its ideal size (narrowed only when it alone is wider than the rows).
+    private func rows(_ subviews: Subviews, width: CGFloat) -> [Row] {
+        var rows: [Row] = []
+        var row = Row()
+        for i in subviews.indices {
+            var size = subviews[i].sizeThatFits(.unspecified)
+            if size.width > width { size = subviews[i].sizeThatFits(ProposedViewSize(width: width, height: nil)) }
+            if !row.indices.isEmpty, row.width + spacing + size.width > width {
+                rows.append(row)
+                row = Row()
+            }
+            row.width += (row.indices.isEmpty ? 0 : spacing) + size.width
+            row.height = max(row.height, size.height)
+            row.indices.append(i)
+            row.sizes.append(size)
+        }
+        if !row.indices.isEmpty { rows.append(row) }
+        return rows
     }
 }
 
@@ -1468,6 +1784,11 @@ enum JitNote {
     /// Why a game ended on running out of its JIT pool (LaunchMessage). Every Play
     /// gets the same pool (JitPool.sizeMB, decision 0036); only a dev build's simulated
     /// one is smaller. One that went on running was ended by the restart (decision 0030).
+    /// Why a game ended on FEX's host band filling (LaunchMessage, decision 0120): its size is
+    /// fixed, so there is nothing to set; what fills it is the game's threads, with its launcher's.
+    static let outOfEmulatorMemory = "The x86 emulator keeps a fixed amount of memory for every thread "
+        + "the game and its launcher run, and their threads filled it. This game runs more threads than Playport can hold."
+
     static func outOfMemory(_ part: JitPool.Exhaustion, poolMB: Int) -> String {
         let what = switch part {
         case .head: "the game's program files"

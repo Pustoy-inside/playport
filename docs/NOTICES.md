@@ -8,15 +8,18 @@ what an IPA owes before it is distributed.
 
 ## Wine fallback fonts
 
-`Runtime/fonts/{tahoma,tahomabd}.ttf` are unchanged, tracked Wine-pin prebuilts
+`Runtime/fonts/{tahoma,tahomabd,marlett}.ttf` are unchanged, tracked Wine-pin prebuilts
 from `fonts/` (artifact provenance `fonts`), not host FontForge outputs.
 `wine-NOTICES.md` includes the Bitstream Vera font licence; the notices stage
 also preserves SFD header lines 1–6 for each face as
 `wine-fonts-*-attribution.txt`, with committed-source derived origins.
 The Wine component's `wine-*` app selection includes these attributions.
-Each face is LGPL-2.1-or-later (its SFD name table) and derived from Bitstream
-Vera Sans. The owner reviewed and accepted them on 2026-10-05: the answer is in
-`build/app-notices.json`'s review.
+Each face is LGPL-2.1-or-later (its SFD name table); the Tahoma faces are derived
+from Bitstream Vera Sans. The owner reviewed and accepted the Tahoma faces on
+2026-10-05: the answer is in `build/app-notices.json`'s review. Marlett (Wine's
+own symbol face, copyright TransGaming Technologies, no third-party font licence)
+was added on 2026-11-01 under the Wine component's LGPL-2.1-or-later and is not
+in that answer.
 
 ## Collecting the files
 
@@ -39,7 +42,7 @@ The script copies each licence and notice file byte for byte from the pinned
 trees of a finished `pp build` run into `OUT`, and writes
 `SHA256SUMS`. The tree roots default to that run's layout under
 `$PLAYPORT_BUILD/run` and can be overridden with `WINE`, `FEX`, `MYTHIC`
-(the Madeira checkout), `DXMT`, `LLVM`, `FREETYPE`, `MESA`, `DXVK`, `VKD3D`, `GBE` and `ABSL`; `STIKJIT` and
+(the Madeira checkout), `DXMT`, `LLVM`, `FREETYPE`, `MESA`, `DXVK`, `VKD3D`, `VULKAN_LOADER`, `VULKAN_HEADERS`, `GBE` and `ABSL`; `STIKJIT` and
 `IDEVICE` default to the checkouts `build/stages/stikjit.sh` keeps in
 `$PLAYPORT_BUILD/cache`, and `IDEVICE_RUN` to the run's `idevice` stage output.
 `build/notices-provenance.py` reconstructs each expected Git tree from its pin
@@ -334,7 +337,8 @@ This does **not** audit individual compiled headers, actual linked members,
 libc++/compiler-rt notices or CRT rebuild provenance. The runtime text's upstream
 **Cephes FIXME** is answered by Moshier's own grants, which FEX's
 `cephes-LICENSE.txt` quotes; the app carries that file for mingw-w64 as well, and
-the reading awaits review ([audit](release-audits/mingw-cephes.md)). The separate
+the owner accepted that reading ([audit](release-audits/mingw-cephes.md),
+[decision 0039](decisions/0039-owners-licensing-review.md)). The separate
 DirectX copies remain tied to their DXMT/DXVK submodule versions.
 
 ### Separate LLVM runtime preparation
@@ -347,11 +351,13 @@ scanned **17,768 files** and preserved **14,321 whole-file texts, 81,916,394 byt
 Recursive notice/credit and marker-selected files include code, tests, tools,
 documentation and other platforms as an explicitly incomplete superset.
 
-This output is **not part of `pp notices`**. Do not merge its flat files blindly:
-its complete-set `verify` contract, scope text and checksum list must survive
-an explicit future assembly integration. Exhaustive attribution, installed
-headers/generated inputs, actual applicability, libunwind's missing legacy
-contributor reference and binary/IPA derivation remain open. See
+`build/notices-assemble.sh` collects this output into `pp notices`' separately
+verified `llvm-runtime/` directory; its complete-set `verify` contract, scope
+text and checksum list are kept there rather than merged into the flat files.
+`build/app-notices.json` selects from it, and `build/notices-provenance.py`
+requires it. Exhaustive attribution, installed headers/generated inputs, actual
+applicability, libunwind's missing legacy contributor reference and binary/IPA
+derivation remain open. See
 [the collection audit](release-audits/llvm-runtime-collection.md).
 
 ### Khronos header notices in the PE backend
@@ -431,6 +437,7 @@ See [the Mesa audit](release-audits/mesa.md) for scope and source-level evidence
 | `mesa-header-superset-<flattened-source-path>.txt` | full committed Vulkan/video, OpenGL (`include/GL`), EGL (`include/EGL`) and `include/KHR` headers and top-level SPIR-V headers in Mesa | scoped copyright/permission/normative-warning superset, including code and other platforms; not compiled-header applicability |
 | `DXVK-LICENSE.txt`, `DXVK-libdisplay-info-LICENSE.txt`, `DXVK-dxbc-spirv-LICENSE.txt`, `DXVK-mingw-directx-headers-COPYING.MinGW-w64.txt` | DXVK and its `subprojects/`, `include/native/directx` | the DXVK DLLs in `Runtime/vulkan/` (zlib/libpng; libdisplay-info and dxbc-spirv MIT) |
 | `khronos-<dxvk\|vkd3d>-<flattened-source-path>` (21 texts at the current pins) | seven Vulkan/SPIR-V header checkouts, including nested dxbc-spirv/dxil-spirv copies | root attributions and recursive notice/`LICENSES/` superset for the PE backend; not Mesa's vendored headers or an applicability audit |
+| `Vulkan-Loader-LICENSE.txt`, `Vulkan-Loader-LICENSES-<name>` for every file in its `LICENSES/`, `Vulkan-Loader-cJSON-header.txt`, `Vulkan-Headers-LICENSE.md`, `Vulkan-Headers-LICENSES-<name>` | the Khronos Vulkan-Loader and the Vulkan-Headers it is compiled against (the cJSON header is the first 21 lines of `loader/cJSON.c`; its directory has no licence file) | `vulkan-1.dll` in `Runtime/vulkan-loader/` (Apache-2.0; cJSON MIT; headers Apache-2.0 OR MIT) |
 | `vkd3d-proton-COPYING.txt`, `vkd3d-proton-LICENSE.txt`, `vkd3d-proton-AUTHORS.txt` | vkd3d-proton (LGPL-2.1-or-later) | `d3d12.dll`, `d3d12core.dll` in `Runtime/vulkan/` |
 | `dxil-spirv-LICENSE.MIT.txt`, `dxil-spirv-dxbc-spirv-LICENSE.txt`, `dxil-spirv-bc-decoder-header.txt`, `dxil-spirv-glslang-spirv-header.txt` | vkd3d-proton `subprojects/dxil-spirv` (the two headers are the first lines of a source file; those directories have no licence file) | the shader converter inside `d3d12core.dll` |
 | `gbe_fork-LICENSE.txt` | gbe_fork (LGPL-3.0) | `steam_api64.dll`, `steam_api.dll` in `Runtime/steamapi/` |
@@ -515,13 +522,10 @@ credit lines, and while the selection is unreviewed its status and open
 questions. A missing or inconsistent `components.json` (a listed file absent, an
 unsafe name, another schema) shows as missing notices, never a placeholder list.
 A dev build's driver opens it with `open:licences` (`open:licences#wine` for a
-component). No build has run the stage or compiled the page yet.
+component).
 
 ## Gaps
 
-- **No IPA carries notices yet.** The `notices` stage and the licences page
-  exist ([The app's selection](#the-apps-selection)), but no build has run them.
-  The selection is `release-reviewed` ([decision 0039](decisions/0039-owners-licensing-review.md)). The first build changes the IPA and its checksum.
 - mingw-w64's runtime and recursive source notices are now collected and
   installed notice bytes checked (the Cephes reading is accepted:
   [audit](release-audits/mingw-cephes.md), decision 0039), but actual
@@ -529,7 +533,7 @@ component). No build has run the stage or compiled the page yet.
   The exact-source LLVM runtime/header-credit superset is now collected in a
   separately verified `llvm-runtime/` directory, but exhaustive attribution,
   applicability and binary derivation remain open
-  ([LICENSING.md, "Open items"](LICENSING.md#open-items)).
+  ([LICENSING.md, "Licence readings"](LICENSING.md#licence-readings); [PLA-725](https://linear.app/playportdev/issue/PLA-725)).
 - Mesa's licence texts are collected whole; which of them the files compiled
   into KosmicKrisp and the Zink frameworks carry has not been read file by file. DXVK/vkd3d-proton's
   seven Khronos header checkouts now supply root notices and licence-text

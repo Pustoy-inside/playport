@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Settings › Developer, dev builds only (decision 0009): the diagnostics a
+// Settings › Developer, dev builds only (decision 0009): the Metal HUD
+// (MetalHUD.swift), the diagnostics a
 // game's next launch runs with (Diagnostics.swift), the memory simulations
 // (MemoryLimit), the on-device pairing experiment (iOS 27), the probes
 // (HelperLifetimeProbe.swift), the black screen (BlackScreen.swift), the logs
@@ -12,14 +13,16 @@ import SwiftUI
 import WineHost
 
 struct DeveloperSettings: View {
+    @AppStorage(MetalHUD.key) private var metalHUD = true
     @AppStorage(GPUCapture.key) private var frame = 0
     @AppStorage(Diagnostics.passProfileKey) private var passProfile = false
     @AppStorage(Diagnostics.cpuProfileKey) private var cpuProfile = false
     @AppStorage(MetalValidation.key) private var validation = MetalValidation.Level.off.rawValue
     @AppStorage(RuntimeCounters.key) private var countersOff = false
-    @AppStorage(Fastsync.offKey) private var fastsyncOff = false
+    @AppStorage(InprocSync.offKey) private var inprocSyncOff = false
     @AppStorage(MemoryLimit.simulatedKey) private var simulated = 0
     @AppStorage(MemoryLimit.simulatedPoolKey) private var simulatedPool = 0
+    @ObservedObject private var sharedMemory = SharedMemoryProbe.shared
     @ObservedObject private var probe = HelperLifetimeProbe.shared
     @ObservedObject private var authProbe = NativeAuthProbe.shared
     @ObservedObject private var restart = AppRestart.shared
@@ -40,6 +43,9 @@ struct DeveloperSettings: View {
 
     @ViewBuilder private var diagnostics: some View {
         PadSectionHeader(text: "Diagnostics").id("diagnostics")
+        SettingsSwitchRow(id: "dev:metalHUD", title: "Metal HUD",
+                          subtitle: "Apple's HUD over a game, its figures in the log; from Playport's next start",
+                          on: $metalHUD)
         choice("dev:gpuCapture", "GPU capture", subtitle: "A frame as a Metal .gputrace in the game's folder",
                value: frame == 0 ? "Off" : "Frame \(frame)",
                options: [PadOption(id: "0", label: "Off")] + GPUCapture.frames.map { PadOption(id: "\($0)", label: "Frame \($0)") },
@@ -55,8 +61,8 @@ struct DeveloperSettings: View {
                note: "From Playport's next start; it costs CPU and GPU time.") { validation = $0 }
         SettingsSwitchRow(id: "dev:counters", title: "Runtime counters", subtitle: "Off from Playport's next start, as a release build",
                           on: Binding(get: { !countersOff }, set: { countersOff = !$0 }))
-        SettingsSwitchRow(id: "dev:fastsync", title: "Fastsync", subtitle: "In-process event and semaphore waits; off from Playport's next start",
-                          on: Binding(get: { !fastsyncOff }, set: { fastsyncOff = !$0 }))
+        SettingsSwitchRow(id: "dev:inprocsync", title: "In-process sync", subtitle: "NT waits without the wineserver (ppsync); off from Playport's next start",
+                          on: Binding(get: { !inprocSyncOff }, set: { inprocSyncOff = !$0 }))
     }
 
     // MARK: memory
@@ -75,6 +81,7 @@ struct DeveloperSettings: View {
                value: simulatedPool > 0 ? MemoryNeed.format(mb: simulatedPool) : "Off",
                options: [PadOption(id: "0", label: "Off")] + pools.map { PadOption(id: "\($0)", label: MemoryNeed.format(mb: $0)) },
                selected: "\(simulatedPool)", note: nil) { simulatedPool = Int($0) ?? 0 }
+        // The donor pool and the end of a game's own Social Club are Settings › Graphics' rows (decision 0153).
     }
 
     private static func choices(_ base: [Int], with current: Int) -> [Int] {
@@ -101,6 +108,35 @@ struct DeveloperSettings: View {
 
     @ViewBuilder private var probes: some View {
         PadSectionHeader(text: "Probes").id("probes")
+        ForEach([64, 2048, 4096], id: \.self) { mb in
+            PadRow(id: "set:dev:memoryBroker:\(mb)", title: "Shared RAM: \(mb) MiB", subtitle: sharedMemory.status, hint: "Measure") {
+                if !sharedMemory.busy { Task { _ = await sharedMemory.run(mb: mb) } }
+            }
+        }
+        ForEach([false, true], id: \.self) { purgeable in
+            ForEach([2048, 4096], id: \.self) { mb in
+                let kind = purgeable ? "purgeable" : "tagged"
+                PadRow(id: "set:dev:memoryDonor:\(kind):\(mb)", title: "Donor RAM (\(kind)): \(mb) MiB",
+                       subtitle: "Helper allocates, then ends; the app keeps it 60 s", hint: "Measure") {
+                    if !sharedMemory.busy { Task { _ = await sharedMemory.runDonor(mb: mb, purgeable: purgeable) } }
+                }
+            }
+        }
+        ForEach(SharedMemoryProbe.donorTotals, id: \.self) { mb in
+            PadRow(id: "set:dev:memoryDonors:\(mb)", title: "Donor RAM pool: \(mb) MiB",
+                   subtitle: "Fresh helpers give purgeable RAM, then end; the app keeps the pool", hint: "Measure") {
+                if !sharedMemory.busy { Task { _ = await sharedMemory.runDonors(mb: mb) } }
+            }
+        }
+        PadRow(id: "set:dev:memoryPoolZero", title: "Donor pool: zeroing", subtitle: sharedMemory.status, hint: "Measure") {
+            if !sharedMemory.busy { Task { _ = await sharedMemory.runPoolZero() } }
+        }
+        PadRow(id: "set:dev:memoryPoolGPU", title: "Donor pool: Metal buffers", subtitle: sharedMemory.status, hint: "Measure") {
+            if !sharedMemory.busy { Task { _ = await sharedMemory.runPoolGPU() } }
+        }
+        PadRow(id: "set:dev:memoryPoolVerify", title: "Verify the donor pool", subtitle: sharedMemory.status, hint: "Verify") {
+            if !sharedMemory.busy { Task { _ = await sharedMemory.verifyPool() } }
+        }
         PadRow(id: "set:dev:nativeAuth", title: "Native authentication", subtitle: authProbe.status,
                hint: "Run") {
             if !authProbe.busy { Task { _ = await authProbe.run() } }

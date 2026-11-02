@@ -7,10 +7,17 @@ import re
 import subprocess
 
 # The app's Swift packages with host tests.
-SWIFT_PACKAGES = ["app/HostIOKit", "app/ContentKit", "app/GOGClient", "app/EpicClient", "app/SteamClient", "app/PlayportKit"]
+SWIFT_PACKAGES = ["app/HostIOKit", "app/ContentKit", "app/GOGClient", "app/EpicClient", "app/SteamClient", "app/BattleNetClient",
+                  "app/PlayportKit"]
+
+
+def _anycase(words):
+    """WORDS (letters, `_`, `?`, `|` and groups) matching in any case: ERE has no `(?i)`."""
+    return re.sub(r"[A-Za-z]", lambda m: f"[{m[0].upper()}{m[0].lower()}]", words)
+
 
 # What must never be committed (AGENTS.md, Secrets): (what, pattern). Each
-# pattern is both a `git grep -E` and a Python regular expression.
+# pattern is both a `git grep -E` and a Python regular expression: no `(?i)` or `\s`.
 SECRETS = [
     ("JWT-shaped token (Steam)", r"ey[AJ][A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"),
     ("SteamID64", r"\b7656119[0-9]{10}\b"),
@@ -31,6 +38,18 @@ SECRETS = [
     # token. Appended for the same reason.
     ("Epic exchange code argument", r"AUTH_PASSWORD=[0-9A-Fa-f]{32}"),
     ("Epic ownership token", r"egoc1~[A-Za-z0-9_-]{20,}"),
+    # A Battle.net or World of Warcraft session (PLA-514), as the Redactor (Redaction.swift)
+    # scrubs it, in any case as its `(?i)` rules: the web login's ticket (`US-<32 hex>-<digits>`),
+    # the client's session values in a log line, the launcher's game account, the account name
+    # and list WoW's Config.wtf, a login URL or a JSON answer keeps, and a single sign-on URL's
+    # token. The Redactor's own `<redacted>` is no hit. Appended for the same reason.
+    ("Battle.net login ticket", r"\b(US|EU|KR|TW|CN)-[0-9A-Fa-f]{32}-[0-9]{5,}\b"),
+    ("WoW session value", _anycase("(web_token|login_?ticket|session_?key|realm_?(join|list)_?ticket|reconnect_?token|auth_?token)")
+                          + r"""["']? *[:=] *["']?[A-Za-z0-9+/_-]{16,}"""),
+    ("WoW account name", _anycase("set account_?(name|list)") + r""" "[^"<][^"]*"|[?&]""" + _anycase("account_?(name|list)")
+                         + r"""=[A-Za-z0-9%@._+!|-]+|["']""" + _anycase("account_?(name|list)") + r"""["'] *: *["'][^"'<\\ ][^"']*["']"""),
+    ("Battle.net game account", _anycase("game_account") + r"""["']? *[:=] *["']?[^<"' ]+"""),
+    ("Battle.net single sign-on token", _anycase("/login/sso") + r"""\?([^ "'#<]*&)?""" + _anycase("token") + r"""=[^ "'&<]+"""),
 ]
 # Made-up or public values the tests use; a line holding one is not a hit.
 SECRET_FIXTURES = ("XTL-TEAMIDXXXX.", "XTL-A1B2C3D4E5.", "eyJhbGciOiJFZERTQSJ9.", "76561197960287930",
@@ -41,6 +60,25 @@ SECRET_FILES = r"\.(p12|pfx|mobileprovision|cer|keystore|jks)$|(loginusers|confi
 EVIDENCE_MEDIA = r"^docs/evidence/.*\.(png|jpe?g|gif|webp|heic|bmp|tiff?|mov|mp4|m4v)$"
 PAIRING_RECORDS = "/var/lib/lockdown"   # netmuxd's (tools/systemd): <UDID>.plist per paired phone
 _SECRET_RES = [(what, re.compile(p)) for what, p in SECRETS]
+
+
+# Split literals keep the gate's own definitions out of its matches.
+NAME_PATTERNS = ("game" "native", r"\b" "gn[_-]")
+_UPSTREAM_GN_TOKENS = re.compile(r"(?<![\w-])(?:" + "gn" + r"_args|" + "gn" + r"_helpers)(?![\w-])")
+
+
+def name_scan_text(path, text):
+    """Only the two upstream GN tokens are exempt, only in CEF/Chromium patches.
+
+    Those series were removed with Playport's CEF build (PLA-603); the exemption stays so that
+    `pp names COMMIT` and `pp source --rev`/`--build` still pass on commits from before it.
+    The retired project name and every other retired-prefix word still fail.
+    Callers pass a repository-relative path, never an archive or commit prefix.
+    """
+    if (path.startswith(("patches/cef/", "patches/chromium/"))
+            and all(part not in ("", ".", "..") for part in path.split("/"))):
+        return _UPSTREAM_GN_TOKENS.sub("", text)
+    return text
 
 
 def secret_hits(text):

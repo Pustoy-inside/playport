@@ -30,6 +30,8 @@ NET_IMAGE_PATCH = REPO / "patches/madeira-unix/0112-ntdll-map-an-i386-.NET-image
 PROTECT_PATCH = REPO / "patches/madeira-unix/0060-ntdll-protect-owned-WoW64-window-pages-per-Wine-page.patch"
 LOADER_PATCH = REPO / "patches/madeira-unix/0061-ntdll-start-the-WoW64-child-s-native-loader.patch"
 THREADS_PATCH = REPO / "patches/madeira-unix/0073-ntdll-keep-a-WoW64-window-until-its-threads-and-faul.patch"
+SLOTS_HEADER = "build/ntdll-unix/wow64_slots.h"
+SLOTS_PATCH = REPO / "patches/madeira-unix/0146-ntdll-reserve-a-WoW64-window-in-a-fixed-slot-first.patch"
 DC_ATTR_PATCH = REPO / "patches/madeira-unix/0065-ntdll-share-win32u-s-DC_ATTR-arena-with-every-WoW64-.patch"
 SIMD_LANE_PATCH = REPO / "patches/madeira-unix/0070-signal-emulate-LD1-and-ST1-lanes-in-the-low-fault-em.patch"
 GDI32_DC_ATTR_PATCH = REPO / "patches/wine-pe/0019-gdi32-reach-a-native-DC_ATTR-through-the-WoW64-windo.patch"
@@ -49,6 +51,7 @@ AUDIO_PATCH = REPO / "patches/madeira-unix/0074-audio-give-an-i386-child-the-iOS
 AUDIO_SOURCE = "build/ntdll-unix/audio_null_ios.c"
 RESOLVER_PATCH = REPO / "patches/wine-unix/0013-ws2_32-convert-an-i386-child-s-resolver-pointers-thr.patch"
 RESOLVER_SOURCES = ("dlls/ws2_32/unixlib.c", "dlls/ntdll/unix/socket.c")
+COPY_EXTENT_PATCH = REPO / "patches/madeira-unix/0165-virtual-leave-a-builtin-s-.rsrc-and-.reloc-out-of-it.patch"
 
 
 def pin(name):
@@ -100,6 +103,21 @@ def c_function(text, name):
     return text[start:end] + "\n"
 
 
+def run_copy_extent_tests(scratch):
+    """0165's JIT-pool copy extent over builtins' section tables (PLA-377)."""
+    with tempfile.TemporaryDirectory(prefix="copy-extent-", dir=scratch) as tmp:
+        root = Path(tmp)
+        subprocess.run(["git", "init", "-q", tmp], check=True)
+        subprocess.run(["git", "-C", tmp, "apply", "--include=build/ntdll-unix/ios_copy_extent.h",
+                        str(COPY_EXTENT_PATCH)], check=True)
+        exe = root / "copy-extent-test"
+        subprocess.run(["clang", "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror",
+                        "-fsanitize=undefined", "-fno-sanitize-recover=all",
+                        "-I", str(root / "build/ntdll-unix"),
+                        str(REPO / "build/wow64/copy_extent_test.c"), "-o", str(exe)], check=True)
+        subprocess.run([str(exe)], check=True)
+
+
 def run_audio_tests(scratch):
     """0074's WoW64 audio table over the driver's own stream code."""
     with tempfile.TemporaryDirectory(prefix="audio-", dir=scratch) as tmp:
@@ -120,15 +138,16 @@ def run_audio_tests(scratch):
         (root / "native_types.h").write_text(
             (types + "\n" + stream + "\n" + midi).replace(
                 "#define AUDCLNT_E_NOT_INITIALIZED ((HRESULT)0x88890001L)\n", "", 1))
-        (root / "native_functions.h").write_text("".join(c_function(s, n) for n in (
-            "stream_from_handle", "stream_register", "stream_unregister", "ios_create_stream",
+        # decision 0172: the producer gate and the underrun hysteresis, with their constants
+        producer = s[s.index("#define IOS_PRODUCER_STEADY_CALLS"):s.index("/* Count this GetBuffer")]
+        refill = s[s.index("#define IOS_REFILL_SHORTS"):s.index("static void ios_mix_stream(")]
+        (root / "native_functions.h").write_text(producer + refill + "".join(c_function(s, n) for n in (
+            "stream_from_handle", "stream_register", "stream_unregister", "ios_producer_note",
+            "ios_log_getbuf_caller", "ios_mix_stream", "ios_create_stream",
             "ios_release_stream", "ios_get_render_buffer", "ios_release_render_buffer")))
         (root / "native_other_functions.h").write_text(
             'static const char IOS_DEVICE_NAME[] = "ios-null";\n'
             "static uint64_t elapsed_frames(const struct ios_stream *s) { (void)s; return 0; }\n"
-            "static uint64_t mach_absolute_time(void) { return 0; }\n"
-            "static uint64_t mach_to_ns(uint64_t t) { return t; }\n"
-            "static unsigned long long ios_current_tid(void) { return 0; }\n"
             "static NTSTATUS ios_process_attach(void *p) { (void)p; return 0; }\n"
             "static NTSTATUS ios_start(void *p) { ((struct stream_handle_params *)p)->result = S_OK; return 0; }\n"
             "static NTSTATUS ios_stop(void *p) { ((struct stream_handle_params *)p)->result = S_OK; return 0; }\n"
@@ -469,6 +488,15 @@ def main():
                         "-I", str((root / HEADER).parent),
                         str(REPO / "build/wow64/window_test.c"), "-o", str(exe)], check=True)
         subprocess.run([str(exe)], check=True)
+        # The window's fixed slots (PLA-349).
+        subprocess.run(["git", "-C", tmp, "apply", f"--include={SLOTS_HEADER}",
+                        str(SLOTS_PATCH)], check=True)
+        slots_exe = root / "slots-test"
+        subprocess.run(["clang", "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror",
+                        "-fsanitize=undefined", "-fno-sanitize-recover=all",
+                        "-I", str((root / HEADER).parent),
+                        str(REPO / "build/wow64/slots_test.c"), "-o", str(slots_exe)], check=True)
+        subprocess.run([str(slots_exe)], check=True)
         subprocess.run(["git", "-C", tmp, "apply", f"--include={OWNER_HEADER}",
                         str(OWNER_PATCH)], check=True)
         (root / "owner_api.h").write_text(
@@ -552,6 +580,8 @@ def main():
                         str(PROTECT_PATCH)], check=True)
         subprocess.run(["git", "-C", tmp, "apply", "--include=build/ntdll-unix/wow64_vm.h",
                         str(REPO / "patches/madeira-unix/0107-ntdll-preserve-live-neighbours-of-a-WoW64-decommit.patch")], check=True)
+        subprocess.run(["git", "-C", tmp, "apply", "--include=build/ntdll-unix/wow64_vm.h",
+                        str(REPO / "patches/madeira-unix/0287-ntdll-a-WoW64-commit-reports-the-Wine-pages-it-commi.patch")], check=True)
         (root / "vm_api.h").write_text(
             evolved_function(VM_PATCH, [GAP_PATCH, PROTECT_PATCH], "static BOOL ios_wow64_route_vm( unsigned int operation, HANDLE process, void **addr,") +
             patched_function(LOADER_PATCH, "NTSTATUS ios_wow64_alloc_stack32( void *owner, SIZE_T reserve_size, SIZE_T commit_size,"))
@@ -670,6 +700,7 @@ def main():
         subprocess.run([str(opengl_exe)], check=True)
         check_opengl_thunks(OPENGL_PATCH)
     run_audio_tests(scratch)
+    run_copy_extent_tests(scratch)
     run_resolver_tests(scratch)
     run_packed_createstruct_tests(scratch)
     run_menu_item_tests(scratch)

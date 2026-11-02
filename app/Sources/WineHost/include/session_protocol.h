@@ -11,7 +11,8 @@
  *             reads it, deletes it and answers under the same sequence
  *   reply     root -> host: the last pp_session_reply, replaced whole
  *   control   host -> root, while the title runs: a pp_session_control from
- *             the in-game menu (pause, resume, close); the root reads it,
+ *             the in-game menu (pause, resume, close), or the launch's own
+ *             (end the launcher once the game signed in); the root reads it,
  *             deletes it and answers in control-reply under its sequence
  *
  * Shared by the host (C, libc) and the root (freestanding x86-64 PE): no
@@ -46,6 +47,38 @@ enum {
      * quoted path, used as it is: a store's own command-line string, as its client
      * passes it to CreateProcess (GOG's nested quotes, decision 0090). */
     PP_REQUEST_PREREQUISITE_LINE = 6,
+    /* The Windows services of a play that needs them (decision 0107): the root starts
+     * services.exe, Wine's SCM, outside the title's job, and answers STARTED (its process
+     * id) once the SCM listens, or REFUSED; no payload. The services it starts are stopped
+     * before the title's end is reported. */
+    PP_REQUEST_SERVICES = 7,
+    /* A play served by Playport's steamclient64.dll (decision 0115): the root writes
+     * HKCU\Software\Valve\Steam\ActiveProcess's pid (its own process id) and ActiveUser
+     * (the payload: one argument, the account ID in decimal), and answers STARTED (its
+     * process id) or REFUSED. It sets both to 0 at the title's end, and at its own start
+     * when a crash left them. */
+    PP_REQUEST_STEAM_CLIENT = 8,
+    /* A control, while the title runs: the game has signed in, or the app's footprint is
+     * near its limit (decision 0130, amending 0125), so the root ends the Rockstar Games Launcher's tree in the
+     * title's job in one step, never the game or a process under it (launcher_end.h):
+     * Launcher.exe, RockstarErrorHandler.exe and the launcher's SocialClubHelper.exe
+     * processes. Then it counts every start of those images, ends the first restarts it
+     * finds running once more, and reports the rest. It carries no names or arg; code is
+     * the processes it ended. */
+    PP_CONTROL_END_LAUNCHER = 9,
+    /* A control, a dev build's only, after the game's sign-in (decision 0133, amending 0130):
+     * the root ends the game's own Social Club helpers in the title's job, every
+     * SocialClubHelper.exe whose parent chain reaches RDR2.exe (launcher_end.h), never
+     * RDR2.exe or anything else, once; every later start of them is ended once more
+     * (decision 0135). It carries
+     * no names or arg; code is the processes it ended. */
+    PP_CONTROL_END_GAME_SOCIAL_CLUB = 10,
+    /* A control, after that end, once the game has signed in again (decision 0155): the
+     * root stops ending the restarts of the game's own Social Club helpers, and a later
+     * END_GAME_SOCIAL_CLUB ends them again (launcher_end.h pp_game_sc_control), at most
+     * PP_GAME_SC_MAX_ALLOWS times a title. It carries no names or arg; code is 1 when the
+     * root stopped, 0 when there was nothing to stop or no allow was left. */
+    PP_CONTROL_ALLOW_GAME_SOCIAL_CLUB = 11,
 };
 
 /* The most a CLOSE waits before it ends the title. */
@@ -83,7 +116,9 @@ static inline int pp_session_control_valid(const pp_session_control *c, uint32_t
 {
     if (!c || size != sizeof(*c) || c->magic != PP_SESSION_MAGIC || !c->sequence) return 0;
     if (c->kind == PP_CONTROL_CLOSE) return c->arg <= PP_CONTROL_MAX_WAIT_MS;
-    return (c->kind == PP_CONTROL_PAUSE || c->kind == PP_CONTROL_RESUME) && c->arg == 0;
+    return (c->kind == PP_CONTROL_PAUSE || c->kind == PP_CONTROL_RESUME || c->kind == PP_CONTROL_END_LAUNCHER ||
+            c->kind == PP_CONTROL_END_GAME_SOCIAL_CLUB || c->kind == PP_CONTROL_ALLOW_GAME_SOCIAL_CLUB) &&
+           c->arg == 0;
 }
 
 /* Whether a request and its payload are whole and well formed: every string
@@ -94,6 +129,17 @@ static inline int pp_session_request_valid(const pp_session_request *r, const ch
 {
     uint32_t want, i = 0, at = 0;
     if (!r || r->magic != PP_SESSION_MAGIC || !r->sequence || r->length != size) return 0;
+    if (r->kind == PP_REQUEST_SERVICES) return size == 0 && r->argc == 0 && r->envc == 0;
+    if (r->kind == PP_REQUEST_STEAM_CLIENT) {
+        /* One decimal account ID that fits a DWORD: 1 to 10 digits, then its NUL. */
+        uint64_t v = 0;
+        if (r->argc != 1 || r->envc != 0 || !payload || size < 2 || size > 11 || payload[size - 1]) return 0;
+        for (i = 0; i + 1 < size; i++) {
+            if (payload[i] < '0' || payload[i] > '9') return 0;
+            v = v * 10 + (uint64_t)(payload[i] - '0');
+        }
+        return v <= 0xffffffffu;
+    }
     if ((r->kind != PP_REQUEST_LAUNCH && r->kind != PP_REQUEST_PREREQUISITE && r->kind != PP_REQUEST_PREREQUISITE_LINE) ||
         !payload || size > PP_SESSION_MAX_PAYLOAD || r->argc > PP_SESSION_MAX_ARGS || r->envc > PP_SESSION_MAX_ENV) return 0;
     if (r->kind == PP_REQUEST_PREREQUISITE_LINE && r->argc != 1) return 0;

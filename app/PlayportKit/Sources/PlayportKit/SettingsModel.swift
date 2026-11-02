@@ -14,7 +14,10 @@ import Foundation
 
 public enum SettingsSection: String, CaseIterable, Sendable {
     /// Every store's account (Steam, then GOG and Epic Games as they land).
-    case accounts, graphics, downloads, controllers, storage, setup, about
+    case accounts, graphics, downloads, controls, storage, setup, about
+    /// Dev builds only until a launcher passes Stage 1 (PLA-616):
+    /// each publisher's launcher (PublisherLauncher) with Open.
+    case launchers
     /// Dev builds only: diagnostics, simulations, probes and logs.
     case developer
 
@@ -23,26 +26,28 @@ public enum SettingsSection: String, CaseIterable, Sendable {
         case .accounts: "Accounts"
         case .graphics: "Graphics"
         case .downloads: "Downloads"
-        case .controllers: "Controllers"
+        case .controls: "Controls"
         case .storage: "Storage"
         case .setup: "Setup check"
         case .about: "About"
+        case .launchers: "Launchers"
         case .developer: "Developer"
         }
     }
 
     /// The sections a build shows, top to bottom.
     public static func all(developer: Bool) -> [SettingsSection] {
-        allCases.filter { developer || $0 != .developer }
+        allCases.filter { developer || ($0 != .developer && $0 != .launchers) }
     }
 
     /// The section `open:settings#NAME` names: a section's own name, or what
     /// used to be a section of the old Settings list (account, jit, memory,
-    /// diagnostics, pairing, probes, logs).
+    /// diagnostics, pairing, probes, logs), or its old name (controllers).
     public static func named(_ name: String) -> SettingsSection? {
         if let s = SettingsSection(rawValue: name) { return s }
         switch name {
         case "account", "steam": return .accounts
+        case "controllers", "gyro", "controller": return .controls
         case "jit", "memory": return .setup
         case "diagnostics", "pairing", "probes", "logs": return .developer
         default: return nil

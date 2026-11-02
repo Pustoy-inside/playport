@@ -60,6 +60,8 @@ struct PadGlyph: View {
         case .y: "Y"
         case .lb: "LB"
         case .rb: "RB"
+        case .lt: "LT"
+        case .rt: "RT"
         case .menu: "≡"
         case .view: "⧉"
         case .up: "↑"
@@ -75,6 +77,8 @@ struct PadHint: Identifiable {
     let button: NavButton
     let label: String
     let action: () -> Void
+    /// A second button drawn after the first for the same thing (LB RB Mode).
+    var also: NavButton? = nil
     var id: NavButton { button }
 }
 
@@ -92,6 +96,7 @@ struct PadFooter: View {
                 Button(action: h.action) {
                     HStack(spacing: 6) {
                         PadGlyph(button: h.button)
+                        if let b = h.also { PadGlyph(button: b) }
                         Text(h.label).font(.system(size: 13)).foregroundStyle(PP.soft)
                     }
                     .padding(.horizontal, 8).padding(.vertical, 4)

@@ -4,7 +4,9 @@
 // arena: its rpmalloc heap's spans, its call-return stack and its L1 lookup cache.
 // A title with enough threads fills it, and a thread that finds no room cannot
 // start. A launch logs the arena's use as `band:` lines (`Use.line`) and ends with
-// a `band:` mark, which tools/ui.py reads into the result event's `band`.
+// a `band:` mark, which tools/ui.py reads into the result event's `band`. A launch
+// whose arena refused a request ends as its own outcome, `band=exhausted` (decision
+// 0120), as one whose JIT pool ran out does.
 
 import Foundation
 
@@ -19,9 +21,9 @@ public enum FexBand {
         public var views: UInt64
         /// The largest free range.
         public var largestFree: UInt64
-        /// Free 16 MiB-aligned 16 MiB blocks: the rpmalloc spans that still fit.
+        /// Free 1 MiB-aligned 1 MiB blocks: the rpmalloc spans that still fit.
         public var spanSlots: UInt64
-        /// rpmalloc spans (16 MiB each).
+        /// rpmalloc spans (1 MiB each).
         public var spans: UInt64
         /// Call-return stacks: one per live emulator thread.
         public var callret: UInt64
@@ -71,5 +73,19 @@ public enum FexBand {
             return moved(used, last.used, by: 256 << 20) || moved(callret, last.callret, by: 4)
                 || refused != last.refused
         }
+
+        /// Whether the arena refused a request. Every request in it is FEX's own (a thread's
+        /// heap span, call-return stack or lookup cache, or a pooled buffer), and FEX cannot go
+        /// on without any of them: the thread does not start or the process ends (decision 0120).
+        public var exhausted: Bool { refused > 0 }
+    }
+
+    /// ` band=exhausted`, what a launch's result line carries when the arena refused a request
+    /// (LaunchCoordinator); tools/ui.py does not count such a run ok.
+    public static let resultField = "band=exhausted"
+
+    /// Whether a result line says the arena ran out.
+    public static func exhausted(in line: String) -> Bool {
+        line.split(separator: " ").contains { $0 == resultField }
     }
 }

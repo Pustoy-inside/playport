@@ -8,9 +8,24 @@
 //   verify:<title id>          Verify files; the next action waits for its result
 //   play:<title id>            Play; the launch ends with its `title-done` event. Playport
 //                              then restarts itself (AppRestart), and the actions after it
-//                              run in the new process, under this run (DriverContinuation);
+//                              run in the new process, under this run (DriverContinuation),
+//                              only if no loss/cancel was observed during replacement;
 //                              a Play refused before the runtime started (its alert shows)
-//                              goes on here
+//                              goes on here. A Battle.net copy's first Play (bnet-wow) is
+//                              refused while its ban-risk notice asks: notice: answers it.
+//                              Past it, a Play that found an update (PLA-521) is followed
+//                              through Downloads to the game's start
+//   notice:<title id>=accept|decline
+//                              An installed Battle.net copy's Play from its page and the
+//                              ban-risk notice it shows first (PLA-514), answered as the
+//                              player does: decline checks Play does not start and the copy
+//                              keeps no acceptance; accept keeps it with the copy and the
+//                              Play goes on, followed as play:. Fails once it was accepted
+//   open-launcher:<id>         Settings › Launchers' Open for a publisher's launcher
+//                              (PlayportKit PublisherLauncher: rockstar), followed as play:
+//   forget-launcher-window:<id> Settings › Launchers' Forget the launcher's saved window
+//                              settings: deletes that one file in the prefix (a `launcher:
+//                              forget-window` line says removed or absent)
 //   install:<app id>           Install from Steam (the paired account's session);
 //                              waits until the title is in the library
 //   install:gog-<id>[@<build>] Install from GOG (signed in on the phone), the newest build or
@@ -18,8 +33,26 @@
 //   install:epic-<app name>    Install from Epic (signed in on the phone), the live build; an
 //                              installed game's install is its update; a refused game fails
 //                              with the page's reason
+//   install:bnet-<code>        Install a Battle.net product (bnet-wow_classic_era) from its
+//                              page, in the page's store region and language; waits until it is
+//                              in the library with Play. A product not offered, or one that
+//                              does not fit, fails with the page's reason
 //   pause-resume:<app id>      Install, Pause once a quarter is staged, check the
-//                              stage is kept, then Resume and wait as install does
+//                              stage is kept, then Resume and wait as install does;
+//                              pause-resume:bnet-<code> also checks Play stays hidden until
+//                              the install is complete
+//   region:bnet-<code>[=<r>]   A Battle.net product's page with its store region picker
+//                              open (UI/BattleNetStore.swift); =<r> (us, eu, kr, tw) picks it
+//                              as the picker does and waits for its sizes. On an installed
+//                              product (UI/BattleNetInstalled.swift), =<r> changes its region
+//                              in place and fails if a download starts or .build.info differs
+//   locale:bnet-<code>[=<l>]   An installed Battle.net product's page with its Language
+//                              picker open; =<l> (deDE) changes the language through
+//                              Downloads and waits until .build.info says <l> and Play shows
+//   update:bnet-<code>[=install] An installed Battle.net product's page and its Check for
+//                              update, with what it found logged; =install also queues the
+//                              update and waits until the receipt and .build.info name it
+//                              and the copy's client is the x64 one (decision 0177)
 //   queue:<app id>             Install from Steam, as a game page's Install does, and go on
 //                              at once: the download runs in the queue (SteamInstalls)
 //   downloading:<app id>       Waits (2 min at most) until the queue runs that app's download
@@ -34,31 +67,90 @@
 //   settings:<title id>        Saves UI_SETTINGS (a PlayportKit LaunchSettings as JSON;
 //                              `{}` clears them) as the game's own launch settings,
 //                              as its page does
-//   hud:on | hud:off           Sets Settings' Metal HUD, as its toggle does
-//   open:<screen | title id>   Shows a screen (home, library, games, downloads, settings,
+//   controls:<title id>        Saves UI_CONTROLS (a PlayportKit GameControls as JSON:
+//                              {"layout":"off"|"gamepad"|"keyboardMouse"|"pointClick","opacity":0.1-1,
+//                              "dpad":"off"|"on","rightStick":"off"|"below"|"above","gyro":{...},
+//                              "layouts":{PRESET:LAYOUT,...}}; `{}` clears them)
+//                              as the game's own controls, as the in-game menu's Controls does;
+//                              "gyro" is the game's own gyro aim (PlayportKit GameGyro:
+//                              "output":"off"|"mouse"|"rightStick","source":"auto"|"phone"|
+//                              "controller","sensitivity":0.05-20 (1.5 by default),"verticalRatio":0-4,
+//                              "turnAxis":"playerSpace"|"yaw"|"roll","invertX","invertY":
+//                              true|false,"pauseButton":"none"|"pad:<button>","antiDeadZone":
+//                              0-0.9,"smoothing":"auto"|"off"|"light"|"normal"), each key left out following the gyro.* defaults;
+//                              "controllerMap" its controller map (PlayportKit ControllerMap:
+//                              {"mode":"controller"|"keyboardMouse"|"custom","table":{INPUT:
+//                              ACTION,...}}, a custom map without a table starting as the
+//                              keyboardMouse preset); one this build cannot read is refused;
+//                              "lookSpeed" (0.1-8, 1 by default) its mouse look's speed, a
+//                              multiple of 2000 counts/s for a stick bound to mouse:move;
+//                              "layouts" the game's own copies of the presets, as the layout
+//                              editor saves them (PlayportKit ControlLayout, version 3, by
+//                              preset name), drawn when their preset is the layout; a record
+//                              with a copy this build cannot read is refused
+//   hud:on | hud:off           Sets Settings › Developer › Metal HUD, as its toggle does
+//   open:<screen | title id>   Shows a screen (home, library, games, battlenet: the Library on
+//                              Battle.net's chip, downloads, settings,
 //                              account, setup: the first-run checklist, signin: Sign in to
 //                              Steam, a preview while Steam is signed in; AppNavigation.screens)
-//                              or a title's page over the
+//                              or a title's page (a Battle.net product offered and not
+//                              installed: open:bnet-<code>) over the
 //                              Library, then waits 1.5 s so a
 //                              screenshot sees it drawn; `open:<title id>#<section>`
-//                              opens the page's Game options at a section (graphics, game,
-//                              files, developer, ordering, steam);
+//                              opens the page's Game options at a section (graphics, controls,
+//                              game, files, developer, ordering, steam, runtime, graphicsoptions).
+//                              runtime/graphicsoptions only ring/scroll existing rows: no edit,
+//                              keyboard or value mutation. Unknown game sections are refused.
+//                              `open:<title id>#gyro` its Controls › Gyro aim page,
+//                              `open:<title id>#layout` its Controls › Edit on-screen layout,
+//                              the layout editor over the game's art (UI/LayoutEditorView.swift:
+//                              pad:lb/rb ring a control, pad:up/down/left/right move it a grid
+//                              step, pad:a opens the bar and inspector to the ring, pad:x Add,
+//                              pad:y Reset, pad:view undo, pad:menu redo, pad:b back and then
+//                              Done, which saves), and
+//                              `open:<title id>#controller` its Controller page
+//                              (UI/ControllerMapView.swift: ctl:mode, ctl:lookSpeed,
+//                              ctl:copy, ctl:resetAll, ctl:<row> such as ctl:a, ctl:leftStick,
+//                              ctl:dpad; pad:x/lb/rb/view/menu ring their rows; A on a Custom
+//                              row opens the ActionPicker, whose presses pad: sends);
 //                              `open:settings#<section>` shows a Settings section (accounts,
-//                              graphics, downloads, controllers, storage, setup, about,
-//                              developer; PlayportKit SettingsSection.named also takes
-//                              account, steam, jit, memory, diagnostics, pairing, probes, logs);
+//                              graphics, downloads, controls, storage, setup, about,
+//                              launchers, developer; PlayportKit SettingsSection.named also takes
+//                              account, steam, jit, memory, diagnostics, pairing, probes, logs,
+//                              gyro: Controls, ringed at its Gyro aim rows, and controller:
+//                              Settings › Controls › Controller, the default's page);
 //                              `open:licences` shows Settings › About › Licences,
 //                              `open:licences#<prefix>` the files of the first component
 //                              whose name starts with it, ignoring case (`open:licences#wine`;
 //                              UI/LicencesView.swift)
 //                              `open:black` shows Settings › Developer › Black screen
-//                              (BlackScreen.swift), as its row does
+//                              (BlackScreen.swift), as its row does; it is a terminal
+//                              handoff, so it must be the last action (nothing follows it)
 //   probe:native-auth           Settings' synthetic native GSS probe, no real credentials
 //   probe:helper-exit | probe:helper-kill [-hold]
 //                              Settings' helper-lifetime probe (HelperLifetimeProbe.swift):
 //                              the run ends with ui-done, and the app ends itself 2 s later;
 //                              -hold turns on its Helper holds on
 //   probe:helper-report        Reads that probe's report back (at the next launch)
+//   probe:memory-64|2048|4096  Settings' shared RAM probe (SharedMemoryProbe.swift)
+//   probe:memory-donor-tagged-2048|4096 | probe:memory-donor-purgeable-2048|4096
+//                              Its donor variant: the helper ends after allocating and the
+//                              app keeps the mappings 60 s; the H1 verdict is in the log
+//   probe:memory-donors-6144|8192|10240
+//                              Settings' donor RAM pool: fresh helpers in turn give purgeable
+//                              RAM and end until the total is mapped (or a donor has nothing left,
+//                              or the phone runs low: then it fails), verified 60 s later, then the
+//                              app's own remaining limit; the pool stays held
+//   probe:memory-pool-verify   Settings' Verify the donor pool: reads the held pool again
+//   probe:memory-pool-zero     Settings' Donor pool: zeroing: 1 GiB from a donor that ends, then
+//                              memset, purge, fixed-address range mapping and four ways to zero
+//                              or give back 64 MiB of an object (`pool-zero` lines)
+//   probe:memory-pool-gpu      Settings' Donor pool: Metal buffers: 1 GiB from a donor that ends, as
+//                              four no-copy shared Metal buffers written by the GPU and read back,
+//                              a range view's buffer, then four ordinary buffers (`pool-gpu` lines)
+//   background:<seconds>       Opens iOS Settings (10-600 retained grammar), then terminally
+//                              cancels this batch: no automatic return or continuation.
+//                              A return needs a new explicitly announced session.
 //   probe:pairing              Settings' on-device pairing experiment (iOS 27)
 //   probe:pairing-cancel | probe:pairing-use
 //                              Cancel, or use the completed pairing and check readiness
@@ -77,17 +169,65 @@
 //   tap:<fx>:<fy>              After a play: (it runs while the game runs): a finger's tap at
 //                              that fraction (0-1) of the game's screen, through GameSurfaceView's
 //                              touch path (a guest GDI window while one is shown, decision 0075),
-//                              then waits 1 s
+//                              then waits 1 s. While the on-screen controls show it sends
+//                              nothing (outside them a touch is ignored; on them, use touch:)
+//   touch:<control>[+<control>...][@<ms>]
+//                              After a play: (it runs while the game runs): waits for the
+//                              game's first frame (3 min at most), then fingers on the
+//                              on-screen controls by id, held <ms> (200 by default) and let
+//                              go (Dev/TouchDriver.swift; `touch:dpad.right@2000`,
+//                              `touch:a`)
+//   gyro:<script>              After a play: (it runs while the game runs): waits for the
+//                              game's first frame (3 min at most), then plays a scripted gyro
+//                              into gyro aim where the sensors' samples enter it, replacing
+//                              them while it plays (Dev/GyroDriver.swift, HostIOKit
+//                              GyroScript): steps joined by `/`, each <axis>=<deg/s> terms
+//                              joined by `+` (yaw + right, pitch + up, roll + clockwise) or
+//                              `rest`, then @<ms> (`gyro:yaw=90@500/pitch=-30+yaw=10@300`).
+//                              Taken only while the game's gyro output is on (controls:'s
+//                              "gyro") and the sensors run; the `gyro: driver` line says what
+//                              moved (mouse counts, or the right stick's peak). With no game
+//                              running and the Gyro aim page up (open:<title id>#gyro), the
+//                              script moves its test area's dot instead (nothing reaches a guest)
+//   gesture:three-finger-tap   After a play: (it runs while the game runs): waits for the
+//                              game's first frame (3 min at most), then fires the three-finger
+//                              tap through the handler GameSurfaceView's recognizer calls
+//                              (HostIO.menuGesture), which opens the in-game menu with or
+//                              without on-screen controls, and waits 1 s
+//   suggest:accept|dismiss     After a play: (it runs while the game runs): waits (3 min at most)
+//                              for the toast that offers Keyboard & mouse (UI/LayoutSuggestionToast
+//                              .swift, PlayportKit LayoutSuggestion), then answers it as its Use or
+//                              Not now button does; fails, with the reason, when the game is not
+//                              offered (once per game: set:controls.suggestedLayoutOffered= forgets)
 //   menu:open                  After a play: (the actions after it then run while the game runs):
-//                              waits for the game's first frame (3 min at most), then holds the
+//                              waits for the game's first frame (3 min at most; a guest window up
+//                              10 s with no frame counts, for a GDI-only program), then holds the
 //                              controller's Home button 0.8 s through HostIO's pad handling
 //                              (HostIO.menuInput), which opens the in-game menu
 //                              (UI/InGameMenuView.swift), and waits 1 s
-//   menu:<row>                 In the menu: moves its ring to the row (resume, screenshot,
-//                              overlay, controller, quit) and presses A, as a controller does;
+//   menu:<row>                 In the menu: moves its ring to the row (resume, controls, keyboard,
+//                              text, screenshot, overlay, controller, quit) and presses A, as a
+//                              controller does (controls opens its panel: pad:left/right
+//                              change the ringed row, pad:down moves along On-screen controls,
+//                              D-pad and Right stick (only on the Gamepad layout with no copy of
+//                              the game's own), Opacity, Gyro aim, Sensitivity and, while a
+//                              controller is connected (--pad's scripted pad counts), Controller:
+//                              Pad, Keys & mouse, Custom; pad:b back);
+//                              menu:layout opens the Controls panel and its Edit layout…, the
+//                              layout editor over the paused game (pad: then drives it as on
+//                              open:<title id>#layout; Done goes back to the panel);
 //                              pad: presses go to the menu too while it is up. menu:quit waits
 //                              for the game's end: Playport restarts, and the actions after it
 //                              run in the new process, as after play:
+//                              menu:text goes back to the game with the text bar open over it
+//                              (UI/TextBarView.swift)
+//   textbar:<op>               After menu:text (it runs while the game runs), the text bar's own
+//                              controls (Dev/TextBarDriver.swift): close, secure | plain (its lock),
+//                              tab | enter | backspace (its keys), type:<text> (typed into its
+//                              field as the keyboard types it; percent-encoded, %2C a comma),
+//                              secret | secret+enter (password mode, then a value the workstation
+//                              pushes for this action alone, Documents/ui-text-<nonce>-<n>, read
+//                              and deleted before it is typed; nothing records it but the field)
 //   web:wait | web:click:<label> | web:close
 //                              After a play: (they run while the game runs): a web page the
 //                              game opened (UI/GameWebSheet.swift): wait for it (Open on its
@@ -97,8 +237,16 @@
 //                              true/false a Bool, an integer an Int, else a String
 //                              (`set:metalHUD=true`)
 //
-// Each action ends with a `ui-action` event and the run with `ui-done` in
-// run-events.jsonl (RunEvents.swift), which the driver reads.
+// Each successful action ends with a `ui-action` event and the run with `ui-done` in
+// run-events.jsonl (RunEvents.swift), which the driver reads. After bounded initial
+// active/library/opening readiness, any inactive/background transition terminally
+// cancels the batch, including intentional JIT/Settings handoffs. No reactivation
+// resumes it. Planned restart handoffs keep revocation armed until process termination;
+// an observed loss drops saved driver continuation, not the product's restart request.
+// Checkpoints guard actions, individual presses and both sides of waits;
+// host interruption requests cancellation via ui-cancel-<nonce> containing that nonce.
+// A failed marker delivery/SIGKILL cannot guarantee host interruption reached the app.
+// These are app-local gates, not proof of the OS foreground input recipient.
 //
 // What settings:, hud: and set: change lasts for the driver's session
 // (UI_SESSION) and is undone at the first launch outside it (DriverUndo.swift),
@@ -110,6 +258,7 @@
 // action has run (a play's own end is its `title: done` line). JIT comes from
 // the built-in helper (JitProvider), as for any Play.
 
+import BattleNetClientKit
 import Foundation
 import HostIOKit
 import GOGClientKit
@@ -124,6 +273,30 @@ enum UIDriver {
     private static var started = false
     /// The actions after the one running: what a restart after a play hands on.
     private static var remaining: [String] = []
+    private static let batch = UIDriverBatch(active: { UIApplication.shared.applicationState == .active })
+    private static var task: Task<Void, Never>?
+    private static var finished = false
+    private static var heldMenuHome = false
+
+    static func sceneChanged(active: Bool) {
+        guard requested, started else { return }
+        batch.sceneChanged(active: active)
+    }
+
+    static func checkpoint() throws { try batch.checkpoint() }
+    static func pause(_ duration: Duration) async throws { try await batch.pause(duration) }
+
+    static var allowsDeferredNavigation: Bool {
+        guard requested else { return true }
+        do { try checkpoint(); return true } catch { return false }
+    }
+
+    static func checked<T>(_ operation: () async throws -> T) async throws -> T {
+        try checkpoint()
+        let value = try await operation()
+        try checkpoint()
+        return value
+    }
 
     private static func log(_ line: String) { WineHostRuntime.appendLog("ui: " + line) }
 
@@ -133,8 +306,20 @@ enum UIDriver {
         started = true
         let actions = (env["UI_ACTIONS"] ?? "").split(separator: ",").map(String.init)
         log("S1_MODE=ui nonce=\(TitleMode.nonce) UI_ACTIONS=\(env["UI_ACTIONS"] ?? "unset")")
-        AppRestart.shared.willRestart = { DriverContinuation.save(remaining: remaining, continuesPlay: $0) }
-        AppRestart.shared.restartFailed = { DriverContinuation.drop() }
+        AppRestart.shared.willRestart = { continuesPlay in
+            guard batch.failure == nil else { DriverContinuation.drop(); return }
+            DriverContinuation.save(remaining: remaining, continuesPlay: continuesPlay)
+            if !remaining.isEmpty || continuesPlay { batch.handoff() }
+        }
+        batch.cancelRequested = {
+            UIDriverBatch.cancellationRequested(nonce: env["TITLE_NONCE"] ?? "") { name in
+                try? String(contentsOf: WineHostRuntime.documents.appendingPathComponent(name), encoding: .utf8)
+            }
+        }
+        AppRestart.shared.restartFailed = {
+            DriverContinuation.drop()
+            batch.cancel("restart failed; driver continuation dropped")
+        }
         // A marker a run pushed as the app was ended (its last action's) would let this run's
         // action of the same number go on before its screenshot: none is this run's yet.
         if stepped, let names = try? FileManager.default.contentsOfDirectory(atPath: WineHostRuntime.documents.path) {
@@ -142,53 +327,84 @@ enum UIDriver {
                 try? FileManager.default.removeItem(at: WineHostRuntime.documents.appendingPathComponent(n))
             }
         }
-        Task { @MainActor in
+        batch.onCancel = { reason in
+            remaining.removeAll()
+            DriverContinuation.drop()
+            task?.cancel()
+            if heldMenuHome {
+                heldMenuHome = false
+                HostIO.shared.menuInput(PadInput())
+            }
+            OnScreenControls.shared.cancelDriverTouches()
+            GyroSensors.shared.cancelDriverScript()
+            finish("cancelled: \(reason)")
+        }
+        task = Task { @MainActor in await run(actions) }
+    }
+
+    private static func run(_ actions: [String]) async {
+        do {
             let library = LibraryModel.shared
-            // The first scan: the one AppShell starts on appear.
-            while library.scanning || !library.scannedOnce { try? await Task.sleep(for: .milliseconds(100)) }
-            // The opening animation (UI/AppOpening.swift) covers the shell until Home is drawn whole.
-            while AppOpening.shared.covering { try? await Task.sleep(for: .milliseconds(100)) }
+            // Initial launch may be inactive; wait boundedly for the first active,
+            // scanned, uncovered shell, but latch any subsequent foreground loss.
+            try await batch.ready { !library.scanning && library.scannedOnce && !AppOpening.shared.covering }
             log("library: " + library.catalog.titles.map { "\($0.id) \($0.name) [\($0.badge.rawValue)]" }.joined(separator: ", "))
             // The Play the restart after its prerequisites continues (AppRestart.continuePlay,
             // decision 0084) is the earlier process's play: the actions left follow it as they
             // follow a play: action.
             if AppRestart.shared.continuing != nil {
                 let launch = TitleLaunch.shared
-                while AppRestart.shared.continuing != nil { try? await Task.sleep(for: .milliseconds(100)) }
+                while AppRestart.shared.continuing != nil { try await pause(.milliseconds(100)) }
                 log("the Play continued after its prerequisites: " + (launch.running ? "started" : "did not start"))
                 if launch.running, actions.first.map({ !inGame($0) }) ?? false {
                     remaining = actions
-                    while launch.running { try? await Task.sleep(for: .milliseconds(250)) }
+                    while launch.running { try await pause(.milliseconds(250)) }
                     if AppRestart.shared.restarting {
+                        try checkpoint()
+                        batch.handoff()
                         log("the continued Play ended; Playport restarts, and the new process goes on")
+                        try await batch.waitForHandoff()
                         return
                     }
                 }
             }
-            var done = 0
-            for (i, action) in actions.enumerated() {
+            try await batch.run(actions, terminal: { $0 == "open:black" }, perform: { i, action in
+                let done = i
                 remaining = Array(actions[(i + 1)...])
                 let parts = action.split(separator: ":", maxSplits: 1).map(String.init)
                 guard parts.count == 2 else { return finish("action=\(action) refused: not <verb>:<id>") }
                 let id = parts[1]
-                if ["verify", "play", "uninstall", "settings"].contains(parts[0]), library.title(id) == nil {
+                // settings:launcher-ID saves what Settings › Launchers' Open reads (LauncherOpen.open).
+                let launcherSettings = parts[0] == "settings" && PublisherLauncher.all.contains { $0.titleID == id }
+                if ["verify", "repair", "play", "uninstall", "settings", "controls"].contains(parts[0]), !launcherSettings,
+                   library.title(id) == nil {
                     return finish("action=\(action) refused: \(id) is not a catalogued title")
                 }
                 switch parts[0] {
+                case "install" where id.hasPrefix("bnet-"), "pause-resume" where id.hasPrefix("bnet-"):
+                    if let failure = try await installBattleNet(String(id.dropFirst(5)), pauseAt: parts[0] == "pause-resume" ? 0.25 : nil) {
+                        return finish("action=\(action) failed: \(failure)")
+                    }
+                case "region":
+                    if let failure = try await battleNetRegion(id) { return finish("action=\(action) failed: \(failure)") }
+                case "locale":
+                    if let failure = try await battleNetLocale(id) { return finish("action=\(action) failed: \(failure)") }
+                case "update":
+                    if let failure = try await battleNetUpdate(id) { return finish("action=\(action) failed: \(failure)") }
                 case "install" where id.hasPrefix("epic-"):
-                    if let failure = await installEpic(String(id.dropFirst(5))) { return finish("action=\(action) failed: \(failure)") }
+                    if let failure = try await installEpic(String(id.dropFirst(5))) { return finish("action=\(action) failed: \(failure)") }
                 case "install" where id.hasPrefix("gog-"):
-                    if let failure = await installGOG(String(id.dropFirst(4))) { return finish("action=\(action) failed: \(failure)") }
+                    if let failure = try await installGOG(String(id.dropFirst(4))) { return finish("action=\(action) failed: \(failure)") }
                 case "install", "pause-resume":
                     guard let app = UInt32(id) else { return finish("action=\(action) refused: \(id) is not a Steam app id") }
-                    if let failure = await install(app, pauseAt: parts[0] == "pause-resume" ? 0.25 : nil) {
+                    if let failure = try await install(app, pauseAt: parts[0] == "pause-resume" ? 0.25 : nil) {
                         return finish("action=\(action) failed: \(failure)")
                     }
                 case "import":
-                    if let failure = await importGame(id) { return finish("action=\(action) failed: \(failure)") }
+                    if let failure = try await importGame(id) { return finish("action=\(action) failed: \(failure)") }
                 case "queue", "downloading":
                     guard let app = UInt32(id) else { return finish("action=\(action) refused: \(id) is not a Steam app id") }
-                    if let failure = await (parts[0] == "queue" ? queue(app) : downloading(app)) {
+                    if let failure = try await (parts[0] == "queue" ? queue(app) : downloading(app)) {
                         return finish("action=\(action) failed: \(failure)")
                     }
                 case "settings":
@@ -200,7 +416,62 @@ enum UIDriver {
                     LaunchSettingsStore.shared.binding(for: id).wrappedValue = s
                     let e = LibraryModel.shared.title(id).map { LaunchSettingsStore.shared.effective(for: $0) }
                         ?? LaunchSettings.resolve(game: s, global: LaunchSettingsStore.shared.global)
-                    log("settings \(id): screen=\(e.screen ?? "native") aspect=\(e.aspect.rawValue) limit=\(e.frameLimit) upscaler=\(e.upscaler.rawValue) sharpness=\(e.sharpness) graphics=\(e.graphics.rawValue) arguments=\(e.arguments) ordering=\(MemoryOrdering.Setting.allCases.compactMap { s in e.ordering[s].map { "\(s.rawValue)=\($0)" } }) maxInst=\(e.maxInst.map(String.init) ?? "profile") x87Reduced=\(e.x87Reduced.map { String($0) } ?? "profile") diskCache=\(e.diskCache.map { String($0) } ?? "default") runtime=\(e.runtime.keys.sorted().map { "\($0)=\(e.runtime[$0]!)" }) graphicsOptions=\(e.graphicsEnvironment.keys.sorted().map { "\($0)=\(e.graphicsEnvironment[$0]!)" })")
+                    log("settings \(id): screen=\(e.screen ?? "native") aspect=\(e.aspect.rawValue) limit=\(e.frameLimit) graphics=\(e.graphics.rawValue) arguments=\(e.arguments) ordering=\(MemoryOrdering.Setting.allCases.compactMap { s in e.ordering[s].map { "\(s.rawValue)=\($0)" } }) maxInst=\(e.maxInst.map(String.init) ?? "profile") x87Reduced=\(e.x87Reduced.map { String($0) } ?? "profile") diskCache=\(e.diskCache.map { String($0) } ?? "default") runtime=\(e.runtime.keys.sorted().map { "\($0)=\(e.runtime[$0]!)" }) graphicsOptions=\(e.graphicsEnvironment.keys.sorted().map { "\($0)=\(e.graphicsEnvironment[$0]!)" }) windowsServices=\(e.windowsServices) khronosVulkanLoader=\(e.khronosVulkanLoader) jitPoolMB=\(e.jitPoolMB.map(String.init) ?? "default")")
+                case "controls":
+                    guard let json = env["UI_CONTROLS"],
+                          let c = try? JSONDecoder().decode(GameControls.self, from: Data(json.utf8)) else {
+                        return finish("action=\(action) refused: UI_CONTROLS is not GameControls JSON")
+                    }
+                    // GameControls reads a map it cannot read as none (a record saved by a later build still loads).
+                    if c.controllerMap == nil, json.contains("\"controllerMap\"") {
+                        return finish("action=\(action) refused: UI_CONTROLS' controllerMap is not a ControllerMap")
+                    }
+                    DriverUndo.willSet(ControlsStore.gamesKey)
+                    ControlsStore.shared.setGame(id, c)
+                    log("controls \(id): layout=\(c.layout?.rawValue ?? "default") opacity=\(c.opacity.map(ControlsOpacity.label) ?? "default") "
+                        + "dpad=\(c.dpad?.rawValue ?? "default") rightStick=\(c.rightStick?.rawValue ?? "default") "
+                        + "gyro=\(c.gyro == nil ? "default" : "own") (\(ControlsStore.shared.gyro(id).summary)) "
+                        + "controllerMap=\(c.controllerMap == nil ? "default" : "own") "
+                        + "(\(ControlsStore.shared.game(id).controllerMap(over: ControlsStore.shared.defaults).summary)) "
+                        + "lookSpeed=\(c.lookSpeed == nil ? "default" : "own") "
+                        + "(\(LookSpeed.label(ControlsStore.shared.game(id).lookSpeed(over: ControlsStore.shared.defaults)))) "
+                        + "layouts=\(c.layouts.isEmpty ? "none" : OnScreenLayout.allCases.compactMap { p in c.layouts[p].map { "\(p.rawValue)(\($0.controls.count) controls)" } }.joined(separator: ","))")
+                case "touch":
+                    let launch = TitleLaunch.shared
+                    guard launch.running else { return finish("action=\(action) refused: no game is running") }
+                    let deadline = Date().addingTimeInterval(180)
+                    while launch.running, !launch.acceptsMenu || launch.step != .drawing, Date() < deadline {
+                        try await pause(.milliseconds(250))
+                    }
+                    try await pause(.milliseconds(300))   // the controls drawn after the first frame
+                    if let failure = try await OnScreenControls.shared.driverPress(id) { return finish("action=\(action) failed: \(failure)") }
+                    try await pause(.milliseconds(500))
+                    log("touch \(id): \(OnScreenControls.shared.summary)" + (InGameMenu.shared.isOpen ? "; \(InGameMenu.shared.summary)" : ""))
+                    if let failure = try await afterInGame(action, index: done + 1, next: actions[(i + 1)...]) { return finish(failure) }
+                    if AppRestart.shared.restarting { return }
+                case "gyro":
+                    let launch = TitleLaunch.shared
+                      do { _ = try GyroScript.parse(id) } catch { return finish("action=\(action) refused: \(error)") }
+                    if !launch.running {
+                        // The Gyro aim page's test area (open:<title id>#gyro): its dot, nothing to a guest.
+                        guard case .previewing = GyroSensors.shared.run else {
+                            return finish("action=\(action) refused: no game is running and no Gyro aim test area runs "
+                                          + "(\(GyroSensors.shared.summary))")
+                        }
+                        if let failure = try await GyroSensors.shared.driverPlay(id) { return finish("action=\(action) failed: \(failure)") }
+                        try await pause(.milliseconds(500))   // the dot drawn, for a screenshot
+                        log("gyro \(id): \(GyroSensors.shared.summary)")
+                        break
+                    }
+                    let deadline = Date().addingTimeInterval(180)
+                    while launch.running, !launch.acceptsMenu || launch.step != .drawing, Date() < deadline {
+                        try await pause(.milliseconds(250))
+                    }
+                    try await pause(.milliseconds(300))   // the sensors started after the first frame
+                    if let failure = try await GyroSensors.shared.driverPlay(id) { return finish("action=\(action) failed: \(failure)") }
+                    log("gyro \(id): \(GyroSensors.shared.summary)" + (InGameMenu.shared.isOpen ? "; \(InGameMenu.shared.summary)" : ""))
+                    if let failure = try await afterInGame(action, index: done + 1, next: actions[(i + 1)...]) { return finish(failure) }
+                    if AppRestart.shared.restarting { return }
                 case "hud":
                     guard ["on", "off"].contains(id) else { return finish("action=\(action) refused: not hud:on or hud:off") }
                     DriverUndo.willSet(MetalHUD.key)
@@ -208,9 +479,25 @@ enum UIDriver {
                     log("hud: \(id)")
                 case "open":
                     let nav = AppNavigation.shared
-                    let parts = id.split(separator: "#", maxSplits: 1).map(String.init)
+                    let parts = id.split(separator: "#", maxSplits: 1, omittingEmptySubsequences: false).map(String.init)
+                    // Validate game destinations before changing navigation. Settings/licences
+                    // retain their own section/alias handling; generic game IDs stay generic.
+                    if parts.count > 1, !["settings", "licences"].contains(parts[0]),
+                       UIDriverGameSection(rawValue: parts[1]) == nil {
+                        return finish("action=\(action) refused: unknown Game options section \(parts[1])")
+                    }
+                    // A Battle.net product's page: offered now (asked of Blizzard when nothing is known yet).
+                    var bnetOffered = false
+                    if let title = parts.first, let key = StoreGameKey(titleID: title), key.store == .battlenet, library.title(title) == nil {
+                        bnetOffered = try await battleNetOffered(key)
+                    }
                     if parts.first == "black" {
+                        // The black screen is a terminal handoff: it ends the batch, so no
+                        // action, press or step ack can follow the screen the owner left.
                         BlackScreen.shared.show()
+                        batch.cancel("black screen shown; the batch ended and no input follows "
+                                     + "(new session required)")
+                        return
                     } else if parts.first == "licences" {
                         var pages: [LicencePage] = []
                         if parts.count > 1 {
@@ -227,14 +514,16 @@ enum UIDriver {
                         nav.pageSection = parts.count > 1 ? parts[1] : nil
                     } else if let title = parts.first, let key = StoreGameKey(titleID: title),
                               (key.store == .gog && GOGAccount.shared.game(key.id) != nil)
-                                || (key.store == .epic && EpicAccount.shared.game(key.id) != nil) {
+                                || (key.store == .epic && EpicAccount.shared.game(key.id) != nil)
+                                || (key.store == .battlenet && bnetOffered) {
                         // A store's game not installed: its page, as its library tile opens it.
                         nav.openGame(.store(key))
+                        nav.pageSection = parts.count > 1 ? parts[1] : nil
                     } else {
                         return finish("action=\(action) refused: \(id) is not a screen or a catalogued title")
                     }
-                    try? await Task.sleep(for: .milliseconds(1500))
-                    log("open \(id)")
+                    try await pause(.milliseconds(1500))
+                    log("open \(id)" + (LayoutEditorSession.shared.isUp ? ": \(LayoutEditorSession.shared.summary)" : ""))
                 case "pad":
                     // The presses a controller makes, into the same router (UI/Pad/PadRouter.swift),
                     // or the in-game menu's while it is up (HostIO feeds it the same presses).
@@ -244,49 +533,46 @@ enum UIDriver {
                                       + NavButton.allCases.map(\.rawValue).joined(separator: " "))
                     }
                     if InGameMenu.shared.isOpen {
-                        for p in presses {
-                            InGameMenu.shared.press(NavButton(rawValue: p)!)
-                            try? await Task.sleep(for: .milliseconds(250))
-                        }
-                        try? await Task.sleep(for: .milliseconds(1000))
+                        try await batch.presses(presses) { InGameMenu.shared.press(NavButton(rawValue: $0)!) }
+                        try await pause(.milliseconds(1000))
                         log("pad \(id): \(InGameMenu.shared.summary)")
-                        if let failure = await afterInGame(action, index: done + 1, next: actions[(i + 1)...]) {
+                        if let failure = try await afterInGame(action, index: done + 1, next: actions[(i + 1)...]) {
                             return finish(failure)
                         }
                         if AppRestart.shared.restarting { return }
                         break
                     }
-                    for p in presses {
-                        PadRouter.shared.send(NavButton(rawValue: p)!)
-                        try? await Task.sleep(for: .milliseconds(250))
-                    }
-                    try? await Task.sleep(for: .milliseconds(1000))
+                    try await batch.presses(presses) { PadRouter.shared.send(NavButton(rawValue: $0)!) }
+                    try await pause(.milliseconds(1000))
                     log("pad \(id): focus \(PadFocus.shared.focused ?? "none"), page \(AppNavigation.shared.page.rawValue)"
                         + (AppNavigation.shared.settings ? " (settings, \(AppNavigation.shared.settingsSection.rawValue))" : "")
                         + (AppNavigation.shared.setup && !AppNavigation.shared.settings ? " (setup\(SetupState.shared.preview == nil ? "" : " preview"), \(SetupChecklist.summary(SetupState.shared.shown)))" : "")
                         + (AppNavigation.shared.signIn ? " (\(SteamAccountModel.current.map { SignInState.shared.summary($0) } ?? "signin"))" : "")
                         + (AppNavigation.shared.onGamePage ? " (game page\(AppNavigation.shared.gamePanels.map { ", " + $0.rawValue }.joined()))" : "")
-                        + (PadModal.shared.summary.map { ", \($0)" } ?? "") + gamePageSettings() + globalSettings())
+                        + (PadModal.shared.summary.map { ", \($0)" } ?? "") + gamePageSettings() + globalSettings()
+                        + (LayoutEditorSession.shared.isUp ? "; \(LayoutEditorSession.shared.summary)" : ""))
                     // A press that started a Play (a game page's Play, Home's card): the run follows the
                     // game as play: does, and ends with its title-done or pp ui's --until.
                     let launch = TitleLaunch.shared
                     if launch.running {
                         log("pad \(id): a Play started")
-                        while launch.running { try? await Task.sleep(for: .milliseconds(250)) }
+                        while launch.running { try await pause(.milliseconds(250)) }
                         if AppRestart.shared.restarting {
+                            try checkpoint()
+                            batch.handoff()
                             RunEvents.emit("ui-action", ["action": action, "result": "ok", "index": done + 1, "restart": true])
                             log("pad \(id): the game ended; Playport restarts, and the actions after it do not run")
                             return
                         }
-                        try? await Task.sleep(for: .milliseconds(1500))   // the alert drawn, for a screenshot
+                        try await pause(.milliseconds(1500))   // the alert drawn, for a screenshot
                         log("pad \(id): the game ended without starting the runtime: \(launch.message?.title ?? "no message")"
                             + (launch.message?.step.map { " (failed at \(LaunchProgress.stepName($0)))" } ?? ""))
                     }
                 case "wait":
                     guard let s = Int(id), (0...600).contains(s) else { return finish("action=\(action) refused: not wait:<seconds 0-600>") }
-                    try? await Task.sleep(for: .seconds(s))
+                    try await pause(.seconds(s))
                     log("waited \(s) s" + (TitleLaunch.shared.running ? " (the game runs)" : ""))
-                    if let failure = await afterInGame(action, index: done + 1, next: actions[(i + 1)...]) { return finish(failure) }
+                    if let failure = try await afterInGame(action, index: done + 1, next: actions[(i + 1)...]) { return finish(failure) }
                     if AppRestart.shared.restarting { return }
                 case "tap":
                     let f = id.split(separator: ":").compactMap { Double($0) }
@@ -297,54 +583,123 @@ enum UIDriver {
                         return finish("action=\(action) refused: no game is running")
                     }
                     let window = GuestWindows.shown
-                    await view.tap(fx: f[0], fy: f[1])
-                    try? await Task.sleep(for: .milliseconds(1000))
-                    log("tap \(id): " + (window ? "on a guest window" : "on the game"))
-                    if let failure = await afterInGame(action, index: done + 1, next: actions[(i + 1)...]) { return finish(failure) }
+                    let to = try await view.tap(fx: f[0], fy: f[1])
+                    try await pause(.milliseconds(1000))
+                    log("tap \(id): " + (to == .ignored ? "ignored: outside the on-screen controls"
+                                         : to == .controls ? "on an on-screen control: nothing sent (touch: presses them)"
+                                         : window ? "on a guest window" : "on the game"))
+                    if let failure = try await afterInGame(action, index: done + 1, next: actions[(i + 1)...]) { return finish(failure) }
+                    if AppRestart.shared.restarting { return }
+                case "gesture":
+                    let launch = TitleLaunch.shared
+                    guard id == "three-finger-tap" else { return finish("action=\(action) refused: not gesture:three-finger-tap") }
+                    guard launch.running else { return finish("action=\(action) refused: no game is running") }
+                    let deadline = Date().addingTimeInterval(180)
+                    while launch.running, !launch.acceptsMenu || launch.step != .drawing, Date() < deadline {
+                        try await pause(.milliseconds(250))
+                    }
+                    guard launch.acceptsMenu else { return finish("action=\(action) failed: the game did not draw a frame") }
+                    HostIO.shared.menuGesture()
+                    try await pause(.milliseconds(1000))
+                    guard InGameMenu.shared.isOpen else { return finish("action=\(action) failed: the menu did not open") }
+                    log("gesture \(id): \(InGameMenu.shared.summary)")
+                    if let failure = try await afterInGame(action, index: done + 1, next: actions[(i + 1)...]) { return finish(failure) }
+                    if AppRestart.shared.restarting { return }
+                case "suggest":
+                    let launch = TitleLaunch.shared, suggested = SuggestedLayout.shared
+                    guard ["accept", "dismiss"].contains(id) else { return finish("action=\(action) refused: not suggest:accept or suggest:dismiss") }
+                    guard launch.running else { return finish("action=\(action) refused: no game is running") }
+                    // The offer is due after 20 s of play from the first frame (PlayportKit LayoutSuggestion).
+                    let deadline = Date().addingTimeInterval(180)
+                    while launch.running, !suggested.showing, suggested.outcome == nil, Date() < deadline {
+                        try await pause(.milliseconds(250))
+                    }
+                    guard suggested.showing else {
+                        let why = suggested.outcome.map { " (\($0))" } ?? (launch.running ? " in 3 min" : " before the game ended")
+                        return finish("action=\(action) failed: no Keyboard & mouse offer" + why)
+                    }
+                    try checkpoint()
+                    suggested.answer(accept: id == "accept", by: "driver")
+                    try await pause(.milliseconds(500))
+                    log("suggest \(id): \(OnScreenControls.shared.summary)")
+                    if let failure = try await afterInGame(action, index: done + 1, next: actions[(i + 1)...]) { return finish(failure) }
                     if AppRestart.shared.restarting { return }
                 case "menu":
                     let launch = TitleLaunch.shared, menu = InGameMenu.shared
                     if id == "open" {
                         guard launch.running else { return finish("action=\(action) refused: no game is running") }
+                        // A program that only draws guest GDI windows (Wine's notepad) never takes a
+                        // drawable: its window, up 10 s with no frame, stands in for the first frame.
                         let deadline = Date().addingTimeInterval(180)
-                        while launch.running, !launch.acceptsMenu || launch.step != .drawing, Date() < deadline {
-                            try? await Task.sleep(for: .milliseconds(250))
+                        var windowSince: Date?
+                        while launch.running, Date() < deadline {
+                            if launch.acceptsMenu, launch.step == .drawing { break }
+                            if launch.acceptsMenu, launch.step == .window {
+                                windowSince = windowSince ?? Date()
+                                if Date().timeIntervalSince(windowSince!) >= 10 { break }
+                            } else {
+                                windowSince = nil
+                            }
+                            try await pause(.milliseconds(250))
                         }
                         guard launch.acceptsMenu else { return finish("action=\(action) failed: the game did not draw a frame") }
                         // Home held, as a controller holds it, into HostIO's pad handling.
+                        try checkpoint()
                         var home = PadInput()
                         home.home = true
+                        heldMenuHome = true
                         HostIO.shared.menuInput(home)
-                        try? await Task.sleep(for: .milliseconds(800))
+                        try await pause(.milliseconds(800))
+                        heldMenuHome = false
                         HostIO.shared.menuInput(PadInput())
-                        try? await Task.sleep(for: .milliseconds(1000))
+                        try await pause(.milliseconds(1000))
                         guard menu.isOpen else { return finish("action=\(action) failed: the menu did not open") }
+                    } else if id == "layout" {
+                        // The Controls panel's Edit layout…, as a tap on it: the layout editor over the paused game.
+                        guard menu.isOpen else { return finish("action=\(action) refused: the in-game menu is not open") }
+                        guard !menu.editor, !LayoutEditorSession.shared.isUp else {
+                            return finish("action=\(action) refused: a page is already up over the menu")
+                        }
+                        try checkpoint()
+                        menu.choose(.controls)
+                        menu.openLayoutEditor()
+                        try await pause(.milliseconds(1000))
+                        guard LayoutEditorSession.shared.isUp(.inGame) else {
+                            return finish("action=\(action) failed: the layout editor did not open")
+                        }
                     } else {
                         guard let item = QuickMenuItem(rawValue: id) else {
                             return finish("action=\(action) refused: not menu:open or menu:<row> with rows "
                                           + QuickMenuItem.allCases.map(\.rawValue).joined(separator: " "))
                         }
                         guard menu.isOpen else { return finish("action=\(action) refused: the in-game menu is not open") }
-                        for down in QuickMenu.steps(from: menu.menu.ring, to: item) {
-                            menu.press(down ? .down : .up)
-                            try? await Task.sleep(for: .milliseconds(250))
+                        try await batch.presses(QuickMenu.steps(from: menu.menu.ring, to: item)) {
+                            menu.press($0 ? .down : .up)
                         }
+                        try checkpoint()
                         menu.press(.a)
-                        try? await Task.sleep(for: .milliseconds(item == .screenshot ? 2500 : 1000))
+                        try await pause(.milliseconds(item == .screenshot ? 2500 : 1000))
                     }
                     log("menu \(id): \(menu.summary)")
-                    if let failure = await afterInGame(action, index: done + 1, next: actions[(i + 1)...]) { return finish(failure) }
+                    if let failure = try await afterInGame(action, index: done + 1, next: actions[(i + 1)...]) { return finish(failure) }
+                    if AppRestart.shared.restarting { return }
+                case "textbar":
+                    // The text bar menu:text opened over the running game (Dev/TextBarDriver.swift).
+                    guard TitleLaunch.shared.running else { return finish("action=\(action) refused: no game is running") }
+                    if let failure = try await TextBarDriver.run(id, index: done + 1, log: log) { return finish("action=\(action) \(failure)") }
+                    if let failure = try await afterInGame(action, index: done + 1, next: actions[(i + 1)...]) { return finish(failure) }
                     if AppRestart.shared.restarting { return }
                 case "web":
                     // A web page the running game opened (Dev/WebSheetDriver.swift).
                     guard TitleLaunch.shared.running || GameWebSheet.shared.isUp else {
                         return finish("action=\(action) refused: no game is running")
                     }
-                    if let failure = await WebSheetDriver.run(id, log: log) { return finish("action=\(action) failed: \(failure)") }
-                    if let failure = await afterInGame(action, index: done + 1, next: actions[(i + 1)...]) { return finish(failure) }
+                    if let failure = try await WebSheetDriver.run(id, log: log) { return finish("action=\(action) failed: \(failure)") }
+                    if let failure = try await afterInGame(action, index: done + 1, next: actions[(i + 1)...]) { return finish(failure) }
                     if AppRestart.shared.restarting { return }
                 case "set":
-                    let kv = id.split(separator: "=", maxSplits: 1).map(String.init)
+                    // KEY= keeps its empty value: "" (set:controls.suggestedLayoutOffered= forgets the offers).
+                    let kv = id.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false).map(String.init)
                     guard kv.count == 2, !kv[0].isEmpty else { return finish("action=\(action) refused: not set:<key>=<value>") }
                     let value: Any = kv[1] == "true" ? true : kv[1] == "false" ? false : Int(kv[1]).map { $0 as Any } ?? kv[1]
                     DriverUndo.willSet(kv[0])
@@ -359,23 +714,27 @@ enum UIDriver {
                     case "open-settings":
                         // The code appears once Bonjour starts (after any readiness check).
                         for _ in 0..<120 where OnDevicePairing.shared.code == nil {
-                            try? await Task.sleep(for: .milliseconds(250))
+                            try await pause(.milliseconds(250))
                         }
                         guard OnDevicePairing.shared.code != nil else { return finish("action=\(action) failed: no pairing code") }
+                        // The pairing code window floats over iOS Settings: Playport leaves.
+                        // An intentional handoff ends this batch; it never comes back on its own.
                         OnDevicePairing.shared.openSettings()
+                        batch.cancel("intentional handoff to iOS Settings for the pairing code; new session required")
+                        return
                     case "cancel": setup.cancel()
                     case "wait":
-                        while setup.isActive { try? await Task.sleep(for: .milliseconds(250)) }
+                        while setup.isActive { try await pause(.milliseconds(250)) }
                         guard setup.phase == .ready else { return finish("action=\(action) failed: setup did not complete") }
                     default: return finish("action=\(action) refused: unknown JIT setup action")
                     }
-                    if id == "setup" || id == "pair" { try? await Task.sleep(for: .seconds(3)) }
+                    if id == "setup" || id == "pair" { try await pause(.seconds(3)) }
                 case "probe":
                     let probe = HelperLifetimeProbe.shared
                     switch id {
                     case "helper-exit", "helper-kill", "helper-exit-hold", "helper-kill-hold":
                         guard done + 1 == actions.count else { return finish("action=\(action) refused: it must be the last action") }
-                        if let failure = await probe.run(id.hasPrefix("helper-exit") ? .exit : .kill, hold: id.hasSuffix("-hold")) {
+                        if let failure = try await checked({ await probe.run(id.hasPrefix("helper-exit") ? .exit : .kill, hold: id.hasSuffix("-hold")) }) {
                             return finish("action=\(action) failed: \(failure)")
                         }
                     case "relaunch":
@@ -390,12 +749,12 @@ enum UIDriver {
                         AppNavigation.shared.pageSection = "pairing"
                         // Existing credentials trigger a readiness check at launch.
                         // Wait for it rather than silently refusing the probe.
-                        while BuiltInJitStatus.shared.busy { try? await Task.sleep(for: .milliseconds(250)) }
+                        while BuiltInJitStatus.shared.busy { try await pause(.milliseconds(250)) }
                         OnDevicePairing.shared.start()
                         guard OnDevicePairing.shared.busy else {
                             return finish("action=\(action) failed: \(OnDevicePairing.shared.status)")
                         }
-                        try? await Task.sleep(for: .seconds(3))
+                        try await pause(.seconds(3))
                         log("on-device pairing probe: \(OnDevicePairing.shared.status)")
                     case "pairing-cancel":
                         OnDevicePairing.shared.stop()
@@ -403,12 +762,12 @@ enum UIDriver {
                         // pp ui relaunches the app. Keep pairing and use in this
                         // same run: credentials intentionally exist only in memory.
                         let pairing = OnDevicePairing.shared
-                        while pairing.busy { try? await Task.sleep(for: .milliseconds(250)) }
+                        while pairing.busy { try await pause(.milliseconds(250)) }
                         guard pairing.hasNewPairing else {
                             return finish("action=\(action) failed: no completed pairing in this run")
                         }
                         pairing.useNewPairing()
-                        while BuiltInJitStatus.shared.busy { try? await Task.sleep(for: .milliseconds(250)) }
+                        while BuiltInJitStatus.shared.busy { try await pause(.milliseconds(250)) }
                         guard BuiltInJitStatus.shared.status == "ready" else {
                             return finish("action=\(action) failed: generated pairing is not ready")
                         }
@@ -416,123 +775,310 @@ enum UIDriver {
                         guard let n = Int(s.dropFirst("settings-url-".count)), SettingsLink.probed.indices.contains(n) else {
                             return finish("action=\(action) refused: no such Settings link")
                         }
-                        let opened = await UIApplication.shared.open(SettingsLink.probed[n])
+                        let opened = try await checked({ await UIApplication.shared.open(SettingsLink.probed[n]) })
                         log("settings link \(n) \(SettingsLink.probed[n].absoluteString): opened=\(opened)")
+                        guard opened else { return finish("action=\(action) failed: Settings did not open link \(n)") }
+                        // A Settings link leaves Playport: an intentional handoff, not a resumable pause.
+                        batch.cancel("intentional handoff to iOS Settings (link \(n)); new session required")
+                        return
                     case "native-auth":
                         _ = AppNavigation.shared.open("settings")
                         AppNavigation.shared.pageSection = "probes"
-                        if let failure = await NativeAuthProbe.shared.run() {
+                        if let failure = try await checked({ await NativeAuthProbe.shared.run() }) {
                             return finish("action=\(action) failed: \(failure)")
                         }
                     case "helper-report":
-                        log("probe report: \(await probe.report())")
+                        log("probe report: \(try await checked({ await probe.report() }))")
+                    case "memory-64", "memory-2048", "memory-4096":
+                        _ = AppNavigation.shared.open("settings")
+                        AppNavigation.shared.pageSection = "probes"
+                        guard let mb = Int(id.dropFirst("memory-".count)), try await checked({ await SharedMemoryProbe.shared.run(mb: mb) }) else {
+                            return finish("action=\(action) failed: \(SharedMemoryProbe.shared.status)")
+                        }
+                        log("shared RAM probe: \(SharedMemoryProbe.shared.status)")
+                    case "memory-donor-tagged-2048", "memory-donor-tagged-4096",
+                         "memory-donor-purgeable-2048", "memory-donor-purgeable-4096":
+                        _ = AppNavigation.shared.open("settings")
+                        AppNavigation.shared.pageSection = "probes"
+                        let purgeable = id.hasPrefix("memory-donor-purgeable-")
+                        guard let mb = Int(id.split(separator: "-").last ?? ""),
+                              try await checked({ await SharedMemoryProbe.shared.runDonor(mb: mb, purgeable: purgeable) }) else {
+                            return finish("action=\(action) failed: \(SharedMemoryProbe.shared.status)")
+                        }
+                        log("donor RAM probe: \(SharedMemoryProbe.shared.status)")
+                    case let s where s.hasPrefix("memory-donors-"):
+                        _ = AppNavigation.shared.open("settings")
+                        AppNavigation.shared.pageSection = "probes"
+                        guard let mb = Int(s.dropFirst("memory-donors-".count)), SharedMemoryProbe.donorTotals.contains(mb) else {
+                            return finish("action=\(action) refused: not a donor pool total")
+                        }
+                        guard try await checked({ await SharedMemoryProbe.shared.runDonors(mb: mb) }) else {
+                            return finish("action=\(action) failed: \(SharedMemoryProbe.shared.status)")
+                        }
+                        log("donor RAM pool probe: \(SharedMemoryProbe.shared.status)")
+                    case "memory-pool-zero":
+                        _ = AppNavigation.shared.open("settings")
+                        AppNavigation.shared.pageSection = "probes"
+                        guard try await checked({ await SharedMemoryProbe.shared.runPoolZero() }) else {
+                            return finish("action=\(action) failed: \(SharedMemoryProbe.shared.status)")
+                        }
+                        log("donor pool zeroing: \(SharedMemoryProbe.shared.status)")
+                    case "memory-pool-gpu":
+                        _ = AppNavigation.shared.open("settings")
+                        AppNavigation.shared.pageSection = "probes"
+                        guard try await checked({ await SharedMemoryProbe.shared.runPoolGPU() }) else {
+                            return finish("action=\(action) failed: \(SharedMemoryProbe.shared.status)")
+                        }
+                        log("donor pool Metal buffers: \(SharedMemoryProbe.shared.status)")
+                    case "memory-pool-verify":
+                        guard try await checked({ await SharedMemoryProbe.shared.verifyPool() }) else {
+                            return finish("action=\(action) failed: \(SharedMemoryProbe.shared.status)")
+                        }
+                        log("donor RAM pool: \(SharedMemoryProbe.shared.status)")
                     default:
                         return finish("action=\(action) refused: unknown probe")
                     }
+                case "background":
+                    guard let seconds = Int(id), (10...600).contains(seconds) else {
+                        return finish("action=\(action) refused: not background:<seconds 10-600>")
+                    }
+                    let app = UIApplication.shared
+                    // Intentional handoff, not permission to reactivate or resume this queue.
+                    RunEvents.emit("ui-background", ["seconds": seconds, "pid": Int(getpid())])
+                    log("background \(seconds) s: opening Settings")
+                    guard await app.open(URL(string: UIApplication.openSettingsURLString)!) else {
+                        return finish("action=\(action) failed: Settings did not open")
+                    }
+                    batch.cancel("intentional background handoff to Settings; new session required")
+                    return
+                case "forget-launcher-window":
+                    guard let launcher = PublisherLauncher.named(id), launcher.windowSettingsFile != nil else {
+                        return finish("action=\(action) refused: \(id) is not a launcher with window settings")
+                    }
+                    guard !TitleLaunch.shared.running else { return finish("action=\(action) refused: a launch is running") }
+                    if let failure = LauncherOpen.forgetWindowSettings(launcher) { return finish("action=\(action) failed: \(failure)") }
                 case "uninstall":
-                    if let failure = await uninstall(id) { return finish("action=\(action) failed: \(failure)") }
+                    if let failure = try await uninstall(id) { return finish("action=\(action) failed: \(failure)") }
                 case "verify":
                     library.verify(id)
-                    while library.verifying.contains(id) { try? await Task.sleep(for: .milliseconds(250)) }
+                    while library.verifying.contains(id) { try await pause(.milliseconds(250)) }
                     if let v = library.title(id)?.lastVerification, library.verifyErrors[id] == nil {
                         log("verify \(id): \(v.files - v.bad)/\(v.files) OK, \(v.unlisted) unlisted")
                     } else {
                         return finish("action=\(action) failed: \(library.verifyErrors[id] ?? "no result")")
                     }
-                case "play":
-                    do {
-                        guard try await library.play(id) else {
-                            if case .cloud = PadModal.shared.content {
-                                try? await Task.sleep(for: .milliseconds(1000))   // the screen drawn, for a screenshot
+                case "repair":
+                    if let failure = try await repair(id) { return finish("action=\(action) failed: \(failure)") }
+                case "play", "open-launcher":
+                    // open-launcher:ID is Settings › Launchers' Open (UI/LaunchersSettings.swift), followed as a play.
+                    let launcher = parts[0] == "open-launcher" ? PublisherLauncher.named(id) : nil
+                    if parts[0] == "open-launcher", launcher == nil {
+                        return finish("action=\(action) refused: \(id) is not a launcher (\(PublisherLauncher.all.map(\.id).joined(separator: ", ")))")
+                    }
+                      do {
+                        var started = try await checked {
+                            if let launcher { await LauncherOpen.open(launcher) } else { try await library.play(id) }
+                        }
+                        // A Battle.net copy whose Play found an update (PLA-521): followed through
+                        // Downloads to the game's start.
+                        if !started, launcher == nil, let followed = try await battleNetUpdateThenPlay(id) {
+                            switch followed {
+                            case let .failed(why): return finish("action=\(action) failed: \(why)")
+                            case .started: started = true
+                            }
+                        }
+                        guard started else {
+                            if launcher != nil {
+                                return finish("action=\(action) refused: not installed, or a launch is running or Playport needs a restart")
+                            }
+                            try checkpoint()
+                        if case .cloud = PadModal.shared.content {
+                                try await pause(.milliseconds(1000))   // the screen drawn, for a screenshot
                                 return finish("action=\(action) refused: \(PadModal.shared.summary ?? "cloud conflict"): "
                                               + "the Cloud save conflict screen asks which saves to keep")
                             }
+                            // A Battle.net copy's first Play: the notice is up (notice: answers it).
+                            if case .notice? = library.title(id).flatMap({ BattleNetPlay.decide(.init(copy: $0)) }) {
+                                try await pause(.milliseconds(1000))   // the notice drawn, for a screenshot
+                                return finish("action=\(action) refused: the ban-risk notice asks first; "
+                                              + "notice:\(id)=accept or notice:\(id)=decline answers it as the player does")
+                            }
+                            // A Battle.net copy whose client is not the x64 one: its refusal is up.
+                            if case .picker = PadModal.shared.content {
+                                try await pause(.milliseconds(1000))
+                                return finish("action=\(action) refused: \(PadModal.shared.summary ?? "a picker")")
+                            }
                             return finish("action=\(action) refused: a launch is running or Playport needs a restart")
                         }
-                        log("play \(id): started")
-                    } catch {
+                        try checkpoint()
+                    log("\(parts[0]) \(id): started")
+                      } catch {
                         return finish("action=\(action) failed: \(error)")
                     }
                     // Actions for the running game (wait:, menu:) go on while it runs.
-                    if done + 1 < actions.count, !inGame(actions[i + 1]) {
-                        let launch = TitleLaunch.shared
-                        while launch.running { try? await Task.sleep(for: .milliseconds(250)) }
-                        if AppRestart.shared.restarting {
-                            // The restarted process runs the rest (DriverContinuation, saved as it asks).
-                            RunEvents.emit("ui-action", ["action": action, "result": "ok", "index": done + 1, "restart": true])
-                            log("play \(id): ended; Playport restarts, and the new process goes on")
-                            return
-                        }
-                        try? await Task.sleep(for: .milliseconds(1500))   // the alert drawn, for a screenshot
-                        log("play \(id): ended without starting the runtime: \(launch.message?.title ?? "no message")"
-                            + (launch.message?.step.map { " (failed at \(LaunchProgress.stepName($0)))" } ?? ""))
+                    if try await followPlay(action, "\(parts[0]) \(id)", index: done, next: actions[(i + 1)...]) { return }
+                case "notice":
+                    switch try await riskNotice(id) {
+                    case let .failed(why): return finish("action=\(action) failed: \(why)")
+                    case .declined: break
+                    case .started:
+                        if try await followPlay(action, "notice \(id)", index: done, next: actions[(i + 1)...]) { return }
                     }
                 default:
                     return finish("action=\(action) refused: unknown action")
                 }
-                done += 1
-                RunEvents.emit("ui-action", ["action": action, "result": "ok", "index": done])
-                if stepped { await waitForStep(done) }
-            }
-            finish("ok actions=\(actions.count)")
+            }, acknowledge: { index, action in
+                RunEvents.emit("ui-action", ["action": action, "result": "ok", "index": index])
+            }, step: { index in
+                if stepped { try await waitForStep(index) }
+            })
+            // A planned replacement may still lose foreground before it exits.
+            // Stay cancellation-responsive; never disarm the saved queue's revocation.
+            try await batch.waitForHandoff()
+            if !batch.ended { finish("ok actions=\(actions.count)") }
+        } catch {
+            batch.cancel("\(error)")
         }
     }
 
     /// An action that acts on the running game, which a play: does not wait past.
     static func inGame(_ action: String) -> Bool {
         action.hasPrefix("menu:") || action.hasPrefix("wait:") || action.hasPrefix("web:") || action.hasPrefix("tap:")
+            || action.hasPrefix("touch:") || action.hasPrefix("gesture:") || action.hasPrefix("gyro:") || action.hasPrefix("suggest:")
+            || action.hasPrefix("textbar:")
             || (action.hasPrefix("pad:") && InGameMenu.shared.isOpen)
+    }
+
+    /// After a Play started: unless the next action is for the running game, waits for the game's
+    /// end. True once Playport restarts after it (the ui-action is sent here; the new process runs
+    /// the rest), so the caller returns.
+    private static func followPlay(_ action: String, _ label: String, index: Int, next: ArraySlice<String>) async throws -> Bool {
+        guard let first = next.first, !inGame(first) else { return false }
+        let launch = TitleLaunch.shared
+        while launch.running { try await pause(.milliseconds(250)) }
+        if AppRestart.shared.restarting {
+            try checkpoint()
+            batch.handoff()
+            // The restarted process runs the rest (DriverContinuation, saved as it asks).
+            RunEvents.emit("ui-action", ["action": action, "result": "ok", "index": index + 1, "restart": true])
+            log("\(label): ended; Playport restarts, and the new process goes on")
+            return true
+        }
+        try await pause(.milliseconds(1500))   // the alert drawn, for a screenshot
+        log("\(label): ended without starting the runtime: \(launch.message?.title ?? "no message")"
+            + (launch.message?.step.map { " (failed at \(LaunchProgress.stepName($0)))" } ?? ""))
+        return false
+    }
+
+    private enum NoticeOutcome {
+        case declined, started
+        case failed(String)
+    }
+
+    /// `<title id>=accept|decline`: an installed Battle.net copy's Play from its page, and the
+    /// ban-risk notice it shows answered as the player does (LibraryModel.askRiskNotice, PLA-514).
+    /// Declined: nothing starts, the copy keeps no acceptance, the page shows the notice's text.
+    /// Accepted: kept with the copy, and the Play goes on (followed as play:).
+    private static func riskNotice(_ spec: String) async throws -> NoticeOutcome {
+        let parts = spec.split(separator: "=", maxSplits: 1).map(String.init)
+        guard parts.count == 2, [LibraryModel.noticeAccept, LibraryModel.noticeDecline].contains(parts[1]) else {
+            return .failed("not notice:<title id>=\(LibraryModel.noticeAccept)|\(LibraryModel.noticeDecline)")
+        }
+        let library = LibraryModel.shared, id = parts[0], accept = parts[1] == LibraryModel.noticeAccept
+        guard let t = library.title(id), let product = BattleNet.product(t.key) else { return .failed("\(id) is not an installed Battle.net copy") }
+        guard case .notice? = BattleNetPlay.decide(.init(copy: t)) else {
+            return .failed("\(id)'s notice was accepted on \(t.riskNoticeAccepted.map { "\($0)" } ?? "?"); its Play does not ask again (play: starts it)")
+        }
+        AppNavigation.shared.openTitle(id)
+        try await pause(.milliseconds(500))
+        guard try await checked({ try await library.play(id) }) == false else { return .failed("Play started without the notice") }
+        let notice = BattleNetPlay.notice(product)
+        guard case let .picker(session) = PadModal.shared.content, session.title == notice.title,
+              let choice = session.options.firstIndex(where: { $0.id == parts[1] }) else {
+            return .failed("no notice showed: \(PadModal.shared.summary ?? "nothing up")")
+        }
+        try await pause(.milliseconds(1000))   // the notice drawn, for a screenshot
+        log("notice \(id): shown, \"\(notice.title)\", cursor on \(session.options[session.cursor].id): \(notice.text)")
+        session.pick(choice)
+        if !accept {
+            try await pause(.milliseconds(1500))   // the page drawn again, for a screenshot
+            if TitleLaunch.shared.running || library.title(id)?.riskNoticeAccepted != nil { return .failed("declined, yet Play started") }
+            log("notice \(id): declined; Play did not start and the copy keeps no acceptance; the page shows the notice's text")
+            return .declined
+        }
+        guard let at = library.title(id)?.riskNoticeAccepted, let play = library.noticePlay else {
+            return .failed("accepted, yet not kept with the copy")
+        }
+        log("notice \(id): accepted at \(at); the Play goes on")
+        guard try await checked({ await play.value }) else {
+            // The Play found an update (PLA-521): followed through Downloads to the game's start.
+            if let followed = try await battleNetUpdateThenPlay(id) {
+                switch followed {
+                case let .failed(why): return .failed("accepted, then \(why)")
+                case .started:
+                    log("notice \(id): started after the update")
+                    return .started
+                }
+            }
+            try await pause(.milliseconds(1500))   // its alert drawn, for a screenshot
+            return .failed("accepted, then the Play did not start: \(PadModal.shared.summary ?? TitleLaunch.shared.message?.title ?? "no message")")
+        }
+        log("notice \(id): started")
+        return .started
     }
 
     /// After an action for the running game: when the actions after it are not
     /// for the game (or menu:quit ended it), wait for the game's end as play:
     /// does. At a restart, the ui-action is sent here and the caller returns;
     /// nil to go on, else the run's failure.
-    private static func afterInGame(_ action: String, index: Int, next: ArraySlice<String>) async -> String? {
+    private static func afterInGame(_ action: String, index: Int, next: ArraySlice<String>) async throws -> String? {
         let launch = TitleLaunch.shared
         let quit = action == "menu:quit"
         guard launch.running, quit || (next.first.map { !inGame($0) } ?? false) else { return nil }
-        while launch.running { try? await Task.sleep(for: .milliseconds(250)) }
+        while launch.running { try await pause(.milliseconds(250)) }
         if AppRestart.shared.restarting {
+            try checkpoint()
+            batch.handoff()
             RunEvents.emit("ui-action", ["action": action, "result": "ok", "index": index, "restart": true])
             log("\(action): the game ended; Playport restarts, and the new process goes on")
             return nil
         }
-        try? await Task.sleep(for: .milliseconds(1500))
+        try await pause(.milliseconds(1500))
         log("\(action): the game ended without a restart: \(launch.message?.title ?? "no message")")
         return nil
     }
 
     /// The UI's install (and, with `pauseAt`, its Pause and Resume); nil when
     /// the title reached the library, else why not.
-    private static func install(_ app: UInt32, pauseAt: Double?) async -> String? {
+    private static func install(_ app: UInt32, pauseAt: Double?) async throws -> String? {
         guard let steam = SteamAccountModel.current else { return "no Steam model" }
         for _ in 0..<600 where steam.state.account == nil || { if case .restoring = steam.state { return true }; return false }() {
-            try? await Task.sleep(for: .milliseconds(100))
+            try await pause(.milliseconds(100))
         }
         guard case .signedIn = steam.state else { return "Steam is not signed in (\(steam.state))" }
         let installs = steam.installs
         // An app outside the owned list (Half-Life 70, reached through another package's depots)
         // is named from its PICS record.
         var name = steam.games.first { $0.id == app }?.info.name ?? "app \(app)"
-        if steam.games.first(where: { $0.id == app }) == nil, let info = try? await steam.appInfo(app) { name = info.name }
+        if steam.games.first(where: { $0.id == app }) == nil,
+           let info = try await checked({ try? await steam.appInfo(app) }) { name = info.name }
         let started = Date()
         log("install \(app) \(name): started")
         installs.install(app, name: name)
         if let pauseAt {
             while let j = installs.jobs[.steam(app)], j.isRunning || j.phase == .queued, (j.fraction ?? 0) < pauseAt {
-                try? await Task.sleep(for: .milliseconds(100))
+                try await pause(.milliseconds(100))
             }
             guard let j = installs.jobs[.steam(app)], j.isRunning else { return "ended before \(Int(pauseAt * 100))% (\(phase(installs.jobs[.steam(app)])))" }
             installs.pause(app)
-            while installs.jobs[.steam(app)]?.isRunning == true { try? await Task.sleep(for: .milliseconds(100)) }
+            while installs.jobs[.steam(app)]?.isRunning == true { try await pause(.milliseconds(100)) }
             let staged = TitleInstaller(layout: installs.layout, session: nil, log: .silent).hasStage(appID: app)
             log("install \(app): paused at \(j.detail ?? "?"); phase=\(phase(installs.jobs[.steam(app)])) stage kept=\(staged)")
             guard staged, installs.jobs[.steam(app)]?.phase == .paused(nil) else { return "pause did not keep a resumable stage" }
             installs.resume(app)
             // Until the resumed run's first progress: where the kept stage put it.
             while let p = installs.jobs[.steam(app)]?.phase, p == .queued || p == .preparing {
-                try? await Task.sleep(for: .milliseconds(100))
+                try await pause(.milliseconds(100))
             }
             log("install \(app): resumed at \(installs.jobs[.steam(app)]?.detail ?? "?") (\(phase(installs.jobs[.steam(app)])))")
         }
@@ -543,11 +1089,11 @@ enum UIDriver {
                 lastLog = Date()
                 log("install \(app): \(j.status) \(j.detail ?? "")")
             }
-            try? await Task.sleep(for: .milliseconds(250))
+            try await pause(.milliseconds(250))
         }
         let library = LibraryModel.shared
         for _ in 0..<600 where library.catalog.titles.first(where: { $0.appID == app }) == nil {
-            try? await Task.sleep(for: .milliseconds(100))
+            try await pause(.milliseconds(100))
         }
         guard let t = library.catalog.titles.first(where: { $0.appID == app }) else { return "done, but not in the library" }
         log(String(format: "install \(app): in the library as \(t.id) [\(t.badge.rawValue)] build=\(t.buildID.map(String.init) ?? "?") "
@@ -555,8 +1101,39 @@ enum UIDriver {
         return nil
     }
 
+    /// The game page's Repair from Steam, which it offers after a check that did not pass (a
+    /// verify: first); nil once the repair's job ended with the files checked OK, else why not.
+    private static func repair(_ id: String) async throws -> String? {
+        let library = LibraryModel.shared
+        guard let t = library.title(id), t.source == .installed, let app = t.appID else { return "\(id) is not a Steam install" }
+        guard let v = t.lastVerification, !v.ok else { return "the page offers no Repair: its last check passed or there is none" }
+        guard let steam = SteamAccountModel.current else { return "no Steam model" }
+        for _ in 0..<600 where steam.state.account == nil || { if case .restoring = steam.state { return true }; return false }() {
+            try await pause(.milliseconds(100))
+        }
+        guard case .signedIn = steam.state else { return "Steam is not signed in (\(steam.state))" }
+        let installs = steam.installs
+        let started = Date()
+        log("repair \(id): started")
+        installs.repair(app, name: t.name)
+        var lastLog = Date()
+        while let j = installs.jobs[.steam(app)] {
+            if case let .paused(reason) = j.phase { return "paused: \(reason ?? "no reason")" }
+            if Date().timeIntervalSince(lastLog) > 30 {
+                lastLog = Date()
+                log("repair \(id): \(j.status) \(j.detail ?? "")")
+            }
+            try await pause(.milliseconds(250))
+        }
+        guard let after = library.title(id)?.lastVerification, after.ok, after.date > started else {
+            return "the repair ended without a passing check"
+        }
+        log(String(format: "repair \(id): \(after.files) files OK after %.0f s", Date().timeIntervalSince(started)))
+        return nil
+    }
+
     /// Add a game with `path` (under Documents) as the picked item; nil once it is in the library.
-    private static func importGame(_ path: String) async -> String? {
+    private static func importGame(_ path: String) async throws -> String? {
         guard !path.split(separator: "/").contains(".."), let installs = SteamAccountModel.current?.installs else {
             return "not a path under Documents, or no download queue"
         }
@@ -564,7 +1141,7 @@ enum UIDriver {
         guard FileManager.default.fileExists(atPath: url.path) else { return "Documents/\(path) is not there" }
         let started = Date()
         log("import \(path): picked")
-        if let refusal = await GameImports.shared.picked(url) { return "refused: \(refusal)" }
+        if let refusal = try await checked({ await GameImports.shared.picked(url) }) { return "refused: \(refusal)" }
         guard let job = installs.order.first(where: { $0.kind == .import && $0.record.source == url.lastPathComponent }) else {
             return "no import job queued"
         }
@@ -576,11 +1153,11 @@ enum UIDriver {
                 lastLog = Date()
                 log("import \(path): \(j.status) \(j.detail ?? "")")
             }
-            try? await Task.sleep(for: .milliseconds(250))
+            try await pause(.milliseconds(250))
         }
         let library = LibraryModel.shared
         let find = { library.catalog.titles.first { $0.installDir.lowercased() == folder.lowercased() } }
-        for _ in 0..<600 where find() == nil { try? await Task.sleep(for: .milliseconds(100)) }
+        for _ in 0..<600 where find() == nil { try await pause(.milliseconds(100)) }
         guard let t = find() else { return "done, but C:\\Games\\\(folder) is not in the library" }
         log(String(format: "import \(path): in the library as \(t.id) [\(t.badge.rawValue)] source=\(t.source.rawValue) "
                     + "store=\(t.store.rawValue) size=\(t.sizeBytes ?? 0) exe=\(t.executable ?? "none") after %.1f s",
@@ -589,11 +1166,11 @@ enum UIDriver {
     }
 
     /// The Epic page's Install (or Update) of `app`; nil once the live build is in the library.
-    private static func installEpic(_ app: String) async -> String? {
+    private static func installEpic(_ app: String) async throws -> String? {
         let epic = EpicAccount.shared
-        for _ in 0..<300 where epic.state == .unknown { try? await Task.sleep(for: .milliseconds(100)) }
+        for _ in 0..<300 where epic.state == .unknown { try await pause(.milliseconds(100)) }
         guard epic.state == .signedIn else { return "Epic Games is not signed in" }
-        if epic.games.isEmpty { await epic.loadGames() }
+        if epic.games.isEmpty { try await checked({ await epic.loadGames() }) }
         guard let installs = SteamAccountModel.current?.installs else { return "no download queue" }
         guard let g = epic.game(app) else { return "Epic does not list \(app) in this account" }
         if let why = epic.refusal(app) { return "refused: \(why)" }
@@ -609,12 +1186,12 @@ enum UIDriver {
                 lastLog = Date()
                 log("install epic-\(app): \(j.status) \(j.detail ?? "")")
             }
-            try? await Task.sleep(for: .milliseconds(250))
+            try await pause(.milliseconds(250))
         }
         let library = LibraryModel.shared
         // The job set the build it installed as the newest; adoption names it once the receipt is read.
         for _ in 0..<600 where library.title(key.titleID).map({ $0.storeVersion != epic.newest[app] }) ?? true {
-            try? await Task.sleep(for: .milliseconds(100))
+            try await pause(.milliseconds(100))
         }
         guard let t = library.title(key.titleID) else { return "done, but not in the library" }
         log(String(format: "install epic-\(app): in the library as \(t.id) [\(t.badge.rawValue)] build=\(t.storeVersion ?? "?") "
@@ -623,14 +1200,276 @@ enum UIDriver {
         return nil
     }
 
+    /// Whether the Battle.net store offers `key`'s product, asking Blizzard when nothing is known yet.
+    private static func battleNetOffered(_ key: StoreGameKey) async throws -> Bool {
+        let store = BattleNetStore.shared
+        if let p = BattleNet.product(key), store.listing(p) == nil { try await checked({ await store.refresh(force: true) }) }
+        return store.offered(key) != nil
+    }
+
+    /// `bnet-<code>[=<region>]`: the product's page and its region picker, or the picker's choice.
+    private static func battleNetRegion(_ spec: String) async throws -> String? {
+        let parts = spec.split(separator: "=", maxSplits: 1).map(String.init)
+        guard let key = StoreGameKey(titleID: parts[0]), let p = BattleNet.product(key) else { return "\(parts[0]) is not a Battle.net product" }
+        if LibraryModel.shared.title(key.titleID) != nil { return try await battleNetInstalledRegion(key, p, parts.count > 1 ? parts[1] : nil) }
+        guard try await battleNetOffered(key) else { return "\(key.id) is not offered (\(BattleNetStore.shared.error ?? "no x64 client"))" }
+        let store = BattleNetStore.shared
+        AppNavigation.shared.openGame(.store(key))
+        try await pause(.milliseconds(500))
+        if parts.count > 1 {
+            guard let r = StoreRegion(rawValue: parts[1]) else { return "\(parts[1]) is not a store region" }
+            store.pick(p, region: r)
+            try await checked({ await store.loadSizes(p) })
+            log("region \(key.titleID): \(store.region(p).rawValue) (phone: \(store.phoneRegion.rawValue)), language \(store.locale(p)), "
+                + "download \(store.listing(p)?.sizes?.download ?? 0), needs \(store.needed(p) ?? 0)")
+        } else {
+            store.pickRegion(p)
+            log("region \(key.titleID): picker open at \(store.region(p).rawValue) (phone: \(store.phoneRegion.rawValue))")
+        }
+        try await pause(.milliseconds(1000))
+        return nil
+    }
+
+    /// An installed product's page, its region and language read from its `.build.info`.
+    private static func openInstalledBattleNet(_ key: StoreGameKey, _ p: BattleNetProduct) async throws -> BattleNetInstalled.Choice? {
+        let model = BattleNetInstalled.shared
+        AppNavigation.shared.openTitle(key.titleID)
+        try await pause(.milliseconds(500))
+        model.load(p)
+        for _ in 0..<50 where model.current[p] == nil { try await pause(.milliseconds(100)) }
+        return model.current[p]
+    }
+
+    /// The installed install's `.build.info` region and locale, read again from C:\Games.
+    private static func installedChoice(_ key: StoreGameKey, _ p: BattleNetProduct) -> String {
+        guard let t = LibraryModel.shared.title(key.titleID),
+              let c = BattleNet.installedChoice(p, folder: LibraryModel.paths.layout.gamesRoot.appendingPathComponent(t.installDir)) else { return "unreadable" }
+        return "\(c.region.rawValue)/\(c.locale)"
+    }
+
+    /// `region:` on an installed product: its page's Region picker open, or `=<r>` changed in
+    /// place; fails when a download starts or `.build.info` does not say `<r>` afterwards.
+    private static func battleNetInstalledRegion(_ key: StoreGameKey, _ p: BattleNetProduct, _ region: String?) async throws -> String? {
+        let model = BattleNetInstalled.shared
+        guard let before = try await openInstalledBattleNet(key, p) else { return "\(key.titleID): no readable .build.info" }
+        guard let region else {
+            model.pickRegion(p)
+            log("region \(key.titleID): installed, picker open at \(before.region.rawValue)")
+            try await pause(.milliseconds(1000))
+            return nil
+        }
+        guard let r = StoreRegion(rawValue: region) else { return "\(region) is not a store region" }
+        let installs = SteamAccountModel.current?.installs
+        let started = Date()
+        if let why = await model.changeRegion(p, to: r) { return why }
+        let ms = Int(Date().timeIntervalSince(started) * 1000)
+        if let j = installs?.jobs[key] { return "a download started (\(phase(j)))" }
+        let now = installedChoice(key, p)
+        log("region \(key.titleID): installed \(before.region.rawValue) → \(r.rawValue) in \(ms) ms, no download; .build.info \(now)")
+        guard now.hasPrefix(r.rawValue + "/") else { return ".build.info says \(now)" }
+        try await pause(.milliseconds(1000))
+        return nil
+    }
+
+    /// `bnet-<code>[=<locale>]`: an installed product's page with its Language picker open, or
+    /// `<locale>` downloaded through Downloads; nil once Play shows again and `.build.info` says it.
+    private static func battleNetLocale(_ spec: String) async throws -> String? {
+        let parts = spec.split(separator: "=", maxSplits: 1).map(String.init)
+        guard let key = StoreGameKey(titleID: parts[0]), let p = BattleNet.product(key) else { return "\(parts[0]) is not a Battle.net product" }
+        let model = BattleNetInstalled.shared, library = LibraryModel.shared
+        guard library.title(key.titleID) != nil else { return "\(key.titleID) is not installed" }
+        guard let installs = SteamAccountModel.current?.installs else { return "no download queue" }
+        guard let before = try await openInstalledBattleNet(key, p) else { return "\(key.titleID): no readable .build.info" }
+        guard parts.count > 1 else {
+            model.pickLanguage(p, downloads: installs)
+            try await pause(.milliseconds(1500))
+            log("locale \(key.titleID): installed in \(before.locale), picker open")
+            return nil
+        }
+        let locale = parts[1]
+        let shipped = await model.locales(p)
+        guard shipped.contains(locale) else { return "\(p.code) does not ship \(locale) (\(shipped.joined(separator: " ")))" }
+        if let why = model.changeLanguage(p, to: locale, downloads: installs) { return why }
+        let started = Date()
+        func playShown() -> Bool { library.title(key.titleID) != nil && installs.jobs[key] == nil }
+        var lastLog = Date()
+        while let j = installs.jobs[key] {
+            if case let .paused(reason) = j.phase { return "paused: \(reason ?? "no reason")" }
+            if Date().timeIntervalSince(lastLog) > 30 {
+                lastLog = Date()
+                log("locale \(key.titleID): \(j.status) \(j.detail ?? "")")
+            }
+            try await pause(.milliseconds(250))
+        }
+        let now = installedChoice(key, p)
+        let t = library.title(key.titleID)
+        let receipt = LibraryModel.paths.layout.storeReceipts().first { $0.key == key }
+        log("locale \(key.titleID): installed \(before.locale) → \(locale) after \(Int(Date().timeIntervalSince(started))) s; .build.info \(now); "
+            + "receipt files=\(receipt?.files ?? 0) bytes=\(receipt?.bytes ?? 0); play=\(playShown() ? "shown" : "hidden")")
+        guard now.hasSuffix("/" + locale) else { return ".build.info says \(now)" }
+        guard playShown(), t?.canPlay == true else { return "Play is not available after the download" }
+        return nil
+    }
+
+    /// `bnet-<code>[=install]`: an installed product's page and its Check for update, with what it
+    /// found logged (a failed check too: the page shows it). `=install` also queues the update it
+    /// found and waits until the receipt and `.build.info` name the new version, the copy's client
+    /// is the x64 one (an install from before decision 0177 gets it by an update at its own build)
+    /// and Play shows again; it fails when the check failed or found nothing to update.
+    private static func battleNetUpdate(_ spec: String) async throws -> String? {
+        let parts = spec.split(separator: "=", maxSplits: 1).map(String.init)
+        guard let key = StoreGameKey(titleID: parts[0]), let p = BattleNet.product(key) else { return "\(parts[0]) is not a Battle.net product" }
+        let model = BattleNetInstalled.shared, library = LibraryModel.shared
+        guard library.title(key.titleID) != nil else { return "\(key.titleID) is not installed" }
+        guard let installs = SteamAccountModel.current?.installs else { return "no download queue" }
+        if let j = installs.jobs[key] { return "a download of \(key.titleID) is queued (\(phase(j)))" }
+        guard try await openInstalledBattleNet(key, p) != nil else { return "\(key.titleID): no readable .build.info" }
+        func installed() -> String { installedVersion(key, p) }
+        let before = installed()
+        let started = Date()
+        let found = try await checked({ await model.checkUpdate(p) })
+        let ms = Int(Date().timeIntervalSince(started) * 1000)
+        switch found {
+        case .current:
+            log("update \(key.titleID): \(before) is current (checked in \(ms) ms)")
+        case let .available(version, bytes):
+            log("update \(key.titleID): \(before) → \(version) available, \(bytes) bytes to write, needs "
+                + "\(BattleNet.spaceNeeded(update: bytes)), free \(library.freeBytes ?? 0) (checked in \(ms) ms)")
+        case let .unreachable(why):
+            log("update \(key.titleID): the check failed after \(ms) ms: \(why)")
+        case .updated:
+            break
+        }
+        try await pause(.milliseconds(1000))   // the page drawn with the result, for a screenshot
+        guard parts.count > 1 else { return nil }
+        guard case let .available(version, _) = found else { return "no update to install (\(found))" }
+        if let why = model.update(p, downloads: installs) { return "refused: \(why)" }
+        var lastLog = Date()
+        while let j = installs.jobs[key] {
+            if case let .paused(reason) = j.phase { return "paused: \(reason ?? "no reason")" }
+            if Date().timeIntervalSince(lastLog) > 30 {
+                lastLog = Date()
+                log("update \(key.titleID): \(j.status) \(j.detail ?? "")")
+            }
+            try await pause(.milliseconds(250))
+        }
+        await library.settled()
+        let now = installed()
+        let t = library.title(key.titleID)
+        let playShown = t?.canPlay == true && installs.jobs[key] == nil
+        log("update \(key.titleID): \(before) → \(now) after \(Int(Date().timeIntervalSince(started))) s; client \(t?.executable ?? "none") "
+            + "machine \(t?.executableMachine.map { String(format: "0x%04X", $0) } ?? "unread"); play=\(playShown ? "shown" : "hidden")")
+        guard now == "\(version)/\(version)" else { return "receipt/.build.info say \(now), not \(version)" }
+        guard t?.executableMachine == 0x8664 else { return "the copy's client \(t?.executable ?? "none") is not the x64 one" }
+        guard playShown else { return "Play is not available after the update" }
+        return nil
+    }
+
+    /// The receipt's and `.build.info`'s versions of an installed product (`receipt/build.info`).
+    private static func installedVersion(_ key: StoreGameKey, _ p: BattleNetProduct) -> String {
+        let layout = LibraryModel.paths.layout
+        let receipt = layout.storeReceipts().first { $0.key == key }
+        let info = receipt.flatMap { r in
+            (try? Data(contentsOf: layout.gamesRoot.appendingPathComponent(r.installDir).appendingPathComponent(".build.info")))
+                .flatMap { try? BuildInfo.read([UInt8]($0), product: p.code) }
+        }
+        return "\(receipt?.version ?? "?")/\(info?.version ?? "?")"
+    }
+
+    private enum UpdatePlayOutcome {
+        case started
+        case failed(String)
+    }
+
+    /// After a Battle.net Play that queued its update instead of starting (BattleNetPlay's update
+    /// step): the update followed in Downloads, then the Play that goes on once it finished; nil
+    /// when the Play queued no update.
+    private static func battleNetUpdateThenPlay(_ id: String) async throws -> UpdatePlayOutcome? {
+        guard let key = StoreGameKey(titleID: id), let p = BattleNet.product(key), let installs = SteamAccountModel.current?.installs,
+              let first = installs.jobs[key], first.kind == .update, !BattleNet.isLanguageChange(first.record) else { return nil }
+        let library = LibraryModel.shared
+        let before = installedVersion(key, p)
+        log("play \(id): an update was found (\(first.record.bytes ?? 0) bytes to write); following it in Downloads")
+        let started = Date()
+        var lastLog = Date()
+        while let j = installs.jobs[key] {
+            if case let .paused(reason) = j.phase { return .failed("the update paused: \(reason ?? "no reason")") }
+            if Date().timeIntervalSince(lastLog) > 30 {
+                lastLog = Date()
+                log("play \(id): \(j.status) \(j.detail ?? "")")
+            }
+            try await pause(.milliseconds(250))
+        }
+        for _ in 0..<50 where library.updatePlay?.id != id { try await pause(.milliseconds(100)) }
+        guard let play = library.updatePlay, play.id == id else { return .failed("the update finished, and the Play did not go on") }
+        log("play \(id): updated \(before) → \(installedVersion(key, p)) in \(Int(Date().timeIntervalSince(started))) s; the Play goes on")
+        guard try await checked({ await play.task.value }) else {
+            try await pause(.milliseconds(1500))
+            return .failed("updated, then the Play did not start: \(PadModal.shared.summary ?? TitleLaunch.shared.message?.title ?? "no message")")
+        }
+        return .started
+    }
+
+    /// The Battle.net page's Install of `code`, with a Pause and Resume at `pauseAt`; nil once it
+    /// is in the library with Play. Play must not show before the install is complete.
+    private static func installBattleNet(_ code: String, pauseAt: Double?) async throws -> String? {
+        let store = BattleNetStore.shared, library = LibraryModel.shared
+        let key = StoreGameKey(store: .battlenet, id: code)
+        guard let p = BattleNet.product(key) else { return "\(code) is not a Battle.net product" }
+        guard try await battleNetOffered(key) else { return "\(code) is not offered (\(store.error ?? "no x64 client"))" }
+        guard let installs = SteamAccountModel.current?.installs else { return "no download queue" }
+        guard library.title(key.titleID) == nil else { return "\(key.titleID) is already installed" }
+        AppNavigation.shared.openGame(.store(key))
+        try await checked({ await store.loadSizes(p) })
+        log("install \(key.titleID): region \(store.region(p).rawValue), language \(store.locale(p)), download "
+            + "\(store.listing(p)?.sizes?.download ?? 0), needs \(store.needed(p) ?? 0), free \(library.freeBytes ?? 0)")
+        if let why = store.install(p) { return "refused: \(why)" }
+        let started = Date()
+        // Play shows on the page only for a catalogued title with no job.
+        func playShown() -> Bool { library.title(key.titleID) != nil && installs.jobs[key] == nil }
+        if let pauseAt {
+            while let j = installs.jobs[key], j.isRunning || j.phase == .queued, (j.fraction ?? 0) < pauseAt {
+                if playShown() { return "Play showed during the download" }
+                try await pause(.milliseconds(100))
+            }
+            guard let j = installs.jobs[key], j.isRunning else { return "ended before \(Int(pauseAt * 100))% (\(phase(installs.jobs[key])))" }
+            installs.pause(key)
+            while installs.jobs[key]?.isRunning == true { try await pause(.milliseconds(100)) }
+            let staged = store.hasStage(p)
+            log("install \(key.titleID): paused at \(j.detail ?? "?"); phase=\(phase(installs.jobs[key])) stage kept=\(staged) "
+                + "play=\(playShown() ? "shown" : "hidden")")
+            guard staged, installs.jobs[key]?.phase == .paused(nil) else { return "pause did not keep a resumable stage" }
+            if playShown() { return "Play showed while paused" }
+            installs.resume(key)
+            while let ph = installs.jobs[key]?.phase, ph == .queued || ph == .preparing { try await pause(.milliseconds(100)) }
+            log("install \(key.titleID): resumed at \(installs.jobs[key]?.detail ?? "?") (\(phase(installs.jobs[key])))")
+        }
+        var lastLog = Date()
+        while let j = installs.jobs[key] {
+            if case let .paused(reason) = j.phase { return "paused: \(reason ?? "no reason")" }
+            if playShown() { return "Play showed during the download" }
+            if Date().timeIntervalSince(lastLog) > 30 {
+                lastLog = Date()
+                log("install \(key.titleID): \(j.status) \(j.detail ?? "")")
+            }
+            try await pause(.milliseconds(250))
+        }
+        for _ in 0..<600 where library.title(key.titleID) == nil { try await pause(.milliseconds(100)) }
+        guard let t = library.title(key.titleID) else { return "done, but not in the library" }
+        let machine = String(t.executableMachine ?? 0, radix: 16)
+        log("install \(key.titleID): in the library as \(t.id) [\(t.badge.rawValue)] version=\(t.storeVersion ?? "?") size=\(t.sizeBytes ?? 0) "
+            + "exe=\(t.executable ?? "none") machine=0x\(machine) play=\(playShown() ? "shown" : "hidden") after \(Int(Date().timeIntervalSince(started))) s")
+        return nil
+    }
+
     /// The GOG page's Install (or Update) of `spec` (`<id>` or `<id>@<build>`); nil once the build is in the library.
-    private static func installGOG(_ spec: String) async -> String? {
+    private static func installGOG(_ spec: String) async throws -> String? {
         let parts = spec.split(separator: "@", maxSplits: 1).map(String.init)
         let pid = parts[0], build = parts.count > 1 ? parts[1] : nil
         let gog = GOGAccount.shared
-        for _ in 0..<300 where gog.state == .unknown { try? await Task.sleep(for: .milliseconds(100)) }
+        for _ in 0..<300 where gog.state == .unknown { try await pause(.milliseconds(100)) }
         guard gog.state == .signedIn else { return "GOG is not signed in" }
-        if gog.games.isEmpty { await gog.loadGames() }
+        if gog.games.isEmpty { try await checked({ await gog.loadGames() }) }
         guard let installs = SteamAccountModel.current?.installs else { return "no download queue" }
         let key = StoreGameKey(store: .gog, id: pid)
         let name = gog.game(pid)?.title ?? "GOG \(pid)"
@@ -646,7 +1485,7 @@ enum UIDriver {
                 lastLog = Date()
                 log("install gog-\(pid): \(j.status) \(j.detail ?? "")")
             }
-            try? await Task.sleep(for: .milliseconds(250))
+            try await pause(.milliseconds(250))
         }
         let library = LibraryModel.shared
         let ready = {
@@ -654,11 +1493,11 @@ enum UIDriver {
                                         requestedBuild: build, scanning: library.scanning)
         }
         for _ in 0..<600 where !ready() {
-            try? await Task.sleep(for: .milliseconds(100))
+            try await pause(.milliseconds(100))
         }
         guard let t = library.title(key.titleID) else { return "done, but not in the library" }
         guard ready() else { return "done, but library adoption did not finish for build \(build ?? "latest") (found \(t.storeVersion ?? "none"))" }
-        await gog.checkUpdate(pid)
+        try await checked({ await gog.checkUpdate(pid) })
         log(String(format: "install gog-\(pid): in the library as \(t.id) [\(t.badge.rawValue)] build=\(t.storeVersion ?? "?") "
                     + "newest=\(gog.newest[pid] ?? "?") size=\(t.sizeBytes ?? 0) exe=\(t.executable ?? "none") after %.0f s",
                    Date().timeIntervalSince(started)))
@@ -666,14 +1505,15 @@ enum UIDriver {
     }
 
     /// The Install button's call, then on at once; nil when the job is in the queue.
-    private static func queue(_ app: UInt32) async -> String? {
+    private static func queue(_ app: UInt32) async throws -> String? {
         guard let steam = SteamAccountModel.current else { return "no Steam model" }
-        for _ in 0..<600 where steam.games.isEmpty { try? await Task.sleep(for: .milliseconds(100)) }
+        for _ in 0..<600 where steam.games.isEmpty { try await pause(.milliseconds(100)) }
         let installs = steam.installs
         // An app outside the owned list (Half-Life 70, reached through another package's depots)
         // is named from its PICS record.
         var name = steam.games.first { $0.id == app }?.info.name ?? "app \(app)"
-        if steam.games.first(where: { $0.id == app }) == nil, let info = try? await steam.appInfo(app) { name = info.name }
+        if steam.games.first(where: { $0.id == app }) == nil,
+           let info = try await checked({ try? await steam.appInfo(app) }) { name = info.name }
         installs.install(app, name: name)
         guard installs.jobs[.steam(app)] != nil else { return "no job queued" }
         log("queue \(app) \(name): \(queueLine(installs))")
@@ -681,7 +1521,7 @@ enum UIDriver {
     }
 
     /// Until the queue runs `app` with progress; nil when it does.
-    private static func downloading(_ app: UInt32) async -> String? {
+    private static func downloading(_ app: UInt32) async throws -> String? {
         guard let installs = SteamAccountModel.current?.installs else { return "no Steam model" }
         let started = Date()
         while Date().timeIntervalSince(started) < 120 {
@@ -691,7 +1531,7 @@ enum UIDriver {
                 return nil
             }
             if installs.jobs[.steam(app)] == nil { return "no job for \(app) (\(queueLine(installs)))" }
-            try? await Task.sleep(for: .milliseconds(250))
+            try await pause(.milliseconds(250))
         }
         return "not downloading after 120 s (\(queueLine(installs)))"
     }
@@ -722,16 +1562,18 @@ enum UIDriver {
     private static func phase(_ j: Downloads.Job?) -> String { j.map { "\($0.phase)" } ?? "none" }
 
     /// The Uninstall button's call; nil when the folder, record and catalogue entry are gone.
-    private static func uninstall(_ id: String) async -> String? {
+    private static func uninstall(_ id: String) async throws -> String? {
         let library = LibraryModel.shared
         guard let t = library.title(id) else { return "not catalogued" }
         library.uninstall(id)
-        while library.removing.contains(id) { try? await Task.sleep(for: .milliseconds(100)) }
+        while library.removing.contains(id) { try await pause(.milliseconds(100)) }
         if let e = library.removeErrors[id] { return e }
         let layout = LibraryModel.paths.layout
         let folder = FileManager.default.fileExists(atPath: layout.gamesRoot.appendingPathComponent(t.installDir).path)
-        let record = t.appID.map { FileManager.default.fileExists(atPath: layout.receiptFile(appID: $0).path) } ?? false
-        let stage = t.appID.map { TitleInstaller(layout: layout, session: nil, log: .silent).hasStage(appID: $0) } ?? false
+        let record = t.appID.map { FileManager.default.fileExists(atPath: layout.receiptFile(appID: $0).path) }
+            ?? FileManager.default.fileExists(atPath: layout.receiptFile(t.key).path)
+        let stage = t.appID.map { TitleInstaller(layout: layout, session: nil, log: .silent).hasStage(appID: $0) }
+            ?? BattleNet.product(t.key).map(BattleNetStore.shared.hasStage) ?? false
         // A folder another title shares (Steam's shared installdir) stays with that title's files.
         let shared = library.catalog.titles.contains { $0.id != id && $0.installDir.lowercased() == t.installDir.lowercased() }
         log("uninstall \(id): folder present=\(folder)\(shared ? " (shared)" : "") record present=\(record) stage present=\(stage) "
@@ -740,19 +1582,20 @@ enum UIDriver {
     }
 
     /// UI_STEP=1 (the driver's --shot-each-action): after action n, wait until the
-    /// driver has taken its screenshot and pushed Documents/ui-step-<n>, at most 90 s.
+    /// driver has taken its screenshot and pushed Documents/ui-step-<nonce>-<n>, at most 90 s.
     private static let stepped = env["UI_STEP"] == "1"
 
-    private static func waitForStep(_ n: Int) async {
-        let url = WineHostRuntime.documents.appendingPathComponent("ui-step-\(n)")
-        let deadline = Date().addingTimeInterval(90)
-        while !FileManager.default.fileExists(atPath: url.path), Date() < deadline {
-            try? await Task.sleep(for: .milliseconds(200))
-        }
+    private static func waitForStep(_ n: Int) async throws {
+        let url = WineHostRuntime.documents.appendingPathComponent("ui-step-\(TitleMode.nonce)-\(n)")
+        try await batch.step { FileManager.default.fileExists(atPath: url.path) }
         try? FileManager.default.removeItem(at: url)
     }
 
     private static func finish(_ outcome: String) {
+        guard !finished else { return }
+        finished = true
+        batch.end()
+        remaining.removeAll()
         log("done nonce=\(TitleMode.nonce) \(outcome)")
         RunEvents.emit("ui-done", ["outcome": outcome])
     }

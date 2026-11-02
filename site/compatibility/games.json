@@ -1,35 +1,83 @@
 {
-  "comment": "Playport's public compatibility list, shown by site/compatibility/index.html: each title's status from Linear project Compatibility (team PLA). Keep entries sorted by name; tools/tests/test_compat_site.py checks the format.",
-  "updated": "2026-10-13",
+  "comment": "Playport's public compatibility list, shown by site/compatibility/index.html: each title's status from Linear project Compatibility (team PLA), with Works and Playable with issues both shown as runs. Keep entries sorted by name; tools/tests/test_compat_site.py checks the format.",
+  "updated": "2026-11-02",
   "games": [
     {
       "name": "#DRIVE Rally",
       "store": "steam",
       "id": "2494780",
-      "status": "works"
+      "status": "runs"
     },
     {
       "name": "Among Us",
       "store": "steam",
       "id": "945360",
-      "status": "works"
+      "status": "runs"
+    },
+    {
+      "name": "Assassin's Creed: Director's Cut Edition",
+      "store": "steam",
+      "id": "15100",
+      "status": "runs"
+    },
+    {
+      "name": "Baldur's Gate 3",
+      "store": "steam",
+      "id": "1086940",
+      "status": "runs"
     },
     {
       "name": "Baldur's Gate: Enhanced Edition",
       "store": "gog",
       "id": "1207666353",
-      "status": "issues"
+      "status": "runs"
     },
     {
       "name": "BioShock",
       "store": "gog",
       "id": "2022341186",
-      "status": "works"
+      "status": "runs"
+    },
+    {
+      "name": "BioShock Infinite",
+      "store": "steam",
+      "id": "8870",
+      "status": "broken"
+    },
+    {
+      "name": "BioShock Remastered",
+      "store": "steam",
+      "id": "409710",
+      "status": "broken"
+    },
+    {
+      "name": "Blasphemous 2",
+      "store": "steam",
+      "id": "2114740",
+      "status": "runs"
+    },
+    {
+      "name": "BLOCKADE",
+      "store": "steam",
+      "id": "1049800",
+      "status": "broken"
     },
     {
       "name": "Bloodstained: Curse of the Moon",
       "store": "steam",
       "id": "838310",
+      "status": "broken"
+    },
+    {
+      "name": "Bodycam",
+      "store": "steam",
+      "id": "2406770",
+      "status": "broken"
+    },
+    {
+      "name": "Burnout Paradise: The Ultimate Box",
+      "store": "steam",
+      "id": "24740",
       "status": "broken"
     },
     {
@@ -42,7 +90,19 @@
       "name": "Castle Crashers Demo",
       "store": "steam",
       "id": "207100",
-      "status": "works"
+      "status": "runs"
+    },
+    {
+      "name": "Castleborne Survivors",
+      "store": "steam",
+      "id": "4829710",
+      "status": "runs"
+    },
+    {
+      "name": "Castlevania: Belmont's Curse",
+      "store": "steam",
+      "id": "4231820",
+      "status": "runs"
     },
     {
       "name": "Cat Mail Co.",
@@ -54,7 +114,7 @@
       "name": "Cat Mail Co. Demo",
       "store": "steam",
       "id": "4622530",
-      "status": "works"
+      "status": "runs"
     },
     {
       "name": "Catherine Classic",
@@ -63,33 +123,81 @@
       "status": "broken"
     },
     {
+      "name": "Children of Morta",
+      "store": "steam",
+      "id": "330020",
+      "status": "runs"
+    },
+    {
+      "name": "Cookie Clicker",
+      "store": "steam",
+      "id": "1454400",
+      "status": "broken"
+    },
+    {
       "name": "Counter-Strike",
       "store": "steam",
       "id": "10",
-      "status": "issues"
+      "status": "runs"
+    },
+    {
+      "name": "Crimson Desert",
+      "store": "steam",
+      "id": "3321460",
+      "status": "broken"
+    },
+    {
+      "name": "Cuphead",
+      "store": "steam",
+      "id": "268910",
+      "status": "broken"
+    },
+    {
+      "name": "Dead Cells",
+      "store": "steam",
+      "id": "588650",
+      "status": "broken"
+    },
+    {
+      "name": "Dead Island Definitive Edition",
+      "store": "steam",
+      "id": "383150",
+      "status": "broken"
     },
     {
       "name": "Death's Door",
       "store": "epic",
-      "status": "issues"
+      "status": "runs"
+    },
+    {
+      "name": "Detroit: Become Human",
+      "store": "steam",
+      "id": "1222140",
+      "status": "broken"
     },
     {
       "name": "DiRT 3 Complete Edition",
       "store": "steam",
       "id": "321040",
-      "status": "issues"
+      "status": "runs"
+    },
+    {
+      "name": "Drunken Wrestlers 2",
+      "store": "steam",
+      "id": "667530",
+      "status": "broken"
     },
     {
       "name": "Duck Paradox",
       "store": "gog",
       "id": "1816031813",
-      "status": "works"
+      "status": "runs"
     },
     {
       "name": "En Garde!",
       "store": "steam",
       "id": "1654660",
-      "status": "issues"
+      "status": "runs"
     },
     {
       "name": "Final Fantasy III (3D Remake)",
@@ -101,7 +209,13 @@
       "name": "Final Fantasy VII Remake Intergrade",
       "store": "steam",
       "id": "1462040",
-      "status": "issues"
+      "status": "runs"
+    },
+    {
+      "name": "Final Fantasy XV Windows Edition",
+      "store": "steam",
+      "id": "637650",
+      "status": "broken"
     },
     {
       "name": "Football Manager 2022",
@@ -111,7 +225,12 @@
     {
       "name": "Football Manager 2022 Resource Archiver",
       "store": "epic",
-      "status": "works"
+      "status": "runs"
+    },
+    {
+      "name": "Football Manager 2024",
+      "store": "epic",
+      "status": "broken"
     },
     {
       "name": "Geometry Dash",
@@ -120,10 +239,46 @@
       "status": "broken"
     },
     {
+      "name": "Grand Theft Auto V Legacy",
+      "store": "steam",
+      "id": "271590",
+      "status": "broken"
+    },
+    {
+      "name": "Graveyard Keeper 2",
+      "store": "steam",
+      "id": "4358690",
+      "status": "runs"
+    },
+    {
+      "name": "GTR 2 FIA GT Racing Game",
+      "store": "steam",
+      "id": "8790",
+      "status": "broken"
+    },
+    {
+      "name": "Guacamelee! Super Turbo Championship Edition",
+      "store": "steam",
+      "id": "275390",
+      "status": "broken"
+    },
+    {
+      "name": "Hades",
+      "store": "steam",
+      "id": "1145360",
+      "status": "broken"
+    },
+    {
       "name": "Half-Life",
       "store": "steam",
       "id": "70",
-      "status": "issues"
+      "status": "runs"
+    },
+    {
+      "name": "Half-Life 2",
+      "store": "steam",
+      "id": "220",
+      "status": "broken"
     },
     {
       "name": "Helldivers 2",
@@ -132,15 +287,33 @@
       "status": "broken"
     },
     {
+      "name": "Hello Neighbor Pre-Alpha",
+      "store": "steam",
+      "id": "671210",
+      "status": "broken"
+    },
+    {
       "name": "Hollow Knight",
       "store": "steam",
       "id": "367520",
-      "status": "works"
+      "status": "runs"
+    },
+    {
+      "name": "Hollow Knight: Silksong",
+      "store": "steam",
+      "id": "1030300",
+      "status": "runs"
     },
     {
       "name": "House of Golf 2",
       "store": "epic",
-      "status": "issues"
+      "status": "runs"
+    },
+    {
+      "name": "IGTAP: an Incremental Game That's Also a Platformer",
+      "store": "steam",
+      "id": "4364730",
+      "status": "runs"
     },
     {
       "name": "Jurassic World Evolution",
@@ -148,10 +321,34 @@
       "status": "broken"
     },
     {
+      "name": "Keep Talking and Nobody Explodes",
+      "store": "steam",
+      "id": "341800",
+      "status": "broken"
+    },
+    {
       "name": "Kingdom Come: Deliverance",
       "store": "steam",
       "id": "379430",
-      "status": "issues"
+      "status": "runs"
+    },
+    {
+      "name": "Majesty Gold HD",
+      "store": "steam",
+      "id": "25990",
+      "status": "broken"
+    },
+    {
+      "name": "Mark of the Ninja",
+      "store": "steam",
+      "id": "214560",
+      "status": "broken"
+    },
+    {
+      "name": "Mega Man Zero/ZX Legacy Collection",
+      "store": "steam",
+      "id": "999020",
+      "status": "broken"
     },
     {
       "name": "Megabonk",
@@ -160,28 +357,69 @@
       "status": "broken"
     },
     {
+      "name": "Metal Gear Solid V: The Phantom Pain",
+      "store": "steam",
+      "id": "287700",
+      "status": "broken"
+    },
+    {
+      "name": "Mewgenics",
+      "store": "steam",
+      "id": "686060",
+      "status": "broken"
+    },
+    {
+      "name": "MIO: Memories in Orbit",
+      "store": "steam",
+      "id": "1672810",
+      "status": "runs"
+    },
+    {
+      "name": "Mirror",
+      "store": "steam",
+      "id": "644560",
+      "status": "broken"
+    },
+    {
       "name": "Monster Train",
       "store": "gog",
       "id": "1304291300",
-      "status": "works"
+      "status": "runs"
     },
     {
       "name": "Moonscars",
       "store": "gog",
       "id": "2106173825",
-      "status": "works"
+      "status": "runs"
     },
     {
       "name": "Mortal Kombat Komplete Edition",
       "store": "steam",
       "id": "237110",
-      "status": "issues"
+      "status": "runs"
     },
     {
       "name": "MultiVersus",
       "store": "steam",
       "id": "1818750",
-      "status": "issues"
+      "status": "runs"
+    },
+    {
+      "name": "NARUTO SHIPPUDEN: Ultimate Ninja STORM 4",
+      "store": "steam",
+      "id": "349040",
+      "status": "broken"
+    },
+    {
+      "name": "Need for Speed: Carbon",
+      "store": "other",
+      "status": "broken"
+    },
+    {
+      "name": "Need for Speed: Most Wanted",
+      "store": "steam",
+      "id": "2005",
+      "status": "broken"
     },
     {
       "name": "Need for Speed: The Run",
@@ -189,45 +427,140 @@
       "status": "broken"
     },
     {
+      "name": "NEEDY STREAMER OVERLOAD",
+      "store": "steam",
+      "id": "1451940",
+      "status": "runs"
+    },
+    {
       "name": "Neverwinter Nights Diamond",
       "store": "gog",
       "id": "1207658890",
-      "status": "issues"
+      "status": "runs"
     },
     {
       "name": "Neverwinter Nights: Enhanced Edition",
       "store": "gog",
       "id": "1097893768",
-      "status": "issues"
+      "status": "runs"
     },
     {
       "name": "Oxygen Not Included",
       "store": "steam",
       "id": "457140",
-      "status": "issues"
+      "status": "runs"
+    },
+    {
+      "name": "PEAK",
+      "store": "steam",
+      "id": "3527290",
+      "status": "runs"
+    },
+    {
+      "name": "Persona 3 Reload",
+      "store": "steam",
+      "id": "2161700",
+      "status": "broken"
+    },
+    {
+      "name": "Persona 5 Royal",
+      "store": "steam",
+      "id": "1687950",
+      "status": "broken"
+    },
+    {
+      "name": "Pizza Tower",
+      "store": "steam",
+      "id": "2231450",
+      "status": "broken"
     },
     {
       "name": "Portal 2",
       "store": "steam",
       "id": "620",
-      "status": "works"
+      "status": "runs"
+    },
+    {
+      "name": "Pummel Party",
+      "store": "steam",
+      "id": "880940",
+      "status": "broken"
+    },
+    {
+      "name": "R.E.P.O.",
+      "store": "steam",
+      "id": "3241660",
+      "status": "broken"
+    },
+    {
+      "name": "Red Dead Redemption 2",
+      "store": "steam",
+      "id": "1174180",
+      "status": "runs"
+    },
+    {
+      "name": "Rue Valley",
+      "store": "other",
+      "status": "broken"
+    },
+    {
+      "name": "SANABI",
+      "store": "steam",
+      "id": "1562700",
+      "status": "runs"
+    },
+    {
+      "name": "Senren＊Banka",
+      "store": "steam",
+      "id": "1144400",
+      "status": "broken"
+    },
+    {
+      "name": "Shadows Over Loathing",
+      "store": "steam",
+      "id": "1939160",
+      "status": "runs"
     },
     {
       "name": "Shogun Showdown",
       "store": "gog",
       "id": "1104084973",
-      "status": "works"
+      "status": "runs"
+    },
+    {
+      "name": "Slay the Spire 2",
+      "store": "steam",
+      "id": "2868840",
+      "status": "broken"
+    },
+    {
+      "name": "Sleeping Dogs: Definitive Edition",
+      "store": "steam",
+      "id": "307690",
+      "status": "broken"
     },
     {
       "name": "Snakebird Complete",
       "store": "epic",
-      "status": "works"
+      "status": "runs"
     },
     {
       "name": "Soccer Online: Ball 3D",
       "store": "steam",
       "id": "485610",
-      "status": "works"
+      "status": "runs"
+    },
+    {
+      "name": "Sonic & All-Stars Racing Transformed",
+      "store": "steam",
+      "id": "212480",
+      "status": "broken"
+    },
+    {
+      "name": "Sons Of The Forest",
+      "store": "steam",
+      "id": "1326470",
+      "status": "broken"
     },
     {
       "name": "South Park: The Stick of Truth",
@@ -239,12 +572,54 @@
       "name": "Spelunky",
       "store": "gog",
       "id": "1207659257",
-      "status": "works"
+      "status": "runs"
+    },
+    {
+      "name": "Spelunky 2",
+      "store": "steam",
+      "id": "418530",
+      "status": "broken"
+    },
+    {
+      "name": "STAR WARS Battlefront II (Classic, 2005)",
+      "store": "steam",
+      "id": "6060",
+      "status": "broken"
+    },
+    {
+      "name": "STAR WARS Republic Commando",
+      "store": "steam",
+      "id": "6000",
+      "status": "broken"
+    },
+    {
+      "name": "Stranded & Naked",
+      "store": "steam",
+      "id": "3155980",
+      "status": "broken"
+    },
+    {
+      "name": "Stumble Guys",
+      "store": "steam",
+      "id": "1677740",
+      "status": "broken"
     },
     {
       "name": "Super Meat Boy",
       "store": "epic",
-      "status": "works"
+      "status": "runs"
+    },
+    {
+      "name": "Terraria",
+      "store": "steam",
+      "id": "105600",
+      "status": "broken"
+    },
+    {
+      "name": "The Bagman DEMO",
+      "store": "steam",
+      "id": "4468550",
+      "status": "broken"
     },
     {
       "name": "The Binding of Isaac: Rebirth",
@@ -253,28 +628,68 @@
       "status": "broken"
     },
     {
+      "name": "The Forest",
+      "store": "steam",
+      "id": "242760",
+      "status": "broken"
+    },
+    {
+      "name": "The Happyhills Homicide",
+      "store": "steam",
+      "id": "3278760",
+      "status": "broken"
+    },
+    {
+      "name": "The Witcher 2: Assassins of Kings Enhanced Edition",
+      "store": "steam",
+      "id": "20920",
+      "status": "broken"
+    },
+    {
       "name": "The Witcher 3: Wild Hunt",
       "store": "steam",
       "id": "292030",
-      "status": "issues"
+      "status": "runs"
+    },
+    {
+      "name": "Thronefall",
+      "store": "steam",
+      "id": "2239150",
+      "status": "broken"
     },
     {
       "name": "Tomb Raider",
       "store": "steam",
       "id": "203160",
-      "status": "issues"
+      "status": "runs"
     },
     {
       "name": "Tomb Raider: Anniversary",
       "store": "gog",
       "id": "1202885143",
-      "status": "works"
+      "status": "runs"
+    },
+    {
+      "name": "Tomb Raider: Definitive Edition",
+      "store": "epic",
+      "status": "broken"
+    },
+    {
+      "name": "ULTRAKILL",
+      "store": "steam",
+      "id": "1229490",
+      "status": "broken"
     },
     {
       "name": "Valheim",
       "store": "steam",
       "id": "892970",
-      "status": "issues"
+      "status": "runs"
+    },
+    {
+      "name": "World of Warcraft",
+      "store": "battlenet",
+      "status": "runs"
     }
   ]
 }

@@ -38,18 +38,24 @@ final class WineHostRuntime: @unchecked Sendable {
     /// Acquires the JIT pool (JitProvider), checks it (SelfCheck), starts
     /// wine_host and the session root. The wait for the debugger plus the bless
     /// is the activation cost. pooled runs once the pool is blessed and
-    /// checked, before wine_host_init (the launch screen's step). The
+    /// checked, before wine_host_init (the launch screen's step). memory runs
+    /// after the donor pool (decision 0153), just before wine_host_init, with the
+    /// pool granted in MiB (DonorPool.Installed; 0 without one):
+    /// the Play's memory plan is made there (PlayportKit MemoryPlan). The
     /// presentation switches are TitleScreen's, set before this. selfcheck
     /// names the failed assumption when the pool's self-check stopped the start.
-    func start(poolMB mb: Int, wait: TimeInterval, pooled: () -> Void = {})
+    func start(poolMB mb: Int, wait: TimeInterval, pooled: () -> Void = {},
+               memory: (_ donorPoolMB: Int) -> Void = { _ in })
         -> (ok: Bool, activationSeconds: Double, detail: String, selfcheck: String?) {
         precondition(!poolAcquired, "the session starts once per process")
         guard let runtime = Manifest.runtime else { return (false, 0, "no Runtime in bundle", nil) }
         #if PLAYPORT_RELEASE
         Self.quietRuntime()
         #else
-        // KosmicKrisp's shader-source counts and slow Metal builds (mesa 0016).
-        setenv("MESA_KK_DEBUG", "compile", 0)
+        // KosmicKrisp's shader-source counts and slow Metal builds (mesa 0016), its
+        // live memory by kind every 10 s (mesa 0046), and its GPU time, frames and
+        // present waits every second (mesa 0080, [kk-gpu]).
+        setenv("MESA_KK_DEBUG", "compile,memory,gpu", 0)
         #endif
         let size = mb << 20
         let t0 = Date()
@@ -64,6 +70,9 @@ final class WineHostRuntime: @unchecked Sendable {
         let check = SelfCheck.run(pool: pool)
         guard check.ok else { return (false, activation, "pool \(mb) MiB; selfcheck \(check.name)", check.name) }
         pooled()
+        // The donor pool (decision 0153: dev and release), before Wine starts.
+        let donors = DonorPool.install()
+        memory(donors.poolMB)
         let rc = runtime.path.withCString { rt in
             prefixURL.path.withCString { px in
                 AppLog.path.withCString { lp in
@@ -98,6 +107,18 @@ final class WineHostRuntime: @unchecked Sendable {
         setenv("VKD3D_SHADER_DEBUG", "none", 0)  // its shader compiler, as Proton
     }
     #endif
+
+    /// Starts services.exe, Wine's SCM, for a play that needs Windows services, before its
+    /// prerequisites and title (wine_host_session_services, decision 0107); 0 once it listens.
+    func startServices() -> Int32 {
+        wine_host_session_services(15_000)
+    }
+
+    /// Makes the session root the prefix's running Steam client for a play in client mode
+    /// (wine_host_session_steam_client, decision 0115): ActiveProcess's pid and ActiveUser; 0 once written.
+    func steamClient(accountID: UInt32) -> Int32 {
+        wine_host_session_steam_client(accountID, 5_000)
+    }
 
     /// Starts a title as the session root's child (wine_host_session_launch):
     /// `environment` is set over the root's own for this title only.
@@ -154,9 +175,15 @@ enum Manifest {
     /// only when its builtins were staged under the runtime (GraphicsBackend.runtimeOverlay).
     static func has(_ graphics: GraphicsBackend) -> Bool {
         guard let overlay = graphics.runtimeOverlay else { return true }
+        return hasRuntimeDirectory(overlay)
+    }
+
+    /// Whether this build staged a directory of the runtime (an overlay's: Runtime/vulkan,
+    /// Runtime/vulkan-loader).
+    static func hasRuntimeDirectory(_ name: String) -> Bool {
         guard let runtime else { return false }
         var dir: ObjCBool = false
-        return FileManager.default.fileExists(atPath: runtime.appendingPathComponent(overlay).path, isDirectory: &dir)
+        return FileManager.default.fileExists(atPath: runtime.appendingPathComponent(name).path, isDirectory: &dir)
             && dir.boolValue
     }
 

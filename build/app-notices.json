@@ -38,6 +38,7 @@
         "app",
         "P9-session",
         "P9-url-opener",
+        "P9-steamclient",
         "P7-reg"
       ],
       "licence": "GPL-3.0-or-later with Playport's converter exception",
@@ -201,6 +202,17 @@
       "include": [
         "DXVK-*",
         "khronos-dxvk-*"
+      ]
+    },
+    {
+      "name": "Khronos Vulkan-Loader",
+      "covers": [
+        "P6-vulkan-loader"
+      ],
+      "licence": "Apache-2.0; bundled cJSON MIT; Vulkan-Headers Apache-2.0 OR MIT",
+      "include": [
+        "Vulkan-Loader-*",
+        "Vulkan-Headers-*"
       ]
     },
     {

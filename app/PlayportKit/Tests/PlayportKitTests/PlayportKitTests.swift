@@ -31,8 +31,9 @@ final class CohortTests: XCTestCase {
         XCTAssertEqual(w3.depots.count, 23)
         XCTAssertEqual(w3.executable, #"bin\x64\witcher3.exe"#)
         XCTAssertEqual(w3.installedSize, 41_585_389_035)
-        // docs/evidence/2026-09-25-witcher3-setup.md: the 32 GB reservation needs the boot-time hold.
-        XCTAssertEqual(w3.config, ["jumbo-mb": "32768"])
+        // docs/evidence/2026-09-25-witcher3-setup.md: the 32 GB reservation needs the boot-time hold,
+        // and its 8 GB ask the ml433 cage hold, which has its own key since decision 0129.
+        XCTAssertEqual(w3.config, ["cage-hold": "1", "jumbo-mb": "32768"])
         XCTAssertNoThrow(try TitleConfig.validate(w3.config ?? [:]))
         XCTAssertEqual(w3.screen, "720")   // 1.32 has no render scale; the guest's desktop sets its size
         let list = try XCTUnwrap(cohort.checksumList(named: w3.checksums))
@@ -244,7 +245,7 @@ final class CatalogTests: XCTestCase {
         let plan = try w3.launchPlan(cohort: cohort)
         XCTAssertEqual(plan.exe, #"Games\The Witcher 3\bin\x64\Witcher3.EXE"#)
         XCTAssertEqual(plan.args, [])
-        XCTAssertEqual(plan.config, ["jumbo-mb": "32768"])
+        XCTAssertEqual(plan.config, ["cage-hold": "1", "jumbo-mb": "32768"])
         XCTAssertEqual(plan.screen, "720")
 
         // Without the nested file the pin has no executable, and a directory is not one.
@@ -417,7 +418,7 @@ final class CatalogTests: XCTestCase {
         XCTAssertEqual(classic.title(id: w3.id)?.executable, #"bin\x64\witcher3.exe"#)
         XCTAssertNil(classic.title(id: w3.id)?.checksums)
         let classicPlan = try XCTUnwrap(classic.title(id: w3.id)).launchPlan(cohort: cohort)
-        XCTAssertEqual(classicPlan.config, ["jumbo-mb": "32768"], "keep the exact pinned build's launch requirements")
+        XCTAssertEqual(classicPlan.config, ["cage-hold": "1", "jumbo-mb": "32768"], "keep the exact pinned build's launch requirements")
         XCTAssertEqual(classicPlan.screen, "720")
         XCTAssertEqual(Adoption.scan(games: games, cohort: cohort, receipts: [], previous: classic)
             .title(id: w3.id)?.source, .cohort)
@@ -679,8 +680,8 @@ final class LaunchSettingsTests: XCTestCase {
     }
 
     func testGraphicsBackendIsInheritedLikeTheOtherSettings() {
-        XCTAssertEqual(LaunchSettings.resolve(game: nil, global: LaunchSettings()).graphics, .dxmt)
-        XCTAssertEqual(LaunchSettings.resolve(game: nil, global: LaunchSettings(graphics: .vulkan)).graphics, .vulkan)
+        XCTAssertEqual(LaunchSettings.resolve(game: nil, global: LaunchSettings()).graphics, .vulkan)   // decision 0153
+        XCTAssertEqual(LaunchSettings.resolve(game: nil, global: LaunchSettings(graphics: .dxmt)).graphics, .dxmt)
         // A game's own choice wins either way.
         XCTAssertEqual(LaunchSettings.resolve(game: LaunchSettings(graphics: .dxmt), global: LaunchSettings(graphics: .vulkan)).graphics, .dxmt)
         XCTAssertEqual(LaunchSettings.resolve(game: LaunchSettings(graphics: .vulkan), global: LaunchSettings()).graphics, .vulkan)
@@ -798,7 +799,7 @@ final class FEXProfileTests: XCTestCase {
         XCTAssertEqual(l.ordering, [.tso: true, .halfBarrier: true, .vector: false, .memcpySet: false])
         XCTAssertEqual(l.environment, ["FEX_TSOENABLED": "1", "FEX_HALFBARRIERTSOENABLED": "1",
                                        "FEX_VECTORTSOENABLED": "0", "FEX_MEMCPYSETTSOENABLED": "0",
-                                       "FEX_X87REDUCEDPRECISION": "1", "FEX_MAXINST": "500", "FEX_DISKCACHE": "0"])
+                                       "FEX_X87REDUCEDPRECISION": "1", "FEX_MAXINST": "500", "FEX_DISKCACHE": "1"])
         XCTAssertNil(l.override)
         XCTAssertEqual(l.summary, "tso=1 halfbar=1 vector=0 memcpyset=0")
         // A title with no Steam app ID gets the same.
@@ -857,20 +858,20 @@ final class FEXProfileTests: XCTestCase {
         XCTAssertNil(try! JSONDecoder().decode(LaunchSettings.self, from: Data("{}".utf8)).x87Reduced)
     }
 
-    func testTheGamesPageTurnsTheDiskCacheOn() {
+    func testTheDiskCacheIsOnUnlessTheGamesPageTurnsItOff() {
         let exe = #"C:\Games\The Witcher 3\bin\x64\witcher3.exe"#
         let none = FEXProfile.launch(appID: 292030, exe: exe, ordering: MemoryOrdering())
-        XCTAssertEqual(none.environment["FEX_DISKCACHE"], "0")   // held off (decision 0056)
-        XCTAssertFalse(none.diskCache)
+        XCTAssertEqual(none.environment["FEX_DISKCACHE"], "1")   // Proton's default (decision 0056)
+        XCTAssertTrue(none.diskCache)
         XCTAssertFalse(none.diskCacheChosen)
-        let on = FEXProfile.launch(appID: 292030, exe: exe, ordering: MemoryOrdering(), diskCache: true)
-        XCTAssertEqual(on.environment["FEX_DISKCACHE"], "1")
-        XCTAssertTrue(on.diskCache)
-        XCTAssertTrue(on.diskCacheChosen)
-        let s = try! JSONDecoder().decode(LaunchSettings.self, from: Data(#"{"diskCache":true}"#.utf8))
-        XCTAssertEqual(s.diskCache, true)
+        let off = FEXProfile.launch(appID: 292030, exe: exe, ordering: MemoryOrdering(), diskCache: false)
+        XCTAssertEqual(off.environment["FEX_DISKCACHE"], "0")
+        XCTAssertFalse(off.diskCache)
+        XCTAssertTrue(off.diskCacheChosen)
+        let s = try! JSONDecoder().decode(LaunchSettings.self, from: Data(#"{"diskCache":false}"#.utf8))
+        XCTAssertEqual(s.diskCache, false)
         XCTAssertFalse(s.isEmpty)
-        XCTAssertEqual(LaunchSettings.resolve(game: s, global: LaunchSettings()).diskCache, true)
+        XCTAssertEqual(LaunchSettings.resolve(game: s, global: LaunchSettings()).diskCache, false)
         XCTAssertNil(LaunchSettings.resolve(game: nil, global: s).diskCache)
     }
 
@@ -902,8 +903,9 @@ final class FEXProfileTests: XCTestCase {
         XCTAssertFalse(keys.isEmpty)
         let on = LaunchSettings.resolve(game: keys, global: LaunchSettings())
         XCTAssertEqual(on.runtime, ["vram-mb": "768", "inproc-sync": "1"])
+        // All over every game's keys (decision 0153), the title's cohort jumbo-mb over everyGame's.
         XCTAssertEqual(on.config(over: ["jumbo-mb": "32768", "vram-mb": "2048"]),
-                       ["jumbo-mb": "32768", "vram-mb": "768", "inproc-sync": "1"])
+                       LaunchSettings.everyGameKeys.merging(["jumbo-mb": "32768", "vram-mb": "768", "inproc-sync": "1"]) { _, b in b })
         XCTAssertEqual(LaunchSettings.resolve(game: nil, global: keys).runtime, [:])
         XCTAssertNil(LaunchSettings.runtimeKeys("vram-mb"))
         XCTAssertNil(LaunchSettings.runtimeKeys("a b=1"))
@@ -911,7 +913,7 @@ final class FEXProfileTests: XCTestCase {
         XCTAssertEqual(LaunchSettings.runtimeKeys(""), [:])
     }
 
-    func testGraphicsOptionsSetOnlyTheAllowlistedVariables() {
+    func testGraphicsOptionsSetAnyVariable() {
         // A DXVK option without its variable joins DXVK_CONFIG, as DXVK splits it (at ;).
         XCTAssertEqual(LaunchSettings.graphicsEnvironment("dxvk.tilerMode=False dxgi.maxFrameLatency=2"),
                        ["DXVK_CONFIG": "dxvk.tilerMode = False;dxgi.maxFrameLatency = 2"])
@@ -921,11 +923,15 @@ final class FEXProfileTests: XCTestCase {
         XCTAssertEqual(LaunchSettings.graphicsEnvironment("VKD3D_CONFIG=one_time_submit VKD3D_CONFIG=no_upload_hvv MESA_KK_EXPERIMENTAL=all"),
                        ["VKD3D_CONFIG": "one_time_submit,no_upload_hvv", "MESA_KK_EXPERIMENTAL": "all"])
         XCTAssertEqual(LaunchSettings.graphicsEnvironment(""), [:])
-        // Anything else is refused whole: another variable, a bare word, an unknown section.
-        XCTAssertNil(LaunchSettings.graphicsEnvironment("DYLD_INSERT_LIBRARIES=x"))
+        // Any other variable is set too (decision 0137); repeated, its last value wins.
+        XCTAssertEqual(LaunchSettings.graphicsEnvironment("_X1=a MESA_KK_EXPERIMENTAL=parallel_stages _X1=b"),
+                       ["_X1": "b", "MESA_KK_EXPERIMENTAL": "parallel_stages"])
+        // Anything else is refused whole: a bare word, an unknown section, a bad name.
         XCTAssertNil(LaunchSettings.graphicsEnvironment("dxvk.tilerMode=False oops"))
         XCTAssertNil(LaunchSettings.graphicsEnvironment("wine.x=1"))
         XCTAssertNil(LaunchSettings.graphicsEnvironment("=1"))
+        XCTAssertNil(LaunchSettings.graphicsEnvironment("1X=1"))
+        XCTAssertNil(LaunchSettings.graphicsEnvironment("A-B=1"))
         // Per game only, saved and resolved like the runtime keys.
         let s = try! JSONDecoder().decode(LaunchSettings.self, from: Data(#"{"graphicsOptions":"dxvk.hud=fps"}"#.utf8))
         XCTAssertFalse(s.isEmpty)
@@ -1049,13 +1055,42 @@ final class JitPoolTests: XCTestCase {
         XCTAssertLessThanOrEqual(JitPool.minimumMB, JitPool.maximumMB)   // it fits the executable's reservation
     }
 
+    func testAGamesLargerPoolIsGrantedOnlyUnderAnEntitledLimitAndNeverAboveTheReservation() {
+        // Decision 0108: a compatibility entry's pool, on a limit of at least 6 GiB.
+        XCTAssertEqual(JitPool.sizeMB(limitMB: 8191, gameMB: 896), 896)
+        XCTAssertEqual(JitPool.sizeMB(limitMB: 6143, gameMB: 896), 896)     // 6 GiB as the phone reads it
+        XCTAssertNil(JitPool.size(limitMB: 8191, gameMB: 896).note)
+        XCTAssertEqual(JitPool.size(limitMB: 8191, gameMB: 4096).mb, JitPool.maximumMB)
+        XCTAssertNotNil(JitPool.size(limitMB: 8191, gameMB: 4096).note)
+        // Signed without the entitlement, or no limit reported: the default, with a note.
+        XCTAssertEqual(JitPool.size(limitMB: 3379, gameMB: 896).mb, JitPool.minimumMB)
+        XCTAssertEqual(JitPool.size(limitMB: 3379, gameMB: 896).note,
+                       "the game's 896 MiB not granted: a memory limit of 3379 MB, under 6144 MB")
+        XCTAssertEqual(JitPool.size(limitMB: nil, gameMB: 896).mb, JitPool.minimumMB)
+        // A game with no entry of its own, or one below the default, gets the default.
+        XCTAssertEqual(JitPool.size(limitMB: 8191, gameMB: nil).mb, JitPool.minimumMB)
+        XCTAssertNil(JitPool.size(limitMB: 8191, gameMB: 256).note)
+        XCTAssertEqual(JitPool.sizeMB(limitMB: 8191, gameMB: 256), JitPool.minimumMB)
+    }
+
+    func testTheCompatibilityTableRefusesAPoolOutsideTheReservation() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("pool-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let file = dir.appendingPathComponent("compat-defaults.json")
+        try Data(#"{"titles": {"app-1": {"settings": {"jitPoolMB": 2048}, "reason": "r"}}}"#.utf8).write(to: file)
+        XCTAssertThrowsError(try CompatDefaults.load(directory: dir)) {
+            XCTAssertEqual($0 as? CompatDefaultsError, .badSetting("app-1.jitPoolMB"))
+        }
+    }
+
     func testTheLineCarriesEveryFieldAndWhatRanOut() {
         let mib: UInt64 = 1 << 20
         var use = JitPool.Use(size: 896 * mib, head: 153 * mib - 4096, headLive: 150 * mib, tail: 144 * mib,
                               tailLive: 128 * mib, aliasLive: 5, aliasSlots: 6, aliasCap: 4096, images: 50)
         XCTAssertEqual(use.line, "pool: size_mb=896 head_mb=153 head_live_mb=150 head_free_mb=0 tail_mb=144 "
                        + "tail_live_mb=128 room_mb=599 alias=5 alias_slots=6 alias_cap=4096 images=50 children=0 "
-                       + "children_mb=0 head_exhausted=0 tail_refused=0 tail_fatal=0 alias_full=0 exhausted=none")
+                       + "children_mb=0 trimmed_mb=0 head_exhausted=0 tail_refused=0 tail_fatal=0 alias_full=0 exhausted=none")
         XCTAssertNil(use.exhaustion)
         use.tailRefused = 3   // FEX asks again for half: not exhausted
         XCTAssertNil(use.exhaustion)
@@ -1066,6 +1101,8 @@ final class JitPoolTests: XCTestCase {
         XCTAssertTrue(use.line.hasSuffix(" exhausted=head"))
         XCTAssertEqual(JitPool.Use(size: 1, head: 0, tail: 0, aliasFull: 1).exhaustion, .alias)
         XCTAssertEqual(JitPool.Use(size: 10 * mib, head: 8 * mib, tail: 4 * mib).room, 0)
+        XCTAssertTrue(JitPool.Use(size: 896 * mib, head: 0, tail: 0, headTrimmed: 155 * mib + 1).line
+            .contains(" trimmed_mb=156 "))
     }
 
     func testANewLineOnlyWhenTheUseMoved() {
@@ -1137,6 +1174,16 @@ final class FexBandTests: XCTestCase {
         var d = a
         d.refused = 1
         XCTAssertTrue(d.worthLogging(after: a))
+    }
+
+    func testARefusalIsAnExhaustionTheResultLineNames() {
+        var u = FexBand.Use(size: 16 << 30, used: 16 << 30, callret: 197)
+        XCTAssertFalse(u.exhausted)
+        u.refused = 24
+        XCTAssertTrue(u.exhausted)
+        XCTAssertTrue(FexBand.exhausted(in: "band=exhausted still-running after_s=300"))
+        XCTAssertTrue(FexBand.exhausted(in: "pool=exhausted:head band=exhausted exit=0x00000000 after_s=9"))
+        XCTAssertFalse(FexBand.exhausted(in: "exit=0x00000000 after_s=12"))
     }
 }
 
@@ -1228,24 +1275,20 @@ final class LibraryListTests: XCTestCase {
         XCTAssertEqual(LibrarySource.local.label, "Local")
     }
 
-    func testChipsFilter() {
-        func ids(_ f: LibraryFilter, downloading: Set<StoreGameKey> = []) -> [String] {
-            LibraryList.shown(entries, filter: f, sort: .name, downloading: downloading).map(\.id)
+    func testStoreColumnAndInstalledOnly() {
+        func ids(_ f: LibraryFilter, installedOnly: Bool = false, downloading: Set<StoreGameKey> = []) -> [String] {
+            LibraryList.shown(entries, filter: f, installedOnly: installedOnly, sort: .name, downloading: downloading).map(\.id)
         }
-        XCTAssertEqual(ids(.installed), ["app-367520", "dir-my game"])
-        XCTAssertEqual(ids(.installed, downloading: [.steam(588650)]), ["app-588650", "app-367520", "dir-my game"],
+        XCTAssertEqual(ids(.all, installedOnly: true), ["app-367520", "dir-my game"])
+        XCTAssertEqual(ids(.all, installedOnly: true, downloading: [.steam(588650)]), ["app-588650", "app-367520", "dir-my game"],
                        "a download counts as installed")
         XCTAssertEqual(ids(.steam), ["app-504230", "app-588650", "app-367520"])
+        XCTAssertEqual(ids(.steam, installedOnly: true), ["app-367520"], "Installed only narrows a store too")
         XCTAssertEqual(ids(.all), ["app-504230", "app-588650", "app-367520", "dir-my game"])
-        let shown = LibraryFilter.shown(stores: [])
-        XCTAssertEqual(shown, [.all, .installed, .steam])
-        XCTAssertEqual(shown.map(\.label), ["All", "Installed", "Steam"])
-        XCTAssertEqual(LibraryFilter.all.next(in: shown), .installed)
-        XCTAssertEqual(LibraryFilter.installed.next(in: shown), .steam)
-        XCTAssertEqual(LibraryFilter.steam.next(in: shown), .all)
-        XCTAssertEqual(LibraryFilter.shown(stores: [.gog]), [.all, .installed, .steam, .gog])
-        XCTAssertEqual(LibraryFilter.shown(stores: [.epic, .gog]).map(\.label), ["All", "Installed", "Steam", "GOG", "Epic Games"])
-        XCTAssertEqual(LibraryFilter.gog.next(in: shown), .all, "a chip no longer shown starts the row again")
+        XCTAssertEqual(LibraryFilter.allCases, [.all, .steam, .gog, .epic, .battlenet], "every store, always")
+        XCTAssertEqual(LibraryFilter.all.step(1), .steam)
+        XCTAssertEqual(LibraryFilter.battlenet.step(1), .all, "RT past the last wraps round")
+        XCTAssertEqual(LibraryFilter.all.step(-1), .battlenet, "LT before the first wraps round")
     }
 
     func testStoreCopiesJoinTheirOwnStoreOnly() {
@@ -1274,24 +1317,22 @@ final class LibraryListTests: XCTestCase {
         XCTAssertEqual(copies.map(\.source), [.steam, .local])
         XCTAssertFalse(copies[0].installed, "the local copy does not mark the Steam copy installed")
         XCTAssertFalse(copies[1].owned, "the local copy does not inherit Steam ownership")
-        XCTAssertEqual(LibraryList.shown(e, filter: .installed, sort: .name).map(\.id), ["dir-celeste"])
+        XCTAssertEqual(LibraryList.shown(e, filter: .all, installedOnly: true, sort: .name).map(\.id), ["dir-celeste"])
         XCTAssertEqual(LibraryList.shown(e, filter: .steam, sort: .name, search: "Celeste").map(\.id), ["app-504230"])
     }
 
-    func testSourceBadgesOnlyForDuplicatesInMixedSourceFilters() {
+    func testSourceBadgesOnlyForDuplicatesInAll() {
         let e = LibraryList.entries(titles: [title("Celeste", app: nil)], owned: owned)
         let duplicates = LibraryList.duplicateSourceIDs(e)
         XCTAssertEqual(duplicates, ["app-504230", "dir-celeste"])
         for entry in e {
             XCTAssertEqual(LibraryList.showsSourceBadge(entry, filter: .all, duplicateIDs: duplicates),
                            duplicates.contains(entry.id))
-            XCTAssertEqual(LibraryList.showsSourceBadge(entry, filter: .installed, duplicateIDs: duplicates),
-                           duplicates.contains(entry.id))
             XCTAssertFalse(LibraryList.showsSourceBadge(entry, filter: .steam, duplicateIDs: duplicates))
         }
-        let installed = LibraryList.shown(e, filter: .installed, sort: .name)
+        let installed = LibraryList.shown(e, filter: .all, installedOnly: true, sort: .name)
         XCTAssertEqual(installed.map(\.id), ["dir-celeste"])
-        XCTAssertTrue(LibraryList.showsSourceBadge(installed[0], filter: .installed, duplicateIDs: duplicates),
+        XCTAssertTrue(LibraryList.showsSourceBadge(installed[0], filter: .all, duplicateIDs: duplicates),
                       "the other copy need not be visible or installed")
         XCTAssertEqual(LibraryList.duplicateSourceIDs(entries), [], "an installed/owned Steam merge is not a duplicate")
     }
@@ -1478,7 +1519,7 @@ final class OptionValueTests: XCTestCase {
         XCTAssertEqual(OptionValue.of(own: Int?.none, inherited: inherited.frameLimit) { "\($0) fps" },
                        OptionValue(text: "Default · 60 fps", changed: false))
         XCTAssertEqual(OptionValue.of(own: GraphicsBackend?.none, inherited: inherited.graphics) { $0.rawValue.uppercased() },
-                       OptionValue(text: "Default · DXMT", changed: false))
+                       OptionValue(text: "Default · VULKAN", changed: false))
         // Set for the game: its value alone, marked. Setting it to the default's value still marks it.
         XCTAssertEqual(OptionValue.of(own: 30, inherited: 60) { "\($0) fps" }, OptionValue(text: "30 fps", changed: true))
         XCTAssertEqual(OptionValue.of(own: 60, inherited: 60) { "\($0) fps" }, OptionValue(text: "60 fps", changed: true))
@@ -1491,19 +1532,24 @@ final class OptionValueTests: XCTestCase {
 final class SettingsModelTests: XCTestCase {
     func testTheSectionsAndTheirOldNames() {
         XCTAssertEqual(SettingsSection.all(developer: false).map(\.title),
-                       ["Accounts", "Graphics", "Downloads", "Controllers", "Storage", "Setup check", "About"])
+                       ["Accounts", "Graphics", "Downloads", "Controls", "Storage", "Setup check", "About"])
         XCTAssertEqual(SettingsSection.all(developer: true).last, .developer)
+        XCTAssertEqual(SettingsSection.all(developer: true).suffix(2), [.launchers, .developer])
+        XCTAssertEqual(SettingsSection.named("launchers"), .launchers)
         XCTAssertEqual(SettingsSection.named("account"), .accounts)
         XCTAssertEqual(SettingsSection.named("steam"), .accounts)
         XCTAssertEqual(SettingsSection.named("diagnostics"), .developer)
         XCTAssertEqual(SettingsSection.named("pairing"), .developer)
         XCTAssertEqual(SettingsSection.named("jit"), .setup)
         XCTAssertEqual(SettingsSection.named("graphics"), .graphics)
+        XCTAssertEqual(SettingsSection.named("controllers"), .controls)
+        XCTAssertEqual(SettingsSection.named("gyro"), .controls)
         XCTAssertNil(SettingsSection.named("nope"))
-        // Up and down stop at the ends; a release build never steps onto Developer.
+        // Up and down stop at the ends; a release build never steps onto Launchers or Developer.
         XCTAssertEqual(SettingsSection.accounts.step(-1, developer: true), .accounts)
         XCTAssertEqual(SettingsSection.about.step(1, developer: false), .about)
-        XCTAssertEqual(SettingsSection.about.step(1, developer: true), .developer)
+        XCTAssertEqual(SettingsSection.about.step(1, developer: true), .launchers)
+        XCTAssertEqual(SettingsSection.launchers.step(1, developer: true), .developer)
         XCTAssertEqual(SettingsSection.graphics.step(1, developer: false), .downloads)
     }
 
@@ -1836,8 +1882,17 @@ final class LaunchProgressTests: XCTestCase {
         XCTAssertEqual(LaunchProgress.status(.prerequisites, part: LaunchPart(index: 1, count: 2), elapsed: 42.7),
                        "Installing dependencies (1 of 2)… 42 s")
         XCTAssertEqual(LaunchProgress.status(.runtime), "Starting Windows…")
-        XCTAssertEqual(LaunchProgress.status(.game, elapsed: 60), "Starting the game…")
+        XCTAssertEqual(LaunchProgress.status(.game, elapsed: 29.9), "Starting the game…")
+        XCTAssertEqual(LaunchProgress.status(.drawing, elapsed: 60), "Starting the game…")
         XCTAssertEqual(LaunchProgress.stepName(.prerequisites), "Dependencies")
+    }
+
+    /// A game's start that runs long shows its seconds, so a launch screen held for a slow first
+    /// frame (World of Warcraft's x64 client: about 250 s on the phone) is seen to be alive.
+    func testTheGameStepShowsItsSecondsOnceLong() {
+        XCTAssertEqual(LaunchProgress.status(.game, elapsed: 30), "Starting the game… 30 s")
+        XCTAssertEqual(LaunchProgress.status(.game, elapsed: 251.6), "Starting the game… 251 s")
+        XCTAssertEqual(LaunchProgress.uncoverWithoutFrame, 30)
     }
 
     func testTheRestartAfterDependenciesSaysTheyAreDone() {
@@ -2120,8 +2175,10 @@ final class QuickMenuTests: XCTestCase {
         XCTAssertEqual(m.ring, .quit)
         m.move(down: false)
         XCTAssertEqual(m.ring, .controller)
-        XCTAssertEqual(QuickMenu.steps(from: .resume, to: .quit), [true, true, true, true, true])
-        XCTAssertEqual(QuickMenu.steps(from: .overlay, to: .resume), [false, false])
+        XCTAssertEqual(QuickMenu.steps(from: .resume, to: .quit), [true, true, true, true, true, true, true])
+        XCTAssertEqual(QuickMenu.steps(from: .overlay, to: .resume), [false, false, false, false, false])
+        XCTAssertEqual(QuickMenu.steps(from: .controls, to: .keyboard), [true])
+        XCTAssertEqual(QuickMenu.steps(from: .keyboard, to: .text), [true])
         XCTAssertEqual(QuickMenu.steps(from: .quit, to: .quit), [])
     }
 
@@ -2131,8 +2188,82 @@ final class QuickMenuTests: XCTestCase {
         XCTAssertEqual(QuickMenu.controller(name: "Xbox", battery: 80), "Xbox · 80%")
         XCTAssertEqual(QuickMenu.controller(name: "DualSense", battery: nil), "DualSense")
         XCTAssertEqual(QuickMenu.controller(name: nil, battery: nil), "None")
+        // The dev build's scripted pad is no GameController pad: no name of its own (touch controls 3c).
+        XCTAssertEqual(QuickMenu.controller(name: nil, battery: nil, scriptedPad: true), "Scripted pad")
+        XCTAssertEqual(QuickMenu.controller(name: "DualSense", battery: 70, scriptedPad: true), "DualSense · 70%")
         XCTAssertEqual(QuickMenuItem.allCases.map(\.title),
-                       ["Resume", "Screenshot", "Performance HUD", "Controller as mouse", "Controller", "Quit game"])
+                       ["Resume", "Controls", "Touch keyboard", "Type text", "Screenshot", "Performance overlay", "Controller",
+                        "Quit game"])
+        // The driver's menu:ROW names (tools/ui.py ACTION_RE).
+        XCTAssertEqual(QuickMenuItem.allCases.map(\.rawValue),
+                       ["resume", "controls", "keyboard", "text", "screenshot", "overlay", "controller", "quit"])
+    }
+
+    func testTheControlsPanelTakesTheRingAndGivesItBack() {
+        var m = QuickMenu()
+        m.move(down: true)
+        XCTAssertEqual(m.ring, .controls)
+        XCTAssertNil(m.panel)
+        m.openPanel()
+        XCTAssertEqual(m.panel, .layout)
+        let noPad = QuickMenuControlsRow.shown(controller: false, state: Self.gamepad)
+        m.move(down: true, rows: noPad)
+        XCTAssertEqual(m.panel, .dpad)
+        m.move(down: true, rows: noPad)
+        XCTAssertEqual(m.panel, .rightStick)
+        m.move(down: true, rows: noPad)
+        XCTAssertEqual(m.panel, .opacity)
+        m.move(down: true, rows: noPad)
+        XCTAssertEqual(m.panel, .gyro)
+        m.move(down: true, rows: noPad)
+        XCTAssertEqual(m.panel, .gyroSensitivity)
+        m.move(down: true, rows: noPad)
+        XCTAssertEqual(m.panel, .gyroSensitivity)
+        XCTAssertEqual(m.ring, .controls)   // the rows' ring stays on Controls
+        m.closePanel()
+        XCTAssertNil(m.panel)
+        m.move(down: true)
+        XCTAssertEqual(m.ring, .keyboard)
+        m.openPanel(.opacity)
+        XCTAssertEqual(m.ring, .controls)
+        m.ring(.quit)                        // a tap on another row closes the panel
+        XCTAssertNil(m.panel)
+    }
+
+    func testTheControllerRowShowsOnlyWithAController() {
+        XCTAssertFalse(QuickMenuControlsRow.shown(controller: false, state: Self.gamepad).contains(.controllerMap))
+        XCTAssertEqual(QuickMenuControlsRow.shown(controller: true, state: Self.gamepad).last, .controllerMap)
+        XCTAssertEqual(QuickMenuControlsRow.controllerMap.title, "Controller")
+        var m = QuickMenu()
+        m.openPanel(.gyroSensitivity)
+        m.move(down: true, rows: QuickMenuControlsRow.shown(controller: true, state: Self.gamepad))
+        XCTAssertEqual(m.panel, .controllerMap)
+        m.move(down: true, rows: QuickMenuControlsRow.shown(controller: true, state: Self.gamepad))
+        XCTAssertEqual(m.panel, .controllerMap)
+        // The controller goes: the ring comes back to the last row shown.
+        m.move(down: false, rows: QuickMenuControlsRow.shown(controller: false, state: Self.gamepad))
+        XCTAssertEqual(m.panel, .gyroSensitivity)
+        XCTAssertEqual(ControllerMap.Mode.allCases.map(\.shortTitle), ["Pad", "Keys & mouse", "Custom"])
+    }
+
+    static let gamepad = ControlsState(layout: .gamepad, visible: true, opacity: 0.6)
+
+    /// The D-pad and Right stick rows place the Gamepad preset's: shown only for Gamepad with no
+    /// copy of the game's own (a copy has its own d-pad and sticks, the other layouts none).
+    func testTheDpadAndRightStickRowsShowOnlyForThePlainGamepadLayout() {
+        XCTAssertTrue(Self.gamepad.hasGamepadOptions)
+        XCTAssertEqual(QuickMenuControlsRow.shown(controller: false, state: Self.gamepad),
+                       [.layout, .dpad, .rightStick, .opacity, .gyro, .gyroSensitivity])
+        let hidden = ControlsState(layout: .gamepad, visible: false, opacity: 0.6, padConnected: false)
+        XCTAssertTrue(QuickMenuControlsRow.shown(controller: true, state: hidden).contains(.dpad))
+        for state in [ControlsState(layout: .keyboardMouse, visible: true, opacity: 0.6),
+                      ControlsState(layout: .pointClick, visible: true, opacity: 0.6),
+                      ControlsState(layout: .off, visible: false, opacity: 0.6),
+                      ControlsState(layout: .gamepad, visible: true, opacity: 0.6, edited: .gamepad(dpad: .on))] {
+            XCTAssertFalse(state.hasGamepadOptions, "\(state.layout)")
+            XCTAssertEqual(QuickMenuControlsRow.shown(controller: true, state: state),
+                           [.layout, .opacity, .gyro, .gyroSensitivity, .controllerMap], "\(state.layout)")
+        }
     }
 }
 

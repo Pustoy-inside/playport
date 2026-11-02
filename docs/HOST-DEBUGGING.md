@@ -55,8 +55,9 @@ In a run's `pull/s1-host.log`:
 Working copies belong under `$PLAYPORT_BUILD/agent-notes/`, uncommitted. The inventory below
 is a **2026-10-07 snapshot** under `agent-notes/store-auth/`, not supported tooling or guaranteed
 present files. Check availability in the authorized checkout before reuse; missing scripts are not
-an instruction to recreate live store clients. Host-only side worktrees cannot run games, browsers
-or phone commands or borrow this state ([0069](decisions/0069-host-only-worktrees.md)).
+an instruction to recreate live store clients. A side worktree runs desktop Wine/Proton only in
+its own build area and prefixes, never phone commands, and does not borrow this state
+([0117](decisions/0117-side-copies-that-build.md)).
 
 - **Game files:** scratch Linux builds of Playport's Epic/GOG installers (`eos/desktop/src`,
   `build`, copies of `app/EpicClient` + `app/ContentKit`) used an authorized workstation session.
@@ -97,7 +98,9 @@ child arguments or a 0600 file deleted after the run. Scrub arguments and reques
   without it, stop and ask rather than approve the page.
 - **Input.** In the dated setup, sway's headless seat did not pass synthetic input (wtype, XTEST,
   `swaymsg seat cursor`); `ydotool` would type into the owner's session, so do not use it. A
-  desktop run shows how far a game gets without input.
+  desktop run shows how far a game gets without input. Input made inside the game's prefix
+  does reach it: a Win32 program run there (`proton run`) that calls `SendInput` drove RDR2's
+  menus and play, keyboard and relative mouse ([evidence](evidence/2026-10-17-rdr2-vulkan-needs.md#in-story-mode-2026-10-17-h1)).
 - **Processes.** Kill only your own process group by PID and `wineserver -k` with your
   `WINEPREFIX`; no `pkill -f`.
 - **Disk.** Game copies and prefixes stay under `$PLAYPORT_BUILD/agent-notes/`; delete copies
@@ -112,6 +115,10 @@ child arguments or a 0600 file deleted after the run. Scrub arguments and reques
   sizes.
 - **A/B in a scratch prefix**, with a table of runs: one changed input per run (a file's content,
   an argument, a cache present or deleted).
+- **Per-title driver settings.** Mesa's driconf (`/usr/share/drirc.d/`) changes RADV for some
+  titles by application or executable name. RDR2's Vulkan renderer gets a 256 MiB host-visible
+  VRAM heap, so instances in one process can see different devices. Compare per instance before
+  blaming the game ([evidence](evidence/2026-10-17-rdr2-vulkan-needs.md#video-memory-warning-2026-10-17-h2)).
 - **Requests through the proxy** show a sign-in's path (a launch code redeemed, a device-code
   browser flow, a token refused) and a server's error codes.
 - **Compare with the phone:** DLL load order, request sizes and order (`[sock-tl]` on the phone),
@@ -136,5 +143,9 @@ updates. Existing diagnostics may already answer the question without another de
 | 2026-10-11 | Castle Crashers Demo's DirectX June 2010 setup (Steam), PLA-170 | `CFusion::CFusion(): LoadLibraryShim() failed, error = 0x80070006`, DXSETUP -9 | under Proton the same `DXSETUP /silent` succeeds; deleting the prefix's `Microsoft.NET\Framework\v*\fusion.dll` links, or pointing its 32-bit `InstallRoot` at `Framework64\`, reproduces the phone's log exactly. Fix: the .NET Framework directories as links and a WoW64 `mscoree` reading `Framework\` (decision 0085); DXSETUP then stops at the x64 `infinst.exe`'s fixed base `0x100000000` ([evidence](evidence/2026-10-11-i386-dotnet.md)) |
 | 2026-10-13 | BioShock (GOG), PLA-248 | c0000005 14 s after its first window, `[0+8]` in `Bioshock.exe`, with or without Visual C++ 2005 | Proton 10 with the files pulled from the phone reaches the main menu, with and without Creative's OpenAL. Static reading plus `FEX_TRACE_RIP` on the phone: FMOD's semaphore is a 0x14-byte `CreateFileMapping` + `MapViewOfFile`, and the view fails on the phone (`unaligned shared mapping … not supported`, a writable shared section under one 16 KiB host page), so FMOD's semaphores are 0 ([evidence](evidence/2026-10-13-gog-msvc2005-command-line.md)). A probe then showed only i386 views fail: the WoW64 window's view is whole host pages but was mapped with the section's size. Fix: madeira-unix 0135; the game reaches its menu scene ([evidence](evidence/2026-10-13-small-shared-sections.md)) |
 | 2026-10-13 | Tomb Raider: Anniversary (GOG), PLA-249, PLA-252 | alive, no window at all (no `[win-text]`), black; one thread in a message wait after DXVK, `uxtheme.dll` and the builtin classes | with the files pulled from the phone the game shows its Rendering Setup dialog; a relay trace shows `DialogBoxParamW` owned by `GetDesktopWindow()`, and user32 disables the owner first: `EnableWindow(desktop, FALSE)` sends `WM_CANCELMODE`, which explorer's desktop thread answers. On the phone that thread is the session root's, which never read its queue. Fix: the session root answers messages sent to it while a title runs; the dialog shows and Ok starts the intro ([evidence](evidence/2026-10-13-desktop-window-messages.md)) |
+| 2026-10-15 | Red Dead Redemption 2 (Steam), PLA-364 | `PlayRDR2.exe` shows "File not found." about 4 s after Play; `RDR2.exe` never starts | the phone's `PlayRDR2.exe` and `title.rgl` under Proton: with no `HKLM\SOFTWARE\WOW6432Node\Rockstar Games\Launcher\InstallFolder`, it runs `Redistributables\Rockstar-Games-Launcher.exe /s /t` from the working directory, and shell32's box says "File not found." when that file is missing. Desktop Steam ships the file in depot 1899671, which the phone's installer skipped (PLA-365) ([evidence](evidence/2026-10-15-rockstar-launcher-recon.md)) |
+| 2026-10-18 | Red Dead Redemption 2 (Steam), PLA-401 | `Launcher.exe` executes a HLT (`c0000096`) about 0.2 s after its signed-in main window is `Active` | the owner's desktop play (real Steam) logs the same sequence and reaches `Begin game launch` 0.46 s after Auth → MainWindow; under Proton 10 with Playport's Steam client and no host, title setup fails before any sign-in (error 133, offline profile), and the phone's remembered Social Club profile does not import on another machine: not reproduced, inputs not separated ([evidence](evidence/2026-10-18-rockstar-desktop-comparison.md)) |
+| 2026-10-20 | Red Dead Redemption 2 (Steam) | the 3D too wide, the HUD and minimap right, at Resolution Scale 1/2 and 16:9 | same settings and cabin scene: the phone's 3D is the desktop's stretched ×3.50 horizontally about the centre, ×1.00 vertically; desktop G-buffer projection P00 1.1486, P11 2.042 (aspect 1.778) at 1/1 and 1/2, the phone's implies P00 ≈ 4.02; the upscale (one full-viewport 640×360→1280×720 draw) and the presentation are ruled out ([evidence](evidence/2026-10-20-rdr2-desktop-reference.md), PLA-413) |
+| 2026-10-28 | The Witcher 3 4.x (Steam), PLA-461 | main-thread `stat` in `get_dos_device`, another thread scanning directories | the real NSI transport helper under a host harness reprobes its absent device on every fallback query (1,000 queries, 1,000 opens); a phone `+file` trace identifies 25,533 `\\.\Nsi` opens in 60 s and 1,066 missing session-control opens, not ordinary drive resolution or wrong-case assets. No desktop game copy was available ([evidence](evidence/2026-10-28-nsi-device-probes.md)) |
 
 Add a row for each new case, and file or update the game's Linear issue (AGENTS.md, "The phone").

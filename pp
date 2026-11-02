@@ -18,7 +18,8 @@ Build and ship
   pp release VERSION [--clean | --no-build] [--no-github]
                                   the unsigned release build of HEAD (reused, or built
                                   incrementally; --clean: every tree afresh), the gates, and a
-                                  GitHub draft pre-release (never published; decisions 0038, 0050)
+                                  GitHub draft pre-release whose body is site/releases/VERSION.md at
+                                  HEAD, which must exist (never published; decisions 0038, 0050)
 
 Test on the host
   pp test [--quick]               names, secrets, the pin and patch series (trailers), tools/tests,
@@ -34,9 +35,15 @@ Drive the phone (dev app)
   pp gpu capture --frame N | validate | read BUNDLE | passes RUN | names [--fetch]
                                   GPU debugging: a frame as a Metal capture, read here; Metal
                                   validation; GPU time per pass (docs/GPU-DEBUGGING.md)
+  pp gpu live --capture WHEN [--profile] [--trace TEMPLATE] | profile TRACE
+                                  on a Mac: Apple's gpucapture, gpudebug, xctrace on a play
+                                  (a running frame captured, replayed and profiled on the phone)
   pp pad send STEP... | push SCRIPT | rest [--shot FILE]
                                   press buttons on the scripted pad of a running title
-  pp phone status | kill | log [DIR] | ls REMOTE | pull REMOTE [DIR] | rm Documents/NAME.zip | shot [FILE] | crashes [DIR] [--since T]
+  pp phone status | kill | log [DIR] | ls REMOTE | pull REMOTE [DIR] | rm Documents/NAME.zip | rm Documents/prefix/Documents/title-cfg/TITLE/NAME.bin | shot [FILE] | crashes [DIR] [--since T]
+  pp phone put LOCAL Documents/Import/NAME/FILE
+                                  copy a file into the app's import inbox (what a person does with
+                                  Files), then add it through the UI: pp ui --action import:Import/NAME
   pp phone lock [--wait S] -- CMD run CMD under one hold of the lock: one session for a sequence
                                   (install, then plays, a pad) that no other agent may split
   pp phone unattended on [--hours N] | off | status
@@ -48,7 +55,8 @@ Drive the phone (dev app)
 Upstream and review
   pp sync [<madeira-sha>] [--replay]
                                   watch Madeira past the frozen pin (decision 0054): its commits
-                                  that touch what Playport builds; never moves a pin
+                                  that touch what Playport builds, and each component pin's
+                                  upstream tip and newest tag; never moves a pin
   pp rebase TARGET NEW [--trial] | --continue | --abort | --write [--pins]
                                   move one series stack onto a new upstream commit in a scratch
                                   clone: conflict trial, rerere, range-diff, re-export (UPSTREAM-SYNC.md)
@@ -86,19 +94,37 @@ from checks import SWIFT_PACKAGES  # noqa: E402
 # where it is not checked out: CI clones without submodules.
 PADS = ["app/tests/pads_test.c", "app/Sources/HostIO/hio_pads.c", "upstream/madeira/app/Madeira/Winios/WiniosGamepad.c"]
 PADS_FLAGS = ["-Iupstream/madeira/app/Madeira/Winios", "-pthread"]
+# The runtime's in-process NT sync engine (build/ppsync/README.md).
+PPSYNC = ["build/ppsync/ppsync_test.c", "build/ppsync/ppsync.c"]
+PPSYNC_FLAGS = ["-Ibuild/ppsync", "-D_GNU_SOURCE", "-pthread"]
 C_TESTS = [
     ("pads", PADS, PADS_FLAGS),
     ("pads (ThreadSanitizer)", PADS, PADS_FLAGS + ["-fsanitize=thread", "-O1", "-g"]),
     ("host log", ["app/tests/host_log_test.c", "app/Sources/HostIO/host_log.c"], ["-D_DEFAULT_SOURCE"]),
+    ("keys", ["app/tests/keys_test.c", "app/Sources/HostIO/hio_keys.c"], []),
+    ("focus", ["app/tests/focus_test.c", "app/Sources/HostIO/hio_focus.c"], []),
+    ("log cap", ["app/tests/log_cap_test.c", "app/Sources/WineHost/log_cap.c"], ["-D_DEFAULT_SOURCE"]),
     ("title path", ["app/tests/title_path_test.c", "app/Sources/WineHost/title_path.c"], ["-D_DEFAULT_SOURCE"]),
     ("dotnet fake DLLs", ["app/tests/dotnet_fakedlls_test.c", "app/Sources/WineHost/dotnet_fakedlls.c"], ["-D_DEFAULT_SOURCE"]),
+    ("dll overlay", ["app/tests/dll_overlay_test.c", "app/Sources/WineHost/dll_overlay.c"], ["-D_DEFAULT_SOURCE"]),
     ("prefix registry", ["app/tests/prefix_registry_test.c", "app/Sources/WineHost/prefix_registry.c"], ["-D_DEFAULT_SOURCE"]),
     ("self-check", ["app/tests/selfcheck_test.c", "app/Sources/WineHost/selfcheck.c"], []),
     ("session protocol", ["app/tests/session_protocol_test.c"], []),
+    ("launcher end", ["app/tests/launcher_end_test.c"], []),
+    ("Social Club single-process default-on (dev)", ["app/tests/sc_single_test.c"], []),
+    ("Social Club single-process default-on (release)", ["app/tests/sc_single_test.c"], ["-DPLAYPORT_RELEASE"]),
     ("jit debugger", ["app/tests/jit_debugger_test.c"], []),
     ("steam tickets", ["app/tests/steam_ticket_test.c", "app/Sources/WineHost/steam_ticket.c"], []),
+    ("steam client", ["app/tests/steam_client_test.c", "app/Sources/WineHost/steam_client.c"], []),
+    ("steamclient trace", ["app/tests/steamclient_trace_test.c"], []),
     ("url opener", ["app/tests/url_opener_test.c", "app/Sources/WineHost/url_opener.c"], []),
+    ("time zone bias", ["app/tests/timezone_bias_test.c", "app/Sources/WineHost/timezone_bias.c"], ["-D_DEFAULT_SOURCE"]),
     ("command line", ["app/tests/command_line_test.c"], []),
+    ("guest pool", ["app/tests/guest_pool_test.c", "app/Sources/SharedMemory/guest_pool.c"],
+     ["-Iapp/Sources/SharedMemory", "-fsanitize=address,undefined"]),
+    ("ppsync", PPSYNC, PPSYNC_FLAGS),
+    ("ppsync (ThreadSanitizer)", PPSYNC, PPSYNC_FLAGS + ["-fsanitize=thread", "-O1", "-g"]),
+    ("ppsync (AddressSanitizer)", PPSYNC, PPSYNC_FLAGS + ["-fsanitize=address,undefined", "-g"]),
 ]
 
 
@@ -155,12 +181,24 @@ def cmd_secrets(args):
 
 
 def cmd_names(args):
-    """No tracked file (in COMMIT, or the index) names the retired project or its identifier
-    prefix, in any letter case. The patterns are split so this file does not match itself."""
-    old, prefix = "game" "native", r"\b" "gn[_-]"
+    """Reject retired provenance/prefixes in tracked files (COMMIT or index).
+
+    Only two exact upstream GN tokens in the CEF/Chromium patches of commits
+    before their removal (PLA-603) are exempt; checks.name_scan_text defines
+    this path-scoped exception for both gates.
+    """
+    old, prefix = checks.NAME_PATTERNS
     where = [args[0]] if args else ["--cached"]
-    hits = subprocess.run(["git", "-C", REPO, "grep", "-n", "-I", "-i", "-e", old, "-e", prefix, *where, "--", "."],
-                          capture_output=True, text=True).stdout
+    raw = subprocess.run(["git", "-C", REPO, "grep", "-z", "-n", "-I", "-i", "-e", old, "-e", prefix, *where, "--", "."],
+                         capture_output=True, text=True).stdout
+    hits = []
+    for hit in raw.splitlines():
+        path, number, line = hit.split("\0", 2)
+        relative = path.removeprefix(args[0] + ":") if args else path
+        text = checks.name_scan_text(relative, line)
+        if any(re.search(pattern, text, re.I) for pattern in checks.NAME_PATTERNS):
+            hits.append(f"{path}:{number}:{line}\n")
+    hits = "".join(hits)
     if hits:
         sys.stderr.write(hits)
         print(f"pp names: {len(hits.splitlines())} line(s) use a retired name or prefix", file=sys.stderr)
@@ -238,10 +276,14 @@ def cmd_test(args):
             return 2
         return run(swift_test(pkg, rest), cwd=os.path.join(REPO, pkg))
 
-    def step(name, argv, **kw):
-        """argv: a command, or a function that returns its exit status."""
+    def step(name, argv, skip_status=None, **kw):
+        """argv: a command, or a function that returns its exit status; a check that
+        cannot run here exits SKIP_STATUS and the step says so."""
         t0 = time.monotonic()
         st = argv() if callable(argv) else run(argv, **kw)
+        if skip_status is not None and st == skip_status:
+            print(f"pp test: {name}: skipped ({time.monotonic() - t0:.0f} s)", flush=True)
+            return
         print(f"pp test: {name}: {'ok' if st == 0 else 'FAILED'} ({time.monotonic() - t0:.0f} s)", flush=True)
         if st:
             failed.append(name)
@@ -261,6 +303,9 @@ def cmd_test(args):
                                 "-Iapp/Sources/HostIO/include", "-Iapp/Sources/WineHost/include", *flags, "-o", exe,
                                 *sources], env=dict(os.environ, T=scratch, X=exe))
     step("C test WoW64 window", [sys.executable, os.path.join(REPO, "build/wow64/test.py")])
+    # The ymm high halves through the ARM64EC context: FEX's and Wine's own functions from
+    # the run trees, so a checkout without them (CI) skips it (exit 77).
+    step("C test ymm context", [sys.executable, os.path.join(REPO, "build/ymm-context/test.py")], skip_status=77)
     if "--quick" not in args:
         for pkg in SWIFT_PACKAGES:
             step(f"swift test {pkg}", swift_test(pkg), cwd=os.path.join(REPO, pkg))
@@ -306,6 +351,13 @@ def cmd_phone(args):
             with phonelib.device_lock("pp phone rest", events=ev):
                 pid = phonelib.rest(ev, out)
             return ev.result(True, 0, rested=bool(pid))
+        if sub == "put":   # refused before the lock and the phone
+            if len(rest) != 2:
+                return phonelib.fail(ev, "pp phone put LOCAL Documents/Import/NAME/FILE", 2)
+            why = phonelib.afc_tool().import_refusal(rest[1])
+            if why or not os.path.isfile(rest[0]):
+                return phonelib.fail(ev, f"pp phone put: {rest[1]}: {why}" if why else
+                                     f"pp phone put: {rest[0]}: not a file", 2)
         out = phonelib.run_dir("phone")
         with phonelib.device_lock("pp phone " + sub, events=ev):
             phone = phonelib.Phone(out, events=ev).ensure()
@@ -338,9 +390,13 @@ def cmd_phone(args):
                 path = phone.pull(rest[0], rest[1] if len(rest) > 1 else out)
                 return ev.result(bool(path), 0 if path else 1, path=path,
                                  **({} if path else {"why": phone.pull_error}))
+            if sub == "put":
+                said = phone.put_import(rest[0], rest[1]).strip()
+                return ev.result(True, 0, path=rest[1], put=said)
             if sub == "rm":
                 if len(rest) != 1:
-                    return phonelib.fail(ev, "pp phone rm Documents/NAME.zip (a zip put there for import:)", 2)
+                    return phonelib.fail(ev, "pp phone rm Documents/NAME.zip (a zip put there for import:) or "
+                                         "Documents/prefix/Documents/title-cfg/TITLE/NAME.bin (a runtime's diagnostic dump)", 2)
                 return ev.result(True, 0, removed=phone.remove(rest[0]).strip())
             if sub == "shot":
                 path = phone.screenshot(rest[0] if rest else os.path.join(out, "screen.png"))
@@ -403,7 +459,7 @@ def phone_status():
             s["app"] = phone.bundle_id().split(".", 1)[1]
             s["app_pid"] = phone.pid()
             s["battery"] = phone.battery()
-            text = phone.pmd("disk", "lockdown", "get", "--domain", "com.apple.disk_usage", check=False)
+            text = phone.pmd("disk", "lockdown", "get", "com.apple.disk_usage", check=False)
             try:
                 s["free_gb"] = round(json.loads(text[text.index("{"):text.rindex("}") + 1])["AmountDataAvailable"] / 1e9, 1)
             except (ValueError, KeyError):

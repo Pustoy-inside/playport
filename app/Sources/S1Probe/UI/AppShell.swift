@@ -12,7 +12,12 @@
 // its own Y and X for the ringed job, and Download mode covers the whole
 // frame, woken by any press. The game page (GameDetailView.swift) names its
 // own buttons: A on the ringed control, X Game options, B back; in the
-// options panel Y puts the ringed setting back to its default. The first-run
+// options panel Y puts the ringed setting back to its default. The Controller
+// page (ControllerMapView.swift), over a game page or in Settings' place,
+// takes every press and names its own: A, LB RB the mode, Y back to the default
+// (or the row to the preset), B back. The layout editor (LayoutEditorView.swift,
+// from Game options › Controls) covers the whole frame over the game's art and
+// takes every press, naming its own. The first-run
 // checklist (SetupView.swift) replaces the pages on a first run or from
 // Settings › Setup check. Sign in to Steam (SignInView.swift) covers
 // whichever of them opened it.
@@ -46,6 +51,7 @@ struct AppShell: View {
     @State private var importingDrive = false
     @ObservedObject private var gog = GOGAccount.shared
     @ObservedObject private var epic = EpicAccount.shared
+    @ObservedObject private var layoutEditor = LayoutEditorSession.shared
 
     var body: some View {
         VStack(spacing: 0) {
@@ -66,12 +72,16 @@ struct AppShell: View {
                 .background(PP.background.ignoresSafeArea(edges: [.horizontal, .bottom]))
             }
         }
+        // The layout editor (Game options › Controls › Edit on-screen layout) covers the page and its
+        // footer, over the game's art; the page's items leave the focus ring meanwhile.
+        .opacity(layoutEditor.isUp(.gameOptions) ? 0 : 1)
+        .transformPreference(PadItemsKey.self) { if layoutEditor.isUp(.gameOptions) { $0 = [:] } }
         // The footer sits low, in the home indicator's inset, on every page.
         .ignoresSafeArea(.container, edges: .bottom)
         // Under a game page's panel the footer sits at the left, beside it (GameOptions.dc.html).
         .overlay(alignment: .bottomLeading) {
             // A picker over it draws its own there.
-            if panelUp, !modal.isUp {
+            if panelUp, !modal.isUp, !layoutEditor.isUp(.gameOptions) {
                 PadFooter(hints: hints, leading: true).frame(maxWidth: .infinity).padding(.trailing, 410)
                     .padding(.bottom, Self.footerBottom)
             }
@@ -88,6 +98,8 @@ struct AppShell: View {
                 PP.background.ignoresSafeArea()
             }
         }
+        // The layout editor over the game's art (UI/LayoutEditorView.swift), under its pickers.
+        .overlay { if layoutEditor.isUp(.gameOptions) { LayoutEditorView(inGame: false) } }
         // The controller keyboard or a picker, over everything with its own footer.
         .overlay { PadModalHost().animation(.easeOut(duration: 0.15), value: modal.isUp) }
         // Download mode: black, over everything, until a button or a tap (DownloadsView.swift).
@@ -176,6 +188,7 @@ struct AppShell: View {
             #if !PLAYPORT_RELEASE
             BlackScreen.restoreAtStart()
             UIDriver.startIfRequested()
+            UIDriver.sceneChanged(active: scenePhase == .active)
             #endif
         }
         .onChange(of: scenePhase) { _, phase in
@@ -198,7 +211,12 @@ struct AppShell: View {
         if nav.signIn {
             SignInView()
         } else if nav.settings {
-            SettingsView()
+            if nav.settingsControllerMap {
+                // Settings › Controls › Controller, in Settings' place (UI/ControllerMapView.swift).
+                ControllerMapView(target: .defaults)
+            } else {
+                SettingsView()
+            }
         } else if nav.setup {
             SetupView()
         } else {
@@ -214,7 +232,8 @@ struct AppShell: View {
     static let footerBottom: CGFloat = 9
 
     /// Game options or the achievements over a game page: the panel runs to the bottom.
-    private var panelUp: Bool { nav.onGamePage && !nav.gamePanels.isEmpty }
+    /// The Controller page covers the whole page instead, over the footer as every screen has it.
+    private var panelUp: Bool { nav.onGamePage && !nav.gamePanels.isEmpty && nav.gamePanels.last != .controller }
 
     /// The first-run checklist is the screen (not Settings over it).
     private var onSetup: Bool { nav.setup && !nav.settings && !nav.signIn }
@@ -224,6 +243,7 @@ struct AppShell: View {
     /// The footer: what each button does here.
     private var hints: [PadHint] {
         if nav.signIn { return SignInState.shared.hints(model) }
+        if ControllerMapRing.isUp { return ControllerMapRing.hints }
         if nav.onGamePage { return gamePageHints }
         if onSetup { return SetupView.hints() }
         var h: [PadHint] = []
@@ -241,6 +261,7 @@ struct AppShell: View {
         }
         if !nav.settings, nav.page == .library {
             let grid = LibraryGrid.shared
+            h.append(PadHint(button: .lt, label: "Store", action: { grid.step(1) }, also: .rt))
             h.append(PadHint(button: .view, label: "Filter & sort") { grid.openFilterSort() })
             h.append(PadHint(button: .y, label: "Search") { grid.openSearch() })
             // Add a game (UI/Import.swift): on every filter, not only at the grid's end.
@@ -273,6 +294,12 @@ struct AppShell: View {
             h.append(PadHint(button: .b, label: "Close") { _ = nav.back() })
         case .achievements?:
             h.append(PadHint(button: .b, label: nav.gamePanels.count > 1 ? "Game options" : "Close") { _ = nav.back() })
+        case .controller?:
+            return ControllerMapRing.hints
+        case .gyro?:
+            // "Back", not "Game options": three hints must fit beside the test area.
+            if focus.canReset { h.append(PadHint(button: .y, label: "Back to default") { focus.resetFocused() }) }
+            h.append(PadHint(button: .b, label: "Back") { _ = nav.back() })
         case nil:
             if let x = gamePage.x { h.append(PadHint(button: .x, label: x.label, action: x.action)) }
             h.append(PadHint(button: .b, label: nav.gameBackLabel) { _ = nav.back() })
@@ -297,12 +324,18 @@ struct AppShell: View {
         if ProblemReport.sheetUp { return ProblemReport.sheetPress(b) }
         // The controller keyboard or a picker takes every press while it is up.
         if modal.isUp { return modal.press(b) }
+        // The layout editor takes every other press while it is up (UI/LayoutEditorView.swift).
+        if layoutEditor.isUp(.gameOptions) { return layoutEditor.press(b) }
         // Sign in to Steam covers everything under it (UI/SignInView.swift).
         if nav.signIn { return SignInState.shared.press(b, model) }
+        // The Controller page: its ring, LB and RB, A, Y and B (UI/ControllerMapView.swift).
+        if ControllerMapRing.press(b) { return }
         // Settings keeps the ring on its list or in the shown section (SettingsView.swift).
         if nav.settings, SettingsRing.press(b) { return }
         // The checklist: its steps with left and right or LB and RB (UI/SetupView.swift).
         if onSetup, SetupRing.press(b) { return }
+        // The Library's store column and LT/RT (UI/LibraryView.swift).
+        if LibraryRing.press(b) { return }
         switch b {
         case .up: focus.move(.up)
         case .down: focus.move(.down)

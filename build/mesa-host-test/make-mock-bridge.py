@@ -9,10 +9,21 @@ return NULL and zero, so no device is ever found. This writes a copy of those
 files in which the driver gets a device (an Apple GPU family 10 with iOS 27
 limits), heaps and buffers backed by host memory (GPU address == CPU address),
 and dummy handles for everything else. The command stream is not executed:
-commits complete at once. Every MSL library the driver compiles is written to
+commits complete at once unless the replay fixture opts into deferred FIFO feedback
+(KK_MOCK_DEFER_FEEDBACK): callbacks drain before the next queue signal. No GPU
+commands execute in either mode. Every MSL library the driver compiles is written to
 $KK_MOCK_MSL_DIR (if set), and one the MSL backend could not translate (it
-prints "Unknown intrinsic") is reported on stderr and counted; the process
-exits 3 at exit if there was any.
+prints "Unknown intrinsic NAME", or "ALU OP" for an ALU op, "Unknown ALU OP"
+from mesa 0042 on) is reported on stderr and counted; the process exits 3 at
+exit if there was any. With KK_MOCK_INTERRUPT_BUILDS=N the first N library
+builds that take an error report (the pipelines', not the driver's own
+shaders') fail as if Metal's compiler service had been interrupted (mesa
+0053's compile_retry builds them again). With KK_MOCK_TRACE_ENCODERS set,
+encoders begun and ended, their barriers and their store actions are
+printed on stderr as "kk-mock-enc: ..." lines (PLA-72). A command allocator
+keeps the size a test sets across a reset, as Metal keeps its heaps, and a
+reset of one a command buffer was begun on and never committed aborts (the
+IOGPU fault KosmicKrisp's cmd_retire must avoid).
 
 The stubs are the template, so a new bridge function upstream still links:
 it gets the stub's body, with a dummy handle for a pointer return.
@@ -26,11 +37,15 @@ stubs = os.path.join(tree, "src/kosmickrisp/bridge/stubs")
 os.makedirs(out, exist_ok=True)
 
 COMMON = r'''
+#include <assert.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
 #include <unistd.h>
+
+struct kk_mock_feedback;
 
 /* Every handle is one of these, so release/retain and labels are harmless. */
 struct kk_mock_obj {
@@ -39,11 +54,34 @@ struct kk_mock_obj {
    uint64_t size;
    uint64_t value;       /* events */
    int kind;
+   struct kk_mock_feedback *feedback_head, *feedback_tail; /* command queues only */
+   /* Libraries, their function descriptors and render pipeline descriptors
+    * (the vertex function's): what the MSL writes, KK_MOCK_MSL_* */
+   uint32_t msl_writes;
+   /* Render pipeline descriptors: the input primitive topology class */
+   int topology_class;
+   /* Command buffers: the allocator the last begin attached, and whether that
+    * recording was committed. Allocators: the recordings begun on them and
+    * not committed, which a reset must not see (kk_mock_reset_allocator). */
+   struct kk_mock_obj *begun_on;
+   int begin_committed;
+   uint32_t uncommitted_begins;
 };
 #define KK_MOCK_MAGIC 0x6b6b6d6bu
+#define KK_MOCK_MSL_POINT_SIZE 0x1u
+#define KK_MOCK_MSL_LAYER 0x2u
 
 void *kk_mock_new(int kind, uint64_t size);
+void kk_mock_set_size(void *handle, uint64_t size);
+unsigned kk_mock_command_buffer_begins(void);
+extern unsigned kk_mock_begins;
+void kk_mock_drain_feedback(void *queue);
 void kk_mock_record_msl(const char *src);
+void kk_mock_trace(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+int kk_mock_interrupt_build(void);
+
+/* The sample counts of an A19 (supportsTextureSampleCount:). */
+#define KK_MOCK_SAMPLE_COUNT_OK(n) ((n) == 1 || (n) == 2 || (n) == 4)
 '''
 
 DEFS = {}
@@ -51,8 +89,35 @@ def body(name, text):
     DEFS[name] = text
 
 # mtl_bridge.c: the shared helpers live here
-EXTRA = {"mtl_device.c": '#include "kk_image_layout.h"\n',
-         "mtl_buffer.c": '#include "kk_image_layout.h"\n', "mtl_bridge.c": r'''
+EXTRA = {"mtl_command_queue.c": r'''
+/* Test-only, externally synchronized queue. Defer completion until commit has
+ * returned and the driver's queue mutex is unlocked. A signal drains FIFO
+ * feedback before it becomes visible to a host fence wait. No worker threads,
+ * detached callbacks or copied pointers into temporary commit options. */
+struct kk_mock_feedback {
+   mtl_feedback_handler_callback callback;
+   struct mtl_feedback_data data;
+   struct kk_mock_feedback *next;
+};
+
+void
+kk_mock_drain_feedback(void *handle)
+{
+   struct kk_mock_obj *queue = handle;
+   if (!queue || queue->kind != 11)
+      return;
+   while (queue->feedback_head) {
+      struct kk_mock_feedback *job = queue->feedback_head;
+      queue->feedback_head = job->next;
+      if (!queue->feedback_head)
+         queue->feedback_tail = NULL;
+      job->callback(&job->data);
+      free(job);
+   }
+}
+''', "mtl_device.c": '#include "kk_image_layout.h"\n',
+         "mtl_buffer.c": '#include "kk_image_layout.h"\n#include "mtl_format.h"\n',
+         "mtl_bridge.c": r'''
 static int kk_mock_bad_msl;
 static unsigned kk_mock_msl_count;
 
@@ -63,11 +128,44 @@ __attribute__((destructor)) static void
 kk_mock_exit(void)
 {
    if (kk_mock_bad_msl) {
-      fprintf(stderr, "kk-mock: %d MSL libraries had untranslated intrinsics\n",
+      fprintf(stderr, "kk-mock: %d MSL libraries had untranslated intrinsics or ALU ops\n",
               kk_mock_bad_msl);
       fflush(stderr);
       _exit(3);
    }
+}
+
+void
+kk_mock_trace(const char *fmt, ...)
+{
+   static int on = -1;
+   if (on < 0)
+      on = getenv("KK_MOCK_TRACE_ENCODERS") != NULL;
+   if (!on)
+      return;
+   va_list ap;
+   va_start(ap, fmt);
+   fputs("kk-mock-enc: ", stderr);
+   vfprintf(stderr, fmt, ap);
+   fputc('\n', stderr);
+   va_end(ap);
+}
+
+/* Test-only: the size a dummy handle reports, e.g. an allocator's
+ * allocatedSize (kk-cmd-census-test.c) */
+void
+kk_mock_set_size(void *handle, uint64_t size)
+{
+   ((struct kk_mock_obj *)handle)->size = size;
+}
+
+/* Test-only: Metal command buffer begins so far (kk-cmd-retire-test.c) */
+unsigned kk_mock_begins;
+
+unsigned
+kk_mock_command_buffer_begins(void)
+{
+   return __atomic_load_n(&kk_mock_begins, __ATOMIC_SEQ_CST);
 }
 
 void *
@@ -85,10 +183,42 @@ kk_mock_new(int kind, uint64_t size)
    return o;
 }
 
+/* The next marker of untranslated NIR in src at or after p: "Unknown
+ * intrinsic NAME", or an "ALU OP" token (nir_to_msl.c's alu_to_msl default;
+ * "Unknown ALU OP" from mesa 0042 on). Neither is valid MSL. */
+static const char *
+kk_mock_untranslated(const char *src, const char *p)
+{
+   for (; *p; ++p) {
+      if (!strncmp(p, "Unknown intrinsic", 17) || !strncmp(p, "Unknown ALU ", 12))
+         return p;
+      if (!strncmp(p, "ALU ", 4) &&
+          (p == src || !(p[-1] == '_' || (p[-1] >= '0' && p[-1] <= '9') ||
+                         ((p[-1] | 0x20) >= 'a' && (p[-1] | 0x20) <= 'z'))))
+         return p;
+   }
+   return NULL;
+}
+
+/* Whether this library build fails as interrupted: the first
+ * KK_MOCK_INTERRUPT_BUILDS do. Builds may run on two threads at once. */
+int
+kk_mock_interrupt_build(void)
+{
+   static int left = INT32_MIN; /* INT32_MIN: not read yet */
+   if (__atomic_load_n(&left, __ATOMIC_SEQ_CST) == INT32_MIN) {
+      const char *v = getenv("KK_MOCK_INTERRUPT_BUILDS");
+      int expected = INT32_MIN;
+      __atomic_compare_exchange_n(&left, &expected, v ? atoi(v) : 0, 0,
+                                  __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+   }
+   return __atomic_sub_fetch(&left, 1, __ATOMIC_SEQ_CST) >= 0;
+}
+
 void
 kk_mock_record_msl(const char *src)
 {
-   unsigned n = kk_mock_msl_count++;
+   unsigned n = __atomic_fetch_add(&kk_mock_msl_count, 1, __ATOMIC_SEQ_CST);
    const char *dir = getenv("KK_MOCK_MSL_DIR");
    if (dir) {
       char path[4096];
@@ -99,25 +229,59 @@ kk_mock_record_msl(const char *src)
          fclose(f);
       }
    }
-   if (strstr(src, "Unknown intrinsic")) {
+   const char *m = kk_mock_untranslated(src, src);
+   if (m) {
       kk_mock_bad_msl++;
-      fprintf(stderr, "kk-mock: MSL library %04u has an untranslated intrinsic:\n", n);
-      for (const char *l = src; (l = strstr(l, "Unknown intrinsic")); l++) {
-         const char *e = strchr(l, '\n');
-         fprintf(stderr, "  %.*s\n", (int)(e ? e - l : 80), l);
+      fprintf(stderr, "kk-mock: MSL library %04u has untranslated NIR:\n", n);
+      while (m) {
+         const char *e = strchr(m, '\n');
+         fprintf(stderr, "  %.*s\n", (int)(e ? e - m : 80), m);
+         m = e ? kk_mock_untranslated(src, e) : NULL;
       }
    }
 }
 '''}
 
+# Command allocators keep a size a test sets (kk_mock_set_size), 0 by default.
+body("mtl_command_allocator_allocated_size", "return allocator ? ((struct kk_mock_obj *)allocator)->size : 0u;")
+# A reset keeps it: Metal's reset lets new command buffers "reuse its existing
+# internal memory heaps" (MTL4CommandAllocator.h), and allocatedSize is their
+# size. Resetting an allocator a command buffer was begun on and never
+# committed faulted in IOGPU (KosmicKrisp's form 1, 4bd22b36): the mock stops
+# there, even if that command buffer was begun again elsewhere since.
+body("mtl_command_allocator_reset", r'''
+   struct kk_mock_obj *a = allocator;
+   if (a->uncommitted_begins) {
+      fprintf(stderr, "kk-mock: reset of a command allocator with %u uncommitted command buffer begin(s)\n",
+              a->uncommitted_begins);
+      abort();
+   }''')
+body("mtl_begin_command_buffer", r'''
+   struct kk_mock_obj *cb = command_buffer;
+   struct kk_mock_obj *a = allocator;
+   __atomic_add_fetch(&kk_mock_begins, 1u, __ATOMIC_SEQ_CST);
+   cb->begun_on = a;
+   cb->begin_committed = 0;
+   a->uncommitted_begins++;''')
 body("mtl_retain", "return handle;")
-body("mtl_release", "(void)handle;")
+body("mtl_release", "kk_mock_drain_feedback(handle);")
 body("mtl_device_create", "return kk_mock_new(1, 0);")
 body("mtl_device_get_name", 'snprintf(buffer, 256, "Mock Apple A19 Pro GPU");')
 body("mtl_device_get_architecture_name", 'snprintf(buffer, 256, "applegpu_g18p");')
 body("mtl_device_get_gpu_apple_family", "return 10u;")
 body("mtl_device_get_registry_id", "return 1u;")
-body("mtl_device_supports_sample_count", "return sample_count == 1 || sample_count == 2 || sample_count == 4;")
+body("mtl_device_supports_sample_count", "return KK_MOCK_SAMPLE_COUNT_OK(sample_count);")
+# A pipeline's raster sample count must match its attachments', and a render
+# pass without attachments takes its default: one the device does not support
+# is a driver bug the phone would hit (what Metal then does is not checked).
+for f, what in (("mtl_render_pipeline_descriptor_set_raster_sample_count", "render pipeline"),
+                ("mtl_render_pass_descriptor_set_default_raster_sample_count", "render pass")):
+    body(f, r'''
+   if (!KK_MOCK_SAMPLE_COUNT_OK(sample_count)) {
+      fprintf(stderr, "kk-mock: ''' + what + r''' raster sample count %u, which "
+                      "the device does not support\n", sample_count);
+      abort();
+   }''')
 body("mtl_device_max_threads_per_threadgroup", "return (struct mtl_size){1024, 1024, 1024};")
 body("mtl_device_max_threadgroup_memory_length", "return 32768u;")
 body("mtl_device_max_buffer_length", "return 1ull << 32;")
@@ -126,13 +290,31 @@ body("mtl_device_max_argument_buffer_sampler_count", "return 1024u;")
 body("mtl_device_timestamp_frequency", "return 1000000000u;")
 body("mtl_heap_buffer_size_and_align_with_length", "if (align_B) *align_B = 256;")
 body("mtl_minimum_linear_texture_alignment_for_pixel_format", "return 16u;")
+# Each layer is padded to 16 KiB, so a layer's size times the layer count is
+# the texture's, as kk_image_layout_calc_tiled asserts for a texture whose
+# contents Metal may not optimize.
 body("mtl_heap_texture_size_and_align_with_descriptor", r'''
    uint64_t px = (uint64_t)layout->width_px * layout->height_px *
-                 layout->depth_px * layout->layers * layout->sample_count_sa;
-   if (size_B) *size_B = (px * 16u * 2u + 16383u) & ~16383ull;
+                 layout->depth_px * layout->sample_count_sa;
+   if (size_B) *size_B = layout->layers * ((px * 16u * 2u + 16383u) & ~16383ull);
    if (align_B) *align_B = 16384u;''')
+# mesa 0140 (private_memory): a private texture takes one 16 KiB page more,
+# as if Metal kept compression metadata beside it, so the larger of the two
+# sizes is what an image that may be private reports.
+body("mtl_heap_private_texture_size_and_align", r'''
+   uint64_t px = (uint64_t)layout->width_px * layout->height_px *
+                 layout->depth_px * layout->sample_count_sa;
+   if (size_B) *size_B = layout->layers * ((px * 16u * 2u + 16383u) & ~16383ull) + 16384u;
+   if (align_B) *align_B = 16384u;''')
+body("mtl_heap_private_buffer_size_and_align_with_length", "if (align_B) *align_B = 256;")
 body("mtl_sparse_tile_size_in_bytes", "return 16384u;")
-body("mtl_new_heap", "return kk_mock_new(2, size);")
+body("mtl_new_heap", r'''
+   /* One-shot, single-threaded command-pool regression fault injection. */
+   if (getenv("KK_MOCK_FAIL_NEXT_HEAP")) {
+      unsetenv("KK_MOCK_FAIL_NEXT_HEAP");
+      return NULL;
+   }
+   return kk_mock_new(2, size);''')
 body("mtl_heap_get_size", "return ((struct kk_mock_obj *)heap)->size;")
 body("mtl_new_buffer_with_length", r'''
    struct kk_mock_obj *h = heap;
@@ -151,22 +333,149 @@ body("mtl_get_contents", "return ((struct kk_mock_obj *)buffer)->mem;")
 # Metal requires a texture made from a buffer to start at an aligned offset
 # (minimumLinearTextureAlignmentForPixelFormat; KosmicKrisp assumes 16 bytes
 # covers every format). Anything else is a driver bug the phone would hit.
+# A linear texture (any type but a texture buffer) has more rules, from
+# MTLBuffer newTextureWithDescriptor:offset:bytesPerRow: in Apple's Metal
+# documentation: one 2D level and layer, one sample, an ordinary or packed
+# colour format other than GBGR422 and BGRG422 (so not depth, stencil or
+# compressed: minimumLinearTextureAlignmentForPixelFormat throws for those),
+# and bytesPerRow aligned and at least one row of pixels. What Metal does
+# otherwise (nil, or a validation error) is not modelled.
 body("mtl_new_texture_with_descriptor_linear", r'''
    if (offset % 16u) {
       fprintf(stderr, "kk-mock: linear texture at buffer offset %llu, not "
                       "16-byte aligned\n", (unsigned long long)offset);
       abort();
    }
+   if (layout->type != MTL_TEXTURE_TYPE_TEXTURE_BUFFER) {
+      const char *bad = NULL;
+      if (layout->type != MTL_TEXTURE_TYPE_2D)
+         bad = "a texture type other than 2D";
+      else if (layout->depth_px != 1u || layout->layers != 1u)
+         bad = "depth or array length over 1";
+      else if (layout->levels != 1u)
+         bad = "more than one mipmap level";
+      else if (layout->sample_count_sa != 1u)
+         bad = "more than one sample";
+      else if (util_format_is_depth_or_stencil(layout->format.pipe) ||
+               util_format_is_compressed(layout->format.pipe) ||
+               layout->format.mtl == MTL_PIXEL_FORMAT_GBGR422 ||
+               layout->format.mtl == MTL_PIXEL_FORMAT_BGRG422)
+         bad = "a pixel format that is not ordinary or packed colour";
+      else if (layout->linear_stride_B % 16u ||
+               layout->linear_stride_B <
+                  (uint64_t)layout->width_px *
+                     util_format_get_blocksize(layout->format.pipe))
+         bad = "bytesPerRow unaligned or shorter than a row";
+      if (bad) {
+         fprintf(stderr, "kk-mock: linear texture %ux%ux%u, %u layers, %u "
+                         "levels, type %u, %s: %s\n", layout->width_px,
+                 layout->height_px, layout->depth_px, layout->layers,
+                 layout->levels, layout->type,
+                 util_format_short_name(layout->format.pipe), bad);
+         abort();
+      }
+   }
    return kk_mock_new(8, 0);''')
 body("mtl_texture_get_gpu_resource_id", "return (uint64_t)(uintptr_t)texture;")
-body("mtl_new_library", "kk_mock_record_msl(src);\n   return kk_mock_new(4, 0);")
+# Metal's capture layer refuses a device with a counter heap; with
+# KK_MOCK_REFUSE_COUNTER_HEAP set, making one aborts (patches/mesa 0044).
+body("mtl_new_timestamp_counter_heap", r'''
+   if (getenv("KK_MOCK_REFUSE_COUNTER_HEAP")) {
+      fprintf(stderr, "kk-mock: a timestamp counter heap of %u entries\n",
+              count);
+      abort();
+   }
+   return kk_mock_new(9, count * sizeof(uint64_t));''')
+# Deliberately synthetic intervals, NOT GPU time. Exercise the documented
+# worst case of relaxed compute sampling: all timestamps of a pass grouped.
+# Only the profiler's precise compute path gets distinct boundaries.
+body("mtl_compute_write_timestamp", r'''
+   struct kk_mock_obj *h = heap;
+   assert(index < h->size / sizeof(uint64_t));
+   ((uint64_t *)h->mem)[index] = 10000u;''')
+for function in ("mtl_compute_write_timestamp_precise", "mtl_render_write_timestamp"):
+    body(function, r'''
+   struct kk_mock_obj *h = heap;
+   assert(index < h->size / sizeof(uint64_t));
+   ((uint64_t *)h->mem)[index] = (++h->value) * 10000u;''')
+body("mtl_timestamp_counter_heap_read", r'''
+   struct kk_mock_obj *h = heap;
+   assert(count <= h->size / sizeof(uint64_t));
+   memcpy(timestamps, h->mem, count * sizeof(uint64_t));
+   return !getenv("KK_MOCK_COUNTER_READ_FAIL");''')
+body("mtl_pipeline_profile_limits", "*max_threads = 256; *static_bytes = render ? 0 : 1024;")
+# With KK_MOCK_MSL_VERSIONS set, each library's MSL language version is
+# appended to that file, one hex number a line (PLA-437: MSL 4.0, msl41).
+body("mtl_new_library", r'''
+   kk_mock_record_msl(src);
+   const char *versions = getenv("KK_MOCK_MSL_VERSIONS");
+   if (versions) {
+      FILE *f = fopen(versions, "a");
+      if (f) {
+         fprintf(f, "%#x\n", (unsigned)msl_version);
+         fclose(f);
+      }
+   }
+   if (error && kk_mock_interrupt_build()) {
+      memset(error, 0, sizeof(*error));
+      error->code = 2;
+      snprintf(error->domain, sizeof(error->domain), "kk-mock");
+      error->compiler_interrupted = true;
+      return NULL;
+   }
+   struct kk_mock_obj *l = kk_mock_new(4, 0);
+   if (strstr(src, "[[point_size]]"))
+      l->msl_writes |= KK_MOCK_MSL_POINT_SIZE;
+   if (strstr(src, "[[render_target_array_index]]"))
+      l->msl_writes |= KK_MOCK_MSL_LAYER;
+   return l;''')
+# Metal refuses a render pipeline whose vertex function writes a point size
+# with the line or triangle topology class ("Vertex shader writes point size
+# but inputPrimitiveTopology is MTLPrimitiveTopologyClassTriangle", seen on
+# the phone, PLA-424), and layered rendering needs the class: either one
+# fails the build as Metal does (nil and an error).
+body("mtl_new_library_function_descriptor", r'''
+   struct kk_mock_obj *f = kk_mock_new(10, 0);
+   if (library)
+      f->msl_writes = ((struct kk_mock_obj *)library)->msl_writes;
+   return f;''')
+body("mtl_render_pipeline_descriptor_set_vertex_shader", r'''
+   ((struct kk_mock_obj *)descriptor)->msl_writes =
+      shader ? ((struct kk_mock_obj *)shader)->msl_writes : 0;''')
+body("mtl_render_pipeline_descriptor_set_input_primitive_topology",
+     "((struct kk_mock_obj *)descriptor)->topology_class = topology_class;")
+body("mtl_new_render_pipeline", r'''
+   struct kk_mock_obj *d = (struct kk_mock_obj *)descriptor;
+   const char *bad = NULL;
+   if ((d->msl_writes & KK_MOCK_MSL_POINT_SIZE) &&
+       (d->topology_class == MTL_PRIMITIVE_TOPOLOGY_CLASS_LINE ||
+        d->topology_class == MTL_PRIMITIVE_TOPOLOGY_CLASS_TRIANGLE))
+      bad = "Vertex shader writes point size but inputPrimitiveTopology is "
+            "a line or triangle class";
+   else if ((d->msl_writes & KK_MOCK_MSL_LAYER) &&
+            d->topology_class == MTL_PRIMITIVE_TOPOLOGY_CLASS_UNSPECIFIED)
+      bad = "Vertex shader writes a layer but inputPrimitiveTopology is "
+            "unspecified";
+   if (bad) {
+      fprintf(stderr, "kk-mock: Failed to create MTLRenderPipelineState: %s\n",
+              bad);
+      if (error) {
+         memset(error, 0, sizeof(*error));
+         error->code = 1;
+         snprintf(error->domain, sizeof(error->domain), "kk-mock");
+      }
+      return NULL;
+   }
+   return kk_mock_new(11, 0);''')
 body("mtl_new_event", "return kk_mock_new(5, 0);")
 body("mtl_new_shared_event", "return kk_mock_new(5, 0);")
 body("mtl_shared_event_get_signaled_value", "return ((struct kk_mock_obj *)event_handle)->value;")
 body("mtl_shared_event_set_signaled_value", "((struct kk_mock_obj *)event_handle)->value = value;")
 body("mtl_shared_event_wait_until_signaled_value", "return ((struct kk_mock_obj *)event_handle)->value >= value;")
-body("mtl_signal_event", "((struct kk_mock_obj *)event)->value = value;")
-# Commit options remember one feedback handler; commit calls it at once.
+body("mtl_new_command_queue", "return kk_mock_new(11, 0);")
+body("mtl_signal_event", "kk_mock_drain_feedback(queue); ((struct kk_mock_obj *)event)->value = value;")
+# Commit options remember one feedback handler; commit calls it at once, with
+# a GPU time of 2 ms for each command buffer, back to back.
 body("mtl_new_commit_options", "return kk_mock_new(6, 0);")
 body("mtl_commit_options_add_feedback_handler", r'''
    struct kk_mock_obj *o = options;
@@ -174,15 +483,49 @@ body("mtl_commit_options_add_feedback_handler", r'''
    o->value = (uint64_t)(uintptr_t)data;''')
 body("mtl_command_queue_commit", r'''
    struct kk_mock_obj *o = options;
+   static double gpu_clock = 100.0;
+   for (uint32_t k = 0; k < count; k++) {
+      struct kk_mock_obj *cb = command_buffers[k];
+      if (cb->begun_on && !cb->begin_committed) {
+         cb->begun_on->uncommitted_begins--;
+         cb->begin_committed = 1;
+      }
+   }
    if (o && o->mem) {
       struct mtl_feedback_data fb = {
          .user_data = (void *)(uintptr_t)o->value,
+         .gpu_start = gpu_clock,
+         .gpu_end = gpu_clock + 0.002 * count,
          .error = MTL_COMMAND_QUEUE_ERROR_NONE,
       };
-      ((mtl_feedback_handler_callback)o->mem)(&fb);
+      gpu_clock += 0.002 * count;
+      if (getenv("KK_MOCK_DEFER_FEEDBACK")) {
+         struct kk_mock_obj *q = queue;
+         struct kk_mock_feedback *job = calloc(1, sizeof(*job));
+         if (!job)
+            abort();
+         job->callback = (mtl_feedback_handler_callback)o->mem;
+         job->data = fb;
+         if (q->feedback_tail)
+            q->feedback_tail->next = job;
+         else
+            q->feedback_head = job;
+         q->feedback_tail = job;
+      } else {
+         ((mtl_feedback_handler_callback)o->mem)(&fb);
+      }
    }''')
 body("ns_is_os_version_at_least", "return major < 27 || (major == 27 && minor == 0 && patch == 0);")
 body("mtl_drawable_get_texture", "return kk_mock_new(7, 0);")
+# KK_MOCK_TRACE_ENCODERS: the encoder sequence, barriers and store actions.
+body("mtl_new_render_command_encoder_with_descriptor", 'kk_mock_trace("render"); return kk_mock_new(0, 0);')
+body("mtl_new_compute_command_encoder", 'kk_mock_trace("compute"); return kk_mock_new(0, 0);')
+body("mtl_end_encoding", 'kk_mock_trace("end");')
+body("mtl_barrier_after_stages", 'kk_mock_trace("producer-barrier after=%#x before-queue=%#x%s", (unsigned)after_stages, (unsigned)before_queue_stages, alias_visibility ? "" : " visibility=device");')
+body("mtl_barrier_after_queue_stages", 'kk_mock_trace("consumer-barrier after-queue=%#x before=%#x", (unsigned)after_queue_stages, (unsigned)before_stages);')
+body("mtl_render_set_color_store_action", 'kk_mock_trace("color-store %u action=%u", index, (unsigned)action);')
+body("mtl_render_set_depth_store_action", 'kk_mock_trace("depth-store action=%u", (unsigned)action);')
+body("mtl_render_set_stencil_store_action", 'kk_mock_trace("stencil-store action=%u", (unsigned)action);')
 
 FUNC = re.compile(r'^(?P<ret>[A-Za-z_][\w \*]*?)\n(?P<name>\w+)\((?P<args>[^)]*)\)\n\{\n(?P<body>.*?)^\}', re.S | re.M)
 

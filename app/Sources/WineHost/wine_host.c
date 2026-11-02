@@ -12,12 +12,17 @@
  */
 
 #include "wine_host.h"
+#include "dll_overlay.h"
 #include "dotnet_fakedlls.h"
+#include "log_cap.h"
 #include "prefix_registry.h"
 #include "selfcheck.h"
+#include "timezone_bias.h"
 #include "title_path.h"
 #include "session_protocol.h"
+#include "sc_single.h"
 
+#include <CommonCrypto/CommonDigest.h>
 #include <dirent.h>
 #include <dlfcn.h>
 #include <errno.h>
@@ -38,11 +43,18 @@
 #include <time.h>
 #include <unistd.h>
 
+/* Called by ntdll's process policy, before any single-process flag or write. */
+int playport_sc_single_enabled(void)
+{
+    return pp_sc_single_enabled(getenv("PLAYPORT_SC_SINGLE"));
+}
+
 /* --- unix-side archive entry points ------------------------------------ */
 
 extern int wineserver_main(int argc, char *argv[]);          /* libwineserver.a (-Dmain=) */
 extern void wineserver_log_set_file(const char *path);       /* libwineserver.a */
 extern void wineserver_set_nls_dir(const char *path);        /* libwineserver.a */
+extern void wineserver_set_timezone_bias(long long bias);    /* libwineserver.a (madeira-unix 0159) */
 extern void wineserver_inject_client_fd(int fd);             /* libwineserver.a */
 extern int foreground;                                       /* libwineserver.a */
 extern void __wine_main(int argc, char *argv[]);             /* libntdll_unix.a */
@@ -54,6 +66,7 @@ static FILE *g_log;
 static wine_host_log_fn g_log_fn;
 static pthread_mutex_t g_log_lock = PTHREAD_MUTEX_INITIALIZER;
 static size_t g_log_limit;   /* wine_host_set_log_limit; 0 is none */
+static int g_log_fd = -1;    /* the log file, for the dev cap (log_cap.h): stderr is a pipe under WINE_HOST_LOG_STAMP */
 static pthread_t g_server_thread, g_guest_thread;
 static int g_server_started, g_guest_started;
 /* The guest's argv: "wine", the session root's DOS path and its directory. */
@@ -344,6 +357,35 @@ static void *log_limit_thread(void *arg)
     }
 }
 
+/* With no limit (a dev build), once a second: when the log file has reached
+ * WINE_HOST_DEV_LOG_CAP, say so, give the wineserver /dev/null, point stderr
+ * at a pipe and become its reader, which counts what arrives and appends only
+ * log_cap_tally's report lines (log_cap.h). This file's own lines (g_log) and
+ * HostIO's (host_log.c, which then appends to the file itself) still land:
+ * they are few, and they carry the marks the drivers read. */
+static void log_cap_quiet_server(void)
+{
+    wineserver_log_set_file("/dev/null");
+    fflush(stderr);
+}
+
+static double log_cap_now(void)
+{
+    return clock_gettime_nsec_np(CLOCK_UPTIME_RAW) / 1e9;
+}
+
+static void *log_cap_thread(void *arg)
+{
+    (void)arg;
+    for (;;) {
+        sleep(1);
+        int in = log_cap_divert(g_log_fd, STDERR_FILENO, WINE_HOST_DEV_LOG_CAP, log_cap_quiet_server);
+        if (in < 0) continue;
+        log_cap_drain(in, g_log_fd, WINE_HOST_DEV_LOG_CAP, 10.0, log_cap_now);
+        return NULL;
+    }
+}
+
 /* --- symbols the archives expect from the host -------------------------- */
 
 const char wine_build[] = "wine-11.18 winehq@7b3fff76fa + patches/wine-port (Playport)";
@@ -399,80 +441,23 @@ static int mkdirs(const char *path)
     return (mkdir(buf, 0755) && errno != EEXIST) ? -1 : 0;
 }
 
-/* Link every file of src_dir into sys32, replacing what is there; the count linked. */
-static int link_dir_into(const char *src_dir, const char *sys32)
-{
-    char src[1600], dst[1600];
-    DIR *d = opendir(src_dir);
-    if (!d) return -1;
-    int n = 0;
-    struct dirent *e;
-    while ((e = readdir(d))) {
-        if (e->d_name[0] == '.') continue;
-        snprintf(src, sizeof(src), "%s/%s", src_dir, e->d_name);
-        snprintf(dst, sizeof(dst), "%s/%s", sys32, e->d_name);
-        unlink(dst);
-        if (symlink(src, dst) == 0) n++;
-    }
-    closedir(d);
-    return n;
-}
-
-/* PLAYPORT_DLL_OVERLAY when it names one directory of the runtime, else NULL. */
+/* PLAYPORT_DLL_OVERLAY, the launch's overlay list (dll_overlay.h), or NULL. */
 static const char *dll_overlay(void)
 {
     const char *o = getenv("PLAYPORT_DLL_OVERLAY");
-    if (!o || !o[0] || strchr(o, '/') || strchr(o, ':') || strstr(o, "..")) return NULL;
-    return o;
+    return o && o[0] ? o : NULL;
 }
 
-/* Remove every link in sys32 into an <arch>-windows set, the bundle's or an
- * overlay's, of this or an earlier bundle path; other entries stay. */
-static void unlink_runtime_links(const char *sys32)
-{
-    static const char set[] = "-windows/";
-    char dst[1600], target[1600];
-    char **names = NULL;
-    size_t count = 0, cap = 0;
-    DIR *d = opendir(sys32);
-    if (!d) return;
-    struct dirent *e;
-    while ((e = readdir(d))) {
-        if (e->d_name[0] == '.') continue;
-        snprintf(dst, sizeof(dst), "%s/%s", sys32, e->d_name);
-        ssize_t len = readlink(dst, target, sizeof(target) - 1);
-        if (len <= 0) continue;
-        target[len] = 0;
-        char *leaf = strrchr(target, '/');
-        if (!leaf) continue;
-        size_t sl = sizeof(set) - 1;
-        if ((size_t)(leaf + 1 - target) < sl || strncmp(leaf + 1 - sl, set, sl)) continue;
-        if (count == cap) {
-            size_t ncap = cap ? 2 * cap : 64;
-            char **grown = realloc(names, ncap * sizeof(*names));
-            if (!grown) break;
-            names = grown;
-            cap = ncap;
-        }
-        if ((names[count] = strdup(e->d_name))) count++;
-    }
-    closedir(d);
-    for (size_t i = 0; i < count; i++) {
-        snprintf(dst, sizeof(dst), "%s/%s", sys32, names[i]);
-        unlink(dst);
-        free(names[i]);
-    }
-    free(names);
-}
-
-/* The WoW64 (i386) title's farms, since system32 is the session's ARM64EC
- * set: drive_c/windows/sysarm64, the aarch64 set its native loader takes
- * (wine-pe 0015), and drive_c/windows/syswow64, the i386 set its guest loader
- * reaches through wow64's system32 redirection. The launch's backend overlay
- * (PLAYPORT_DLL_OVERLAY) goes over a set it has one for: the Vulkan backend's
- * i386 d3d9.dll (DXVK) over Wine's. Every link is recreated, so a later
- * launch without the overlay gets Wine's DLL back. A failure is logged: only
- * i386 titles need them. */
+/* The farms of the titles that are not ARM64EC, since system32 is the
+ * session's ARM64EC set: drive_c/windows/sysarm64, the aarch64 set that a
+ * WoW64 (i386) title's native loader and a plain ARM64 title's loader take
+ * (wine-pe 0015, 0056), and drive_c/windows/syswow64, the i386 set a WoW64
+ * title's guest loader reaches through wow64's system32 redirection. The
+ * launch's overlays (PLAYPORT_DLL_OVERLAY) go over a set they have one for:
+ * the Vulkan backend's i386 d3d9.dll (DXVK) over Wine's; an overlay with no
+ * such set is skipped. Every link is recreated, so a later launch without
+ * the overlay gets Wine's DLL back. A failure is logged: only i386 and ARM64
+ * titles need them. */
 static void link_wow64_farm(const char *name, const char *pe_arch)
 {
     char src_dir[1200], dir[1200];
@@ -482,13 +467,13 @@ static void link_wow64_farm(const char *name, const char *pe_arch)
         host_log("cannot create %s: %s", dir, strerror(errno));
         return;
     }
-    host_log("%s: %d links -> %s", name, link_dir_into(src_dir, dir), src_dir);
+    host_log("%s: %d links -> %s", name, dll_overlay_link_dir(src_dir, dir), src_dir);
     const char *overlay = dll_overlay();
     if (overlay) {
-        char over_dir[1400];
-        snprintf(over_dir, sizeof(over_dir), "%s/%s/%s-windows", g_runtime, overlay, pe_arch);
-        int m = link_dir_into(over_dir, dir);   /* -1: the overlay has no such set */
-        if (m >= 0) host_log("%s: %d links from %s over them", name, m, over_dir);
+        char set[32], log[512];
+        snprintf(set, sizeof(set), "%s-windows", pe_arch);
+        int m = dll_overlay_link(g_runtime, overlay, set, dir, 0, log, sizeof(log));
+        host_log("%s: %d links from overlays over them (%s)", name, m, log);
     }
 }
 
@@ -504,7 +489,7 @@ static void link_fonts(void)
         host_log("cannot create %s: %s", dir, strerror(errno));
         return;
     }
-    host_log("fonts: %d links -> %s", link_dir_into(src_dir, dir), src_dir);
+    host_log("fonts: %d links -> %s", dll_overlay_link_dir(src_dir, dir), src_dir);
 }
 
 /* One field of a winsxs name as setupapi's fakedll.c append_string makes it:
@@ -549,9 +534,10 @@ static const char *sxs_attr(const char *elem, const char *end, const char *attr,
  * wineboot's fakedll.c register_manifest does: winsxs/manifests/<dir>.manifest
  * with the architecture filled in, and winsxs/<dir>/ holding the assembly's
  * files, links into the runtime's <pe_arch>-windows set (the first <file> is
- * <module>.dll itself). 0 when installed. */
+ * <module>.dll itself). <dir> starts with prefix, the architecture except for
+ * the aarch64 set. 0 when installed. */
 static int link_sxs_manifest(const char *winsxs, const char *module, const char *path,
-                             const char *arch, const char *pe_arch)
+                             const char *prefix, const char *arch, const char *pe_arch)
 {
     char text[16384], dir[160], out[16600], dst[1600], src[1600];
     int fd = open(path, O_RDONLY);
@@ -568,7 +554,7 @@ static int link_sxs_manifest(const char *winsxs, const char *module, const char 
     const char *arch_at = id_end ? sxs_attr(id, id_end, "processorArchitecture", &arch_len) : NULL;
     /* Wine's manifests leave the architecture empty for wineboot to fill in. */
     if (!name || !version || !key || !arch_at || arch_len) return -1;
-    size_t n = sxs_field(dir, sizeof(dir), arch, strlen(arch), 16);
+    size_t n = sxs_field(dir, sizeof(dir), prefix, strlen(prefix), 16);
     n += sxs_field(dir + n, sizeof(dir) - n, name, name_len, 40);
     int w = snprintf(dir + n, sizeof(dir) - n, "%.*s_%.*s_none_deadbeef", (int)key_len, key, (int)version_len, version);
     if (w < 0 || (size_t)w >= sizeof(dir) - n) return -1;
@@ -609,12 +595,15 @@ static int link_sxs_manifest(const char *winsxs, const char *module, const char 
  * no v6-only class: a WiX bootstrapper's theme failed on SysLink with
  * ERROR_CLASS_DOES_NOT_EXIST. x86 for i386 titles; arm64 for the ARM64EC
  * set, which ntdll takes for an "amd64" or "*" request in an x86-64 title
- * (actctx.c lookup_manifest_file). Wine's own (_deadbeef) manifests are
- * rewritten on every session start, since the bundle path changes on
- * install; a title's own assemblies stay. */
+ * (actctx.c lookup_manifest_file); the aarch64 set for a plain ARM64 child
+ * (decision 0170), whose ntdll looks an arm64 assembly up as sysarm64_
+ * (wine-pe 0058): Wine's ARM64 notepad cannot load the ARM64EC comctl32 v6.
+ * Wine's own (_deadbeef) manifests are rewritten on every session start,
+ * since the bundle path changes on install; a title's own assemblies stay. */
 static void link_winsxs(void)
 {
-    static const char *const sets[][2] = { { "x86", "i386" }, { "arm64", "arm64ec" } };
+    static const char *const sets[][3] = {
+        { "x86", "x86", "i386" }, { "arm64", "arm64", "arm64ec" }, { "sysarm64", "arm64", "aarch64" } };
     char src_dir[1200], winsxs[1200], manifests[1300], path[2600];
     snprintf(src_dir, sizeof(src_dir), "%s/winsxs", g_runtime);
     snprintf(winsxs, sizeof(winsxs), "%s/drive_c/windows/winsxs", g_prefix);
@@ -646,7 +635,7 @@ static void link_winsxs(void)
             if (l < 10 || strcmp(e->d_name + l - 9, ".manifest")) continue;
             snprintf(path, sizeof(path), "%s/%s", mod_dir, e->d_name);
             for (size_t i = 0; i < sizeof(sets) / sizeof(sets[0]); i++) {
-                if (link_sxs_manifest(winsxs, m->d_name, path, sets[i][0], sets[i][1])) failed++;
+                if (link_sxs_manifest(winsxs, m->d_name, path, sets[i][0], sets[i][1], sets[i][2])) failed++;
                 else installed++;
             }
         }
@@ -687,49 +676,104 @@ static void link_dotnet_fakedlls(void)
     host_log("dotnet: %s", err);
 }
 
+/* drive_c/windows/system32/drivers gets the set's kernel drivers (*.sys), where
+ * wineboot puts their fake DLLs (wine.inf's dirid 12) and where a driver
+ * service's ImagePath names them: the mount manager's is
+ * C:\windows\system32\drivers\mountmgr.sys (decision 0118), which ntoskrnl
+ * loads by that full path, so no builtin search finds it elsewhere. Earlier
+ * links into a runtime set are removed first; drivers/etc is kept. */
+static void link_drivers(const char *src_dir, const char *sys32)
+{
+    char drivers[1300], src[1600], dst[1600];
+    snprintf(drivers, sizeof(drivers), "%s/drivers", sys32);
+    if (mkdirs(drivers)) {
+        host_log("cannot create %s: %s", drivers, strerror(errno));
+        return;
+    }
+    dll_overlay_unlink_runtime_links(drivers);
+    DIR *d = opendir(src_dir);
+    if (!d) return;
+    int n = 0;
+    struct dirent *e;
+    while ((e = readdir(d))) {
+        size_t l = strlen(e->d_name);
+        if (l < 5 || strcasecmp(e->d_name + l - 4, ".sys")) continue;
+        snprintf(src, sizeof(src), "%s/%s", src_dir, e->d_name);
+        snprintf(dst, sizeof(dst), "%s/%s", drivers, e->d_name);
+        unlink(dst);
+        if (symlink(src, dst) == 0) n++;
+    }
+    closedir(d);
+    host_log("system32/drivers: %d links -> %s", n, src_dir);
+}
+
+/* Which vulkan-1.dll system32 links to: the link's target and the first 16 hex
+ * digits of its sha256, which app/artifacts.tsv's row of that file has. Wine's
+ * builtin and the Khronos loader (Runtime/vulkan-loader, decision 0131) differ. */
+static void log_vulkan_loader(const char *sys32)
+{
+    char link[1300], target[1600];
+    snprintf(link, sizeof(link), "%s/vulkan-1.dll", sys32);
+    ssize_t len = readlink(link, target, sizeof(target) - 1);
+    if (len <= 0) {
+        host_log("system32: vulkan-1.dll is no runtime link");
+        return;
+    }
+    target[len] = 0;
+    char hex[17] = "?";
+    int fd = open(target, O_RDONLY);
+    if (fd >= 0) {
+        CC_SHA256_CTX ctx;
+        unsigned char buf[65536], md[CC_SHA256_DIGEST_LENGTH];
+        ssize_t r;
+        CC_SHA256_Init(&ctx);
+        while ((r = read(fd, buf, sizeof(buf))) > 0) CC_SHA256_Update(&ctx, buf, (CC_LONG)r);
+        close(fd);
+        CC_SHA256_Final(md, &ctx);
+        for (int i = 0; i < 8; i++) snprintf(hex + 2 * i, 3, "%02x", md[i]);
+    }
+    const char *runtime_rel = strncmp(target, g_runtime, strlen(g_runtime)) ? target : target + strlen(g_runtime) + 1;
+    host_log("system32: vulkan-1.dll -> %s sha256 %s", runtime_rel, hex);
+}
+
 /* Point drive_c/windows/system32 at the bundle's PE set. The bundle path
- * changes on every reinstall, so the links are always recreated. A Direct3D
- * backend other than DXMT (PLAYPORT_DLL_OVERLAY, PlayportKit
- * GraphicsBackend.runtimeOverlay) has its own <arch>-windows set, linked over
- * the bundle's: DLLs load through these links, not through WINEDLLPATH's
- * builtin search, so this is where its d3d11.dll replaces DXMT's. Every
- * earlier link into a runtime set is removed first, so a later DXMT launch
- * gets exactly DXMT's set back, without an overlay's extra DLLs. */
+ * changes on every reinstall, so the links are always recreated. The launch's
+ * overlays (PLAYPORT_DLL_OVERLAY, dll_overlay.h) have their own <arch>-windows
+ * sets, linked over the bundle's in order: a Direct3D backend other than DXMT
+ * (PlayportKit GraphicsBackend.runtimeOverlay), then the Khronos Vulkan loader
+ * for a play with khronosVulkanLoader (decision 0131). DLLs load through these
+ * links, not through WINEDLLPATH's builtin search, so this is where the
+ * backend's d3d11.dll replaces DXMT's and the loader's vulkan-1.dll Wine's.
+ * Each overlay must link a file here. Every earlier link into a runtime set is
+ * removed first, so a later launch gets exactly the sets it names back,
+ * without an earlier overlay's extra files. */
 static int link_system32(const char *pe_arch)
 {
-    char src_dir[1200], sys32[1200], src[1600], dst[1600];
+    char src_dir[1200], sys32[1200];
     snprintf(src_dir, sizeof(src_dir), "%s/%s-windows", g_runtime, pe_arch);
     snprintf(sys32, sizeof(sys32), "%s/drive_c/windows/system32", g_prefix);
     if (mkdirs(sys32)) {
         host_log("cannot create %s: %s", sys32, strerror(errno));
         return -1;
     }
-    unlink_runtime_links(sys32);
-    DIR *d = opendir(src_dir);
-    if (!d) {
+    dll_overlay_unlink_runtime_links(sys32);
+    int n = dll_overlay_link_dir(src_dir, sys32);
+    if (n < 0) {
         host_log("cannot open %s: %s", src_dir, strerror(errno));
         return -1;
     }
-    int n = 0;
-    struct dirent *e;
-    while ((e = readdir(d))) {
-        if (e->d_name[0] == '.') continue;
-        snprintf(src, sizeof(src), "%s/%s", src_dir, e->d_name);
-        snprintf(dst, sizeof(dst), "%s/%s", sys32, e->d_name);
-        unlink(dst);
-        if (symlink(src, dst) == 0) n++;
-    }
-    closedir(d);
     host_log("system32: %d links -> %s", n, src_dir);
+    if (n > 0) link_drivers(src_dir, sys32);
     const char *overlay = dll_overlay();
     if (n > 0 && overlay) {
-        char over_dir[1400];
-        snprintf(over_dir, sizeof(over_dir), "%s/%s/%s-windows", g_runtime, overlay, pe_arch);
-        int m = link_dir_into(over_dir, sys32);
-        host_log("system32: %d links from %s over them", m, over_dir);
+        char set[32], log[512];
+        snprintf(set, sizeof(set), "%s-windows", pe_arch);
+        int m = dll_overlay_link(g_runtime, overlay, set, sys32, 1, log, sizeof(log));
+        host_log("system32: %d links from overlays %s over them (%s)", m, overlay, log);
         if (m <= 0) return -1;
     }
     if (n > 0) {
+        log_vulkan_loader(sys32);
         link_wow64_farm("sysarm64", "aarch64");
         link_wow64_farm("syswow64", "i386");
     }
@@ -802,7 +846,9 @@ static void seed_machine_values(void)
  * cannot save. Documents (CSIDL_PERSONAL) likewise: Witcher 3 looks it up
  * without the flag and, when it fails (0x80070003), reads no user.settings
  * and has nowhere to save (docs/evidence/2026-09-25-witcher3-setup.md). Saved
- * Games is the other common save folder. C:\windows\temp is %TEMP% and %TMP%
+ * Games is the other common save folder. The Desktop and Start Menu folders are
+ * where an installer puts its shortcuts: without them the Rockstar Games Launcher's
+ * installer got an empty desktop path for its shortcut. C:\windows\temp is %TEMP% and %TMP%
  * (the seeded Session Manager\Environment, as wine.inf has them). Existing
  * directories and their contents are left alone. */
 static void seed_profile(void)
@@ -813,8 +859,10 @@ static void seed_profile(void)
         "drive_c/users/" WINE_HOST_USER "/AppData/Roaming",
         "drive_c/users/" WINE_HOST_USER "/Documents",
         "drive_c/users/" WINE_HOST_USER "/Saved Games",
-        "drive_c/users/Public",
-        "drive_c/ProgramData",
+        "drive_c/users/" WINE_HOST_USER "/Desktop",
+        "drive_c/users/" WINE_HOST_USER "/AppData/Roaming/Microsoft/Windows/Start Menu/Programs/Startup",
+        "drive_c/users/Public/Desktop",
+        "drive_c/ProgramData/Microsoft/Windows/Start Menu/Programs/Startup",
         "drive_c/windows/temp",
     };
     for (size_t i = 0; i < sizeof(dirs) / sizeof(dirs[0]); i++) {
@@ -1059,11 +1107,69 @@ static vm_address_t largest_gap(vm_address_t lo, vm_address_t hi, vm_address_t *
     return best;
 }
 
+/* PLA-476: the bottom of the guest window, held from exec. At pool time iOS
+ * has already put a system region (tag 87, ~74 MiB) at 0x7000000000, so a hold
+ * taken then can never get the address. A Social Club layout play keeps its
+ * bottom 256 MiB for libcef.dll's PartitionAlloc pools; every other play gets
+ * the JIT pool's RW alias there, where Madeira put it and where ntdll's floor
+ * (0x7000000000 + pool size, ios_usable_va_floor_get) expects it. Untouched
+ * PROT_NONE costs no footprint. */
+#define LOW_HOLD_BASE 0x7000000000ull
+#define LOW_HOLD_SIZE 0x60000000ull   /* 1.5 GiB: the largest JIT pool's alias */
+#define SC_LOW_SIZE   0x10000000ull   /* 256 MiB: pp_sc_layout.h PPSC_CEF */
+static vm_address_t g_low_hold;
+static vm_size_t g_low_hold_size;
+static int g_low_hold_taken;   /* held at exec; g_low_hold is 0 once handed over or released */
+
+__attribute__((constructor)) static void low_hold_at_exec(void)
+{
+    vm_address_t a = LOW_HOLD_BASE;
+    if (vm_allocate(mach_task_self(), &a, LOW_HOLD_SIZE, VM_FLAGS_FIXED) != KERN_SUCCESS) return;
+    if (vm_protect(mach_task_self(), a, LOW_HOLD_SIZE, FALSE, VM_PROT_NONE) != KERN_SUCCESS) {
+        vm_deallocate(mach_task_self(), a, LOW_HOLD_SIZE);
+        return;
+    }
+    g_low_hold = a;
+    g_low_hold_size = LOW_HOLD_SIZE;
+    g_low_hold_taken = 1;
+}
+
+static void low_hold_release(vm_address_t from)
+{
+    if (!g_low_hold || from >= g_low_hold + g_low_hold_size) return;
+    if (from < g_low_hold) from = g_low_hold;
+    vm_deallocate(mach_task_self(), from, g_low_hold + g_low_hold_size - from);
+    g_low_hold_size = from - g_low_hold;
+    if (!g_low_hold_size) g_low_hold = 0;
+}
+
 int wine_host_jit_pool_acquire(const char *log_path, size_t size, int wait_ms, void **rx_out, void **rw_out)
 {
     if (!rx_out || !rw_out || !size || (size & 0x3fff)) return -1;
     *rx_out = *rw_out = NULL;
     if (log_path && !g_log) g_log = fopen(log_path, "a");
+
+    /* PLA-476: opt-in stock Social Club layout. Never overwrite a mapping to
+     * make the low PartitionAlloc slot fit. Wine takes ownership of this exact
+     * native hold only after the RW alias has also been placed successfully. */
+    const char *sc = getenv("PLAYPORT_SC_LAYOUT");
+    const int sc_layout = sc && !strcmp(sc, "1");
+    vm_address_t sc_hold = 0;
+    unsetenv("WINE_IOS_SC_LOW_HELD");
+    host_log("low hold: %s", g_low_hold ? "0x7000000000 held since exec"
+                             : g_low_hold_taken ? "released or handed over by an earlier attempt"
+                             : "not taken at exec");
+    if (sc_layout) {
+        if (!g_low_hold || g_low_hold_size < SC_LOW_SIZE) {
+            host_log(g_low_hold_taken ? "sc-layout: the low hold went with an earlier attempt; launch refused, no mapping overwritten"
+                                      : "sc-layout: 0x7000000000 was not held at exec; launch refused, no mapping overwritten");
+            return -5;
+        }
+        low_hold_release(g_low_hold + SC_LOW_SIZE);   /* the rest goes back; the slot stays */
+        sc_hold = g_low_hold;
+        g_low_hold = 0;
+        g_low_hold_size = 0;
+    }
 
     for (int waited = 0;; waited += 50) {
         int state = wine_host_jit_debugger_state();
@@ -1071,6 +1177,7 @@ int wine_host_jit_pool_acquire(const char *log_path, size_t size, int wait_ms, v
         if (state == JIT_DEBUGGER_UNKNOWN || waited >= wait_ms) {
             int rc = jit_debugger_gate(state);
             host_log("JIT pool: no live debugger after %d ms (state=%d rc=%d); no brk issued", waited, state, rc);
+            if (sc_hold) vm_deallocate(mach_task_self(), sc_hold, SC_LOW_SIZE);
             return rc;
         }
         usleep(50 * 1000);
@@ -1107,7 +1214,10 @@ int wine_host_jit_pool_acquire(const char *log_path, size_t size, int wait_ms, v
     struct timeval t0, t1;
     gettimeofday(&t0, NULL);
     int gate = jit_breakpoint_gate("prepare");
-    if (gate) return gate;
+    if (gate) {
+        if (sc_hold) vm_deallocate(mach_task_self(), sc_hold, SC_LOW_SIZE);
+        return gate;
+    }
     void *rx = jit26_prepare_region(NULL, size);
     gettimeofday(&t1, NULL);
     double bless_s = (t1.tv_sec - t0.tv_sec) + (t1.tv_usec - t0.tv_usec) / 1e6;
@@ -1146,11 +1256,27 @@ int wine_host_jit_pool_acquire(const char *log_path, size_t size, int wait_ms, v
                      (unsigned long)freed_hi, (unsigned long)res_hi);
         }
     }
-    vm_address_t rw = 0;
+    vm_address_t rw = sc_layout ? 0x7900000000ull : 0;
+    if (!rc && sc_layout && size > 0x100000000ull) rc = -5;
+    int rw_fixed = sc_layout;
+    if (!rc && !sc_layout && g_low_hold) {
+        /* The alias's own home, freed just before it is mapped there. */
+        int fits = size <= g_low_hold_size;
+        rw = fits ? g_low_hold : 0;
+        rw_fixed = fits;
+        low_hold_release(g_low_hold);
+    }
     if (!rc) {
         vm_prot_t cur = VM_PROT_NONE, max = VM_PROT_NONE;
-        kern_return_t kr = mach_vm_remap(mach_task_self(), &rw, size, 0, VM_FLAGS_ANYWHERE, mach_task_self(), a,
+        kern_return_t kr = mach_vm_remap(mach_task_self(), &rw, size, 0,
+                                         rw_fixed ? VM_FLAGS_FIXED : VM_FLAGS_ANYWHERE, mach_task_self(), a,
                                          FALSE, &cur, &max, VM_INHERIT_NONE);
+        if (kr != KERN_SUCCESS && rw_fixed && !sc_layout) {
+            host_log("JIT pool: RW alias at 0x%lx failed kr=%d; anywhere", (unsigned long)rw, kr);
+            rw = 0;
+            kr = mach_vm_remap(mach_task_self(), &rw, size, 0, VM_FLAGS_ANYWHERE, mach_task_self(), a,
+                               FALSE, &cur, &max, VM_INHERIT_NONE);
+        }
         if (kr == KERN_SUCCESS) kr = mach_vm_protect(mach_task_self(), rw, size, FALSE, VM_PROT_READ | VM_PROT_WRITE);
         if (kr != KERN_SUCCESS) {
             host_log("JIT pool: RW alias failed kr=%d", kr);
@@ -1161,9 +1287,19 @@ int wine_host_jit_pool_acquire(const char *log_path, size_t size, int wait_ms, v
      * pool stays executable, and ntdll's trap handler skips any later stray
      * brk #0xf00d (signal_arm64_ios.c trap_handler). */
     gate = jit_breakpoint_gate("detach");
-    if (gate) return gate;
+    if (gate) {
+        if (sc_hold) vm_deallocate(mach_task_self(), sc_hold, SC_LOW_SIZE);
+        return gate;
+    }
     jit26_detach();
-    if (rc) return rc;
+    if (rc) {
+        if (sc_hold) vm_deallocate(mach_task_self(), sc_hold, SC_LOW_SIZE);
+        return rc;
+    }
+    if (sc_hold) {
+        setenv("WINE_IOS_SC_LOW_HELD", "1", 1);
+        host_log("sc-layout: low 256 MiB held, RW alias fixed at 0x%lx", (unsigned long)rw);
+    }
     *rx_out = rx;
     *rw_out = (void *)rw;
     host_log("JIT pool: rx=%p rw=%p size=0x%zx; debugger detached", rx, (void *)rw, size);
@@ -1250,7 +1386,8 @@ int wine_host_init(const wine_host_config *c)
         int fd = open(c->log_path, O_WRONLY | O_CREAT | O_APPEND, 0644);
         if (fd >= 0) {   /* ntdll and wineserver report through stderr */
             dup2(fd, STDERR_FILENO);
-            close(fd);
+            if (g_log_limit) close(fd);
+            else { fcntl(fd, F_SETFD, FD_CLOEXEC); g_log_fd = fd; }
         }
         if (g_log_limit) {
             pthread_t t;
@@ -1267,6 +1404,15 @@ int wine_host_init(const wine_host_config *c)
              * by default: they cost time, so only for a profile run. */
             if (getenv("WINE_HOST_DIAG")) madeira_set_diag_enabled(1);
             if (getenv("WINE_HOST_SAMPLE")) start_sampler(atof(getenv("WINE_HOST_SAMPLE")) > 0 ? atof(getenv("WINE_HOST_SAMPLE")) : 15);
+            if (g_log_fd >= 0) {
+                pthread_t t;
+                pthread_attr_t attr;
+                pthread_attr_init(&attr);
+                pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+                pthread_attr_set_qos_class_np(&attr, QOS_CLASS_USER_INITIATED, 0);
+                pthread_create(&t, &attr, log_cap_thread, NULL);
+                pthread_attr_destroy(&attr);
+            }
         }
     }
     host_log("init abi=%d runtime=%s prefix=%s", WINE_HOST_ABI_VERSION, c->runtime_dir, c->prefix_dir);
@@ -1290,7 +1436,9 @@ int wine_host_init(const wine_host_config *c)
     /* KosmicKrisp (mesa 0015) keeps the MSL of every pipeline in Mesa's disk
      * cache, in MESA_SHADER_CACHE_DIR/mesa_shader_cache, trimmed to the size
      * limit; without the directory it would go under HOME/.cache, which is
-     * the prefix by then. */
+     * the prefix by then. One directory serves every title, so the limit is
+     * Mesa's own default, 1 GB (PLA-279): a limit reserves nothing, and
+     * Settings > Storage shows and clears the cache (ShaderCache.swift). */
     const char *home = getenv("HOME");
     if (home && home[0] == '/' && strcmp(home, g_prefix) != 0) {
         char cache[1024];
@@ -1299,9 +1447,17 @@ int wine_host_init(const wine_host_config *c)
         int n = snprintf(cache, sizeof(cache), "%s/Library/Caches/kosmickrisp", home);
         if (n > 0 && (size_t)n < sizeof(cache) && mkdirs(cache) == 0)
             setenv("MESA_SHADER_CACHE_DIR", cache, 0);
+        /* The runtime's re-laid-out copies of large x86-64 images (decision 0167,
+         * madeira-unix 0235): mapped from here, so their clean pages stay out of
+         * the footprint; the runtime keeps them within 1 GiB, and Settings >
+         * Storage's Emulator cache row counts and clears them (EmulatorCache). */
+        n = snprintf(cache, sizeof(cache), "%s/Library/Caches/images", home);
+        if (n > 0 && (size_t)n < sizeof(cache) && mkdirs(cache) == 0)
+            setenv("PLAYPORT_IMAGE_CACHE_DIR", cache, 0);
     }
-    setenv("MESA_SHADER_CACHE_MAX_SIZE", "256M", 0);
+    setenv("MESA_SHADER_CACHE_MAX_SIZE", "1G", 0);
     host_log("DXMT shader cache: %s", getenv("DXMT_SHADER_CACHE_PATH") ? getenv("DXMT_SHADER_CACHE_PATH") : "(none)");
+    host_log("image cache: %s", getenv("PLAYPORT_IMAGE_CACHE_DIR") ? getenv("PLAYPORT_IMAGE_CACHE_DIR") : "(none)");
     host_log("Mesa shader cache: %s (limit %s)",
              getenv("MESA_SHADER_CACHE_DIR") ? getenv("MESA_SHADER_CACHE_DIR") : "HOME/.cache",
              getenv("MESA_SHADER_CACHE_MAX_SIZE"));
@@ -1310,18 +1466,14 @@ int wine_host_init(const wine_host_config *c)
     setenv("HOME", g_prefix, 1);
     setenv("USER", WINE_HOST_USER, 1);
     setenv("WINELOADERNOEXEC", "1", 1);   /* no re-exec of a loader binary */
-    /* A Direct3D backend other than DXMT ships its builtins in a directory of
-     * the runtime (PlayportKit GraphicsBackend.runtimeOverlay), which the
-     * launch names in PLAYPORT_DLL_OVERLAY; its <arch>-windows builtins are
-     * found before the runtime's own. */
-    const char *overlay = dll_overlay();
-    if (overlay) {
-        char dllpath[2 * sizeof(g_runtime) + 64];
-        snprintf(dllpath, sizeof(dllpath), "%s/%s:%s", g_runtime, overlay, g_runtime);
-        setenv("WINEDLLPATH", dllpath, 1);
-    } else {
-        setenv("WINEDLLPATH", g_runtime, 1);
-    }
+    /* The launch's overlays (PLAYPORT_DLL_OVERLAY, dll_overlay.h: a Direct3D
+     * backend other than DXMT, the Khronos Vulkan loader) ship their builtins in
+     * directories of the runtime; their <arch>-windows builtins are found
+     * before the runtime's own, the last overlay first. */
+    char dllpath[(DLL_OVERLAY_MAX + 1) * (sizeof(g_runtime) + DLL_OVERLAY_NAME + 2)];
+    if (dll_overlay_search_path(g_runtime, dll_overlay(), dllpath, sizeof(dllpath)))
+        host_log("PLAYPORT_DLL_OVERLAY=%s refused", dll_overlay());
+    setenv("WINEDLLPATH", dllpath, 1);
     host_log("WINEDLLPATH=%s", getenv("WINEDLLPATH"));
     /* iOS has no call that lists the system's trusted roots, so crypt32's unix
      * side reads them from this file (the runtime's Mozilla root store,
@@ -1359,6 +1511,13 @@ int wine_host_init(const wine_host_config *c)
     seed_etc();
     seed_registry();
     seed_machine_values();
+
+    /* KUSER_SHARED_DATA.TimeZoneBias, which the iOS wineserver does not compute
+     * itself: here, before the server thread or any guest thread exists
+     * (timezone_bias.h). */
+    long long tz_bias = pp_timezone_bias(time(NULL));
+    wineserver_set_timezone_bias(tz_bias);
+    host_log("time zone bias %lld min (local = UTC%+lld min)", tz_bias / 600000000LL, -tz_bias / 600000000LL);
 
     g_wineserver_should_stop = 0;
     pthread_attr_t attr;
@@ -1537,7 +1696,7 @@ static int session_request(uint32_t kind, const char *dos_path, const char *cons
     host_log("session: %s -> %d %s", dos_path, rc, msg);
     if (rc) return -5;
     /* The title's own DLLs load from its directory; everything else from the
-     * runtime's set, with this launch's backend overlay (PLAYPORT_DLL_OVERLAY). */
+     * runtime's set, with this launch's overlays (PLAYPORT_DLL_OVERLAY). */
     if (link_system32(g_pe_arch)) return -2;
 
     char *payload = malloc(PP_SESSION_MAX_PAYLOAD);
@@ -1607,6 +1766,48 @@ int wine_host_session_prerequisite_line(const char *dos_path, const char *line,
 {
     if (!line) return -1;
     return session_request(PP_REQUEST_PREREQUISITE_LINE, dos_path, &line, 1, env, nenv, timeout_ms);
+}
+
+int wine_host_session_services(int timeout_ms)
+{
+    if (!g_session_ready || g_session_launched || g_session_title) return -1;
+    pp_session_request req = { PP_SESSION_MAGIC, ++g_session_seq, PP_REQUEST_SERVICES, 0, 0, 0 };
+    host_log("session: services %u: services.exe for this play (decision 0107)", req.sequence);
+    if (session_send("request", &req, NULL)) return -4;
+    pp_session_reply r;
+    int rc = session_await(req.sequence, (1u << PP_TITLE_STARTED) | (1u << PP_TITLE_REFUSED), timeout_ms, &r);
+    if (rc != 1) {
+        host_log("session: services %u: the root %s", req.sequence, rc < 0 ? "has ended" : "did not answer in time");
+        return -6;
+    }
+    if (r.state == PP_TITLE_REFUSED) {
+        host_log("session: services %u: not started, Windows error %u", req.sequence, r.code);
+        return -7;
+    }
+    host_log("session: services %u: services.exe runs, pid %04x", req.sequence, r.code);
+    return 0;
+}
+
+int wine_host_session_steam_client(unsigned account_id, int timeout_ms)
+{
+    if (!g_session_ready || g_session_launched || g_session_title) return -1;
+    char id[12];
+    int n = snprintf(id, sizeof(id), "%u", account_id);
+    pp_session_request req = { PP_SESSION_MAGIC, ++g_session_seq, PP_REQUEST_STEAM_CLIENT, (uint32_t)n + 1, 1, 0 };
+    host_log("session: steam client %u: the root is the prefix's Steam client (decision 0115)", req.sequence);
+    if (session_send("request", &req, id)) return -4;
+    pp_session_reply r;
+    int rc = session_await(req.sequence, (1u << PP_TITLE_STARTED) | (1u << PP_TITLE_REFUSED), timeout_ms, &r);
+    if (rc != 1) {
+        host_log("session: steam client %u: the root %s", req.sequence, rc < 0 ? "has ended" : "did not answer in time");
+        return -6;
+    }
+    if (r.state == PP_TITLE_REFUSED) {
+        host_log("session: steam client %u: keys not written, Windows error %u", req.sequence, r.code);
+        return -7;
+    }
+    host_log("session: steam client %u: ActiveProcess pid %04x", req.sequence, r.code);
+    return 0;
 }
 
 int wine_host_session_wait(int timeout_ms, int *exit_code)
@@ -1720,4 +1921,25 @@ int wine_host_band_stats_read(wine_host_band_stats *out)
 void wine_host_band_dump(const char *why)
 {
     ios_fex_band_dump(why);
+}
+
+extern void ios_process_memory_log(const char *why, int force);
+
+void wine_host_process_memory_log(const char *why, int force)
+{
+    ios_process_memory_log(why, force);
+}
+
+extern unsigned int ios_proc_end_teardowns(void);
+
+unsigned int wine_host_process_teardowns(void)
+{
+    return ios_proc_end_teardowns();
+}
+
+extern void ios_game_sc_allow_restarts(int on);
+
+void wine_host_game_sc_allow_restarts(int on)
+{
+    ios_game_sc_allow_restarts(on ? 1 : 0);
 }

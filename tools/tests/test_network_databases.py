@@ -27,6 +27,7 @@ class NetworkDatabases(unittest.TestCase):
                 ("unix", f"wine/fonts/{n}") for n in stage.FONTS] + [
                 ("fex-wow64", "libwow64fex.dll"), ("vulkan-pe", "i386-windows/d3d9.dll"),
                 ("session", "playport-session.exe"), ("session", "playport-url-opener.exe"),
+                ("steamclient", "steamclient64.dll"), ("steamclient", "steamclient.dll"),
                 ("registry", "system.reg"), ("registry", "user.reg"), ("ca-bundle", "cacert.pem"),
                 ("wine-mono", "bin/libmono-2.0-x86_64.dll")]
             for key, name in files:
@@ -35,7 +36,7 @@ class NetworkDatabases(unittest.TestCase):
                 p.write_bytes(name.encode())
             manifest = root / "artifacts.tsv"
             with patch.multiple(stage, REPO=root, ROOTS=roots, MANIFEST=manifest,
-                                NLS=[], SXS=[], LINK=[], SOURCES=[], VULKAN_PE=[], VULKAN_PE_I386=[], STEAMAPI=[], GAPS=[]), \
+                                NLS=[], SXS=[], LINK=[], SOURCES=[], VULKAN_PE=[], VULKAN_PE_I386=[], VULKAN_PE_AARCH64=[], VULKAN_LOADER=[], STEAMAPI=[], GAPS=[]), \
                  patch.object(stage, "reference_names", return_value=[]), \
                  patch.object(stage, "selection", return_value=[]), \
                  patch.object(stage, "production", return_value={}):

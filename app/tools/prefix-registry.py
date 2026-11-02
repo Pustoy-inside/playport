@@ -175,8 +175,8 @@ NEUTRALISE = {
 # PROFILE.
 VC_RUNTIME = {
     "Software\\Microsoft\\VisualStudio\\14.0\\VC\\Runtimes\\x64": [
-        ("Bld", "dword", 0x8681), ("Installed", "dword", 1), ("Major", "dword", 14),
-        ("Minor", "dword", 42), ("Rbld", "dword", 0), ("Version", "sz", "14.42.34433.0"),
+        ("Bld", "dword", 0x8d97), ("Installed", "dword", 1), ("Major", "dword", 14),
+        ("Minor", "dword", 51), ("Rbld", "dword", 0), ("Version", "sz", "14.51.36247.00"),
     ],
 }
 # The Steam install-script HasRunKeys Proton's wine.inf writes (Proton's [ProtonOverrides]
@@ -258,6 +258,20 @@ NETWORK_DATABASE = {
         ("DataBasePath", "sz", SYSTEM32 + "\\drivers\\etc"),
     ],
 }
+# The shipped fallback faces (Runtime/fonts, Wine's own Tahoma and Marlett), registered where DirectWrite
+# looks for them. wine_host.c link_fonts puts the files in C:\windows\fonts, where win32u's
+# directory scan finds them for GDI; but Wine's dwrite builds its system font collection only
+# from the files this key names (dlls/dwrite/main.c create_system_path_list; a name without a
+# backslash is in %windir%\fonts), and win32u registers only the fonts of Wine's data directory
+# there (dlls/win32u/font.c update_external_font_keys), which the app has none of. With the key
+# empty, DirectWrite had no font at all: Direct2D's DrawTextLayout failed and Chromium's
+# Skia found no typeface for the message font, Tahoma, or "sans" (PLA-374). Each value name is
+# the face's full name plus " (TrueType)", as win32u names its own; win32u's load_registry_fonts
+# skips a face it already has by that name. Marked like PROFILE.
+FONTS_KEY = "Software\\Microsoft\\Windows NT\\CurrentVersion\\Fonts"
+FONTS = {"tahoma.ttf": "Tahoma (TrueType)", "tahomabd.ttf": "Tahoma Bold (TrueType)",
+         "marlett.ttf": "Marlett (TrueType)"}
+RUNTIME_FONTS = PKG / "Sources" / "S1Probe" / "Runtime" / "fonts"
 # The computer's name, which wineboot's create_computer_name_keys writes at every
 # start from the host's name (programs/wineboot/wineboot.c): SetComputerNameEx
 # for the DNS host name (Tcpip\Parameters Hostname and Domain, and the NetBIOS
@@ -483,6 +497,35 @@ def register_msisip(hive, main):
                          "MSISIP_FUNCTIONS in app/tools/prefix-registry.py and update MSISIP_REGISTER_SHA256")
     register_sip(hive, "MSISIP.DLL", MSISIP_SUBJECT, MSISIP_FUNCTIONS)
 
+
+# What winevulkan's DllRegisterServer writes (dlls/winevulkan/loader.c, called by wineboot through
+# wine.inf's RegisterDllsSection): winevulkan registered as an ICD with the Khronos Vulkan loader,
+# by its manifest's path under Drivers. The manifest itself, system32\winevulkan.json, comes with
+# the loader's set (Runtime/vulkan-loader), linked into system32 only for a play that gets the
+# Khronos loader (decision 0131); Wine's own vulkan-1 reads neither. Marked for top-up.
+WINEVULKAN_REGISTER = "dlls/winevulkan/loader.c"
+WINEVULKAN_REGISTER_SHA256 = "c2d35a9a3ee0d6a803ece0adefc41357c773f68e977bce3c4f95e392737df473"
+WINEVULKAN_DRIVERS_KEY = "Software\\Khronos\\Vulkan\\Drivers"
+WINEVULKAN_JSON = f"{SYSTEM32}\\winevulkan.json"
+
+
+def winevulkan_register_digest(loader):
+    """sha256 of winevulkan's DllRegisterServer and the two names it writes."""
+    m = re.search(r"^HRESULT WINAPI DllRegisterServer\(void\)\n\{.*?^\}$", loader, re.M | re.S)
+    names = re.findall(r"^static const WCHAR (?:winevulkan_json_pathW|vulkan_driversW)\[\] = .*$", loader, re.M)
+    if not m or len(names) != 2:
+        return None
+    return hashlib.sha256("\n".join(names + [m.group(0)]).encode()).hexdigest()
+
+
+def register_winevulkan(hive, loader):
+    """winevulkan's DllRegisterServer: HKLM Drivers names system32's winevulkan.json. Returns the marked path."""
+    digest = winevulkan_register_digest(loader)
+    if digest != WINEVULKAN_REGISTER_SHA256:
+        raise SystemExit(f"{WINEVULKAN_REGISTER}: its DllRegisterServer changed (sha256 {digest}); check "
+                         "register_winevulkan in app/tools/prefix-registry.py and update WINEVULKAN_REGISTER_SHA256")
+    hive.value(WINEVULKAN_DRIVERS_KEY, WINEVULKAN_JSON, "dword", 0)
+    return WINEVULKAN_DRIVERS_KEY.lower()
 
 # wine.inf's registry, as wineboot applies it (programs/wineboot/wineboot.c update_wineprefix runs
 # `rundll32 setupapi,InstallHinfSection DefaultInstall 128 wine.inf`, which on x86-64 installs
@@ -724,7 +767,7 @@ MEDIA_REGISTER_SHA256 = {  # DLL -> (its DllRegisterServer's source, sha256 of t
     "qedit.dll": ("dlls/qedit/main.c",
                      "8f3edd9dbf6f059532d4d5b1d1598e54f19e1302e91c40b25942cd5139533bed"),
     "quartz.dll": ("dlls/quartz/main.c",
-                     "baaeea7ef0bbaff06ff2da0c7d2a6597cc70950b0563b465a38653c5562d871d"),
+                     "cf99e50d5b9c9577fc447c2882c1c99a030f4c46d2202e476d73113929d36bca"),
     "resampledmo.dll": ("dlls/resampledmo/resampledmo.c",
                      "9fb2b96274e8f5c1f6bcb23993d6a057cd78888b0b7eea651d19147414065021"),
     "vidreszr.dll": ("dlls/vidreszr/vidreszr.c",
@@ -1297,6 +1340,11 @@ def generate():
         if not (WINE_SRC / MSISIP_REGISTER).is_file():
             raise SystemExit(f"{WINE_SRC / MSISIP_REGISTER} does not exist; build the pe stage first")
         register_msisip(hives["system"], (WINE_SRC / MSISIP_REGISTER).read_text())
+    winevulkan_marked = set()
+    if "winevulkan.dll" in staged:
+        if not (WINE_SRC / WINEVULKAN_REGISTER).is_file():
+            raise SystemExit(f"{WINE_SRC / WINEVULKAN_REGISTER} does not exist; build the pe stage first")
+        winevulkan_marked.add(register_winevulkan(hives["system"], (WINE_SRC / WINEVULKAN_REGISTER).read_text()))
     wic_marked = set()
     if "windowscodecs.dll" in staged:
         if not (WINE_SRC / WIC_REGSVR).is_file():
@@ -1325,6 +1373,10 @@ def generate():
     for path, values in STEAM_REDIST_RUN.items():
         for vname, vtype, data in values:
             hives["system"].value(path, vname, vtype, data)
+    for file, vname in FONTS.items():
+        if not (RUNTIME_FONTS / file).is_file():
+            raise SystemExit(f"{RUNTIME_FONTS / file} does not exist; FONTS names a face the app does not ship")
+        hives["system"].value(FONTS_KEY, vname, "sz", file)
     for path, values in WINE_MONO.items():
         hives["system"].key(path)
         for vname, vtype, data in values:
@@ -1336,7 +1388,9 @@ def generate():
     marked["system"] |= {path.lower() for path in COMPUTER_NAME}
     marked["system"] |= {path.lower() for path in WINE_MONO}
     marked["system"] |= {path.lower() for path in STEAM_REDIST_RUN}
+    marked["system"].add(FONTS_KEY.lower())
     marked["system"] |= wic_marked
+    marked["system"] |= winevulkan_marked
     for name in hives:
         marked[name] |= inf_marked[name] | i386_marked[name]
     marked["system"] |= register_media(hives["system"], MEDIA_REGISTRATIONS.read_text(), staged, WINE_SRC)

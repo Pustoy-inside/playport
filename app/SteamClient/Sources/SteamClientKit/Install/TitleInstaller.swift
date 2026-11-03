@@ -342,7 +342,10 @@ public struct TitleInstaller: Sendable {
                                          + "\(receipt.buildID.map(String.init) ?? "?") here: update it rather than repair")
         }
         var options = DepotSelection.Options()
-        options.ownedDepots = await ownedDepots(try requireSession(), say: say)
+        if let owned = await ownership(try requireSession(), say: say) {
+            options.ownedDepots = owned.depots
+            options.ownedDLC = owned.apps
+        }
         let selection = try DepotSelection.select(app, options)
         let have = Set(receipt.depots.map(\.depotID))
         let joining = selection.depots.filter { !have.contains($0.depotID) && receipt.depotsToRecheck.contains($0.depotID) }

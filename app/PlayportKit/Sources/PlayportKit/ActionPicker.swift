@@ -216,20 +216,26 @@ public struct ActionPicker: Sendable {
 
     // MARK: the tabs' choices
 
+    typealias Key = (UInt8, String, Double)
+    /// Letter and digit keys, VK = the character's ASCII code; split out so the
+    /// keyboard's literal type-checks in reasonable time.
+    private static func letters(_ chars: String) -> [Key] {
+        chars.map { (UInt8($0.asciiValue!), String($0), 1.0) }
+    }
+    private static let fKeys: [Key] = (0..<12).map { (UInt8(0x70 + $0), "F\($0 + 1)", 1.0) }
+    private static let digitRow: [Key] = [(0xC0, "`", 1)] + letters("1234567890")
+        + [(0xBD, "-", 1), (0xBB, "=", 1), (0x08, "⌫", 1.4)]
+    private static let topRow: [Key] = [(0x09, "Tab", 1.4)] + letters("QWERTYUIOP")
+        + [(0xDB, "[", 1), (0xDD, "]", 1), (0xDC, "\\", 1)]
+    private static let homeRow: [Key] = [(0x14, "Caps", 1.6)] + letters("ASDFGHJKL")
+        + [(0xBA, ";", 1), (0xDE, "'", 1), (0x0D, "Enter", 1.6)]
+    private static let bottomRow: [Key] = [(0xA0, "Shift", 2)] + letters("ZXCVBNM")
+        + [(0xBC, ",", 1), (0xBE, ".", 1), (0xBF, "/", 1), (0xA1, "Shift", 1.6)]
+    private static let spaceRow: [Key] = [(0xA2, "Ctrl", 1.3), (0xA4, "Alt", 1.2), (0x20, "Space", 6), (0xA5, "Alt", 1.2),
+                                          (0x25, "←", 1), (0x26, "↑", 1), (0x28, "↓", 1), (0x27, "→", 1)]
+
     /// The keyboard (ActionPicker.dc.html, with an F-key row and `- =` added), by VK and width.
-    static let keyboard: [[(UInt8, String, Double)]] = [
-        [(0x1B, "Esc", 1.2)] + (0..<12).map { (UInt8(0x70 + $0), "F\($0 + 1)", 1) },
-        [(0xC0, "`", 1)] + Array("1234567890").map { (UInt8($0.asciiValue!), String($0), 1) }
-            + [(0xBD, "-", 1), (0xBB, "=", 1), (0x08, "⌫", 1.4)],
-        [(0x09, "Tab", 1.4)] + Array("QWERTYUIOP").map { (UInt8($0.asciiValue!), String($0), 1) }
-            + [(0xDB, "[", 1), (0xDD, "]", 1), (0xDC, "\\", 1)],
-        [(0x14, "Caps", 1.6)] + Array("ASDFGHJKL").map { (UInt8($0.asciiValue!), String($0), 1) }
-            + [(0xBA, ";", 1), (0xDE, "'", 1), (0x0D, "Enter", 1.6)],
-        [(0xA0, "Shift", 2)] + Array("ZXCVBNM").map { (UInt8($0.asciiValue!), String($0), 1) }
-            + [(0xBC, ",", 1), (0xBE, ".", 1), (0xBF, "/", 1), (0xA1, "Shift", 1.6)],
-        [(0xA2, "Ctrl", 1.3), (0xA4, "Alt", 1.2), (0x20, "Space", 6), (0xA5, "Alt", 1.2),
-         (0x25, "←", 1), (0x26, "↑", 1), (0x28, "↓", 1), (0x27, "→", 1)],
-    ]
+    static let keyboard: [[Key]] = [[(0x1B, "Esc", 1.2)] + fKeys, digitRow, topRow, homeRow, bottomRow, spaceRow]
 
     static func choices(for tab: ActionPickerTab, _ accepts: Accepts) -> [[ActionPickerCell]] {
         func cell(_ a: InputAction?, _ label: String, _ width: Double = 1) -> ActionPickerCell {

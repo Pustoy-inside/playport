@@ -54,8 +54,13 @@ receive)
         sleep 15
     done
     test -s "$handoff/sdk.ready"
-    gh release download "$TRANSFER_TAG" --repo "$GITHUB_REPOSITORY" \
-        --pattern 'sdk.age.part-*' --dir "$handoff"
+    # A draft release is sometimes "not found" for a moment right after it was found.
+    for attempt in $(seq 1 10); do
+        if gh release download "$TRANSFER_TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern 'sdk.age.part-*' --dir "$handoff" --clobber; then break; fi
+        test "$attempt" -lt 10 || exit 1
+        sleep 20
+    done
     cat "$handoff"/sdk.age.part-* > "$handoff/sdk.tar.gz.age"
     echo "$(cat "$handoff/sdk.ready")  $handoff/sdk.tar.gz.age" | sha256sum -c -
     mkdir -p "$handoff/extracted"

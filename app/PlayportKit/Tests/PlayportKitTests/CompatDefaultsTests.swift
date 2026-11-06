@@ -21,12 +21,13 @@ final class CompatDefaultsTests: XCTestCase {
         XCTAssertNil(table.entry(for: "app-367520"))
     }
 
-    /// Every game is served by Playport's Steam client since decision 0153 (0115 was RDR2's alone);
-    /// RDR2's entry keeps the backend the Rockstar launcher it starts draws with.
-    func testEveryGameGetsPlayportsSteamClientAndRDR2KeepsVulkan() throws {
+    /// Dishnur: every game keeps Playport's emulator; RDR2's entry chooses Playport's Steam client
+    /// (decision 0115) and keeps the backend the Rockstar launcher it starts draws with.
+    func testEveryGameGetsTheEmulatorAndRDR2GetsPlayportsSteamClient() throws {
         let table = try CompatDefaults.load(directory: Self.shipped)
         let rdr2 = try XCTUnwrap(table.entry(for: "app-1174180"))
-        XCTAssertNil(rdr2.settings.steamAPI)
+        XCTAssertEqual(rdr2.settings.steamAPI, .client)
+        XCTAssertEqual(LaunchSettings().over(LaunchSettings.overEveryGame(nil)).steamAPI, .emulated)
         XCTAssertEqual(rdr2.settings.graphics, PublisherLauncher.rockstar.graphics)
         XCTAssertEqual(LaunchSettings().over(LaunchSettings.overEveryGame(rdr2.settings)).steamAPI, .client)
         XCTAssertEqual(LaunchSettings(steamAPI: .emulated).over(LaunchSettings.overEveryGame(nil)).steamAPI, .emulated)

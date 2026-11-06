@@ -313,7 +313,8 @@ final class LibraryModel: ObservableObject {
         settings.diskCache = nil
         // Playport's Steam client unless the game's compatibility default says otherwise (decisions 0115, 0153).
         let compat = LaunchSettingsStore.shared.compat(for: t.id)?.settings
-        settings.steamAPI = LaunchSettings.releaseSteamAPI(compat: compat)
+        // Dishnur: the game's own Steam API row (Game options) wins.
+        settings.steamAPI = LaunchSettingsStore.shared.settings(for: t.id).steamAPI ?? LaunchSettings.releaseSteamAPI(compat: compat)
         // The compatibility default's runtime keys, never a person's (decision 0126); every game's go under
         // them in config(over:) (decision 0153).
         settings.runtime = LaunchSettings.releaseRuntime(compat: compat)

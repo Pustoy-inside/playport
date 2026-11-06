@@ -419,14 +419,16 @@ private struct GameDetailPage: View {
         if job == nil, let g, SteamInstallStatus.updateAvailable(t, g.info) {
             SecondaryButton(id: "game:update", systemImage: "arrow.down.circle", title: "Update", enabled: canDownload && !launch.running,
                             hint: "Update") { mods.confirm(t.id, "Update") { installs.install(g.id, name: g.info.name) } }
-        } else if job == nil, let g, let app = t.appID, SteamGameLanguage.needsUpdate(t, g.info) {
-            // Another language chosen (Game options › Language), whose files are its own depots.
-            SecondaryButton(id: "game:language", systemImage: "globe", title: "Download \(GameLanguage.name(SteamGameLanguage.chosen(app, info: g.info)))",
-                            enabled: canDownload && !launch.running,
-                            hint: "Download") { mods.confirm(t.id, "Update") { installs.install(g.id, name: g.info.name) } }
         } else if job == nil, let g, let app = t.appID,
-                  !SteamInstallStatus.missingDLC(t, g.info, model.gameProfiles[app]).isEmpty {
-            SecondaryButton(id: "game:dlc", systemImage: "arrow.down.circle", title: "Download DLC", enabled: canDownload && !launch.running,
+                  SteamGameLanguage.needsUpdate(t, g.info) || !SteamInstallStatus.missingDLC(t, g.info, model.gameProfiles[app]).isEmpty {
+            // Another language chosen (Game options › Language), whose files are its own depots, and/or
+            // owned DLC not downloaded yet: one update brings both, so one button names both.
+            let language = SteamGameLanguage.needsUpdate(t, g.info)
+            let dlc = !SteamInstallStatus.missingDLC(t, g.info, model.gameProfiles[app]).isEmpty
+            let name = GameLanguage.name(SteamGameLanguage.chosen(app, info: g.info))
+            SecondaryButton(id: "game:dlc", systemImage: language && !dlc ? "globe" : "arrow.down.circle",
+                            title: language && dlc ? "Download DLC and \(name)" : language ? "Download \(name)" : "Download DLC",
+                            enabled: canDownload && !launch.running,
                             hint: "Download") { installs.install(g.id, name: g.info.name) }
         }
     }
@@ -845,6 +847,36 @@ private struct GameDetailPage: View {
 
     // MARK: Game options
 
+    #if PLAYPORT_RELEASE
+    /// Dishnur: which Steam API the game gets, Playport's emulator (every game's default) or
+    /// Playport's Steam client with the game's own steam_api (decision 0115), chosen per game.
+    private func steamAPIRow(_ t: InstalledTitle, _ settings: Binding<LaunchSettings>) -> some View {
+        let compat = launchSettings.compat(for: t.id)?.settings
+        let fallback = LaunchSettings.releaseSteamAPI(compat: compat)
+        let own = settings.wrappedValue.steamAPI
+        func text(_ m: SteamAPISwap.Mode) -> String {
+            switch m {
+            case .emulated: "Playport's emulator"
+            case .client: "Playport's Steam client"
+            case .original: "The game's own"
+            }
+        }
+        return PadRow(id: "opt:steamAPI", title: "Steam API", value: text(own ?? fallback) + (own == nil ? " (default)" : ""),
+                      accessory: .chevron, changed: own != nil, style: .plain,
+                      reset: own == nil ? nil : { settings.wrappedValue.steamAPI = nil }) {
+            PadModal.shared.picker(
+                title: "Steam API", context: "\(t.name) · Steam",
+                note: "What answers the game's Steam calls. The emulator suits most games; Playport's Steam client "
+                    + "runs the game's own steam_api for one that needs it (Red Dead Redemption 2). "
+                    + "If a game will not start, shows a Steam error or cannot save, try the other. Applies from the next launch.",
+                options: [PadOption(id: "", label: "Default", detail: text(fallback)),
+                          PadOption(id: SteamAPISwap.Mode.emulated.rawValue, label: text(.emulated)),
+                          PadOption(id: SteamAPISwap.Mode.client.rawValue, label: text(.client))],
+                selected: own?.rawValue ?? "") { settings.wrappedValue.steamAPI = SteamAPISwap.Mode(rawValue: $0) }
+        }
+    }
+    #endif
+
     /// Steam's Properties › Language: the language the game downloads and runs in (SteamGameLanguage).
     private func languageRow(_ t: InstalledTitle, _ app: UInt32, _ g: SteamGame?, _ settings: Binding<LaunchSettings>) -> some View {
         let own = settings.wrappedValue.language
@@ -1063,6 +1095,9 @@ private struct GameDetailPage: View {
         }
         if let app = t.appID, t.store == .steam {
             languageRow(t, app, g, settings)
+            #if PLAYPORT_RELEASE
+            steamAPIRow(t, settings)
+            #endif
         }
         if let app = t.appID {
             let cloudOn = settings.wrappedValue.cloudSync ?? true

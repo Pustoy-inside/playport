@@ -50,8 +50,8 @@ final class WindowsServicesTests: XCTestCase {
         every["env.FEX_HOSTFEATURES"] = "enableafp"
         XCTAssertEqual(effective.config(over: [:]), every)
         XCTAssertEqual(LaunchSettings.releaseRuntime(compat: nil), [:])
-        XCTAssertEqual(LaunchSettings.releaseSteamAPI(compat: nil), .client)
-        XCTAssertEqual(LaunchSettings.releaseSteamAPI(compat: LaunchSettings(steamAPI: .emulated)), .emulated)
+        XCTAssertEqual(LaunchSettings.releaseSteamAPI(compat: nil), .emulated)
+        XCTAssertEqual(LaunchSettings.releaseSteamAPI(compat: LaunchSettings(steamAPI: .client)), .client)
     }
 
     func testRpcSsEntryIsWineInfsAndOnlyTopsUp() throws {

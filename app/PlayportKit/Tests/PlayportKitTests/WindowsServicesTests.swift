@@ -28,7 +28,8 @@ final class WindowsServicesTests: XCTestCase {
     func testEveryGameStartsThemAndRDR2sEntryKeepsItsBackendAndVideoMemory() throws {
         let table = try CompatDefaults.load(directory: CompatDefaultsTests.shipped)
         let rdr2 = try XCTUnwrap(table.entry(for: "app-1174180"))
-        XCTAssertEqual(rdr2.settings, LaunchSettings(graphics: .vulkan, runtime: "vram-mb=2304 env.PLAYPORT_VK_HEAP_MB=2304"))
+        // Dishnur: and Playport's Steam client, every other game keeping the emulator.
+        XCTAssertEqual(rdr2.settings, LaunchSettings(graphics: .vulkan, steamAPI: .client, runtime: "vram-mb=2304 env.PLAYPORT_VK_HEAP_MB=2304"))
         XCTAssertEqual(LaunchSettings.overEveryGame(rdr2.settings).windowsServices, true)
         XCTAssertEqual(LaunchSettings.overEveryGame(nil).windowsServices, true)
         XCTAssertEqual(LaunchSettings(windowsServices: false).over(LaunchSettings.overEveryGame(nil)).windowsServices, false)

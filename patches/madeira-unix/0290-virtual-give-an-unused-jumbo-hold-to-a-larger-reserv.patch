@@ -1,0 +1,110 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: The Playport authors <dev@playport.dev>
+Date: Sat, 7 Nov 2026 15:26:13 +0300
+Subject: [PATCH] virtual: give an unused jumbo hold to a larger reservation
+ that finds no gap
+
+Every game holds 8,960 MB of the band below FEX's at boot (jumbo-mb,
+ml996) for one reservation of exactly that size (0129). The hold sits
+at the top of the band's largest hole and splits it. Trails in the Sky
+1st Chapter reserves 25,600 MB at its start: the band had 23,808 MB
+free below the still-unused hold, the kernel pick found no gap, and the
+game read through the NULL it got back.
+
+When the kernel pick fails for a reservation larger than the hold, the
+hold is now released and the reservation placed again, so a game that
+asks for up to the band's 32 GB in one piece gets it without its own
+jumbo-mb. If it still does not fit, the hold is put back at the same
+address. A reservation of the held size still takes the hold (ml997),
+and a smaller one still leaves it (0171).
+
+Class: upstream-bug
+Evidence: Playport report app-3375780 20261107-130707 ([mmap-place] NO GAP FITS size=0x640010000)
+Offered-upstream: no; the holds are the iOS port's
+---
+ build/ntdll-unix/pp_jumbo_yield.h | 23 +++++++++++++++++++++
+ build/ntdll-unix/virtual_ios.c    | 34 +++++++++++++++++++++++++++++++
+ 2 files changed, 57 insertions(+)
+ create mode 100644 build/ntdll-unix/pp_jumbo_yield.h
+
+diff --git a/build/ntdll-unix/pp_jumbo_yield.h b/build/ntdll-unix/pp_jumbo_yield.h
+new file mode 100644
+index 0000000..56ea243
+--- /dev/null
++++ b/build/ntdll-unix/pp_jumbo_yield.h
+@@ -0,0 +1,23 @@
++/* SPDX-License-Identifier: LGPL-2.1-or-later
++ * When the jumbo hold gives way to a larger reservation (Playport Dishnur 20).
++ *
++ * Every game holds 8,960 MB of the band below FEX's at boot (jumbo-mb, ml996),
++ * for a reservation of exactly that size (0129). The hold sits at the top of
++ * the band's largest hole and so splits it: in a run of Trails in the Sky 1st
++ * Chapter the band had 23,808 MB free below a still-unused hold, and the
++ * game's 25,600 MB reservation found no gap and failed. A reservation larger
++ * than the hold, with no gap of its own, now has the hold released and is
++ * placed again; the hold is put back if it still does not fit.
++ *
++ * Pure, so a host test compiles this header as is. */
++#ifndef PP_JUMBO_YIELD_H
++#define PP_JUMBO_YIELD_H
++#include <stdint.h>
++
++/* Whether a reservation of `size` that found no gap has the hold of `hold_size` released for it. */
++static inline int ppj_hold_yields( uint64_t size, uint64_t hold_size )
++{
++    return hold_size && size > hold_size;
++}
++
++#endif
+diff --git a/build/ntdll-unix/virtual_ios.c b/build/ntdll-unix/virtual_ios.c
+index 64c0a95..040f5b6 100644
+--- a/build/ntdll-unix/virtual_ios.c
++++ b/build/ntdll-unix/virtual_ios.c
+@@ -2043,6 +2043,7 @@ static void ios_va_gap_probe( const char *why )
+  * leaves), and if that does not fit, the desktop breaks instead of the game.
+  */
+ #include "pp_jumbo_hold.h"
++#include "pp_jumbo_yield.h"
+ 
+ static uintptr_t ios_jumbo_hold_base;
+ static size_t    ios_jumbo_hold_size;
+@@ -22943,6 +22944,39 @@ NTSTATUS WINAPI NtAllocateVirtualMemory( HANDLE process, PVOID *ret, ULONG_PTR z
+                             return STATUS_SUCCESS;
+                         }
+                     }
++                    /* Dishnur 20: a larger reservation with no gap of its own gets the
++                     * unused hold's space with the hole below it (pp_jumbo_yield.h). */
++                    else if (ppj_hold_yields( *size_ptr, ios_jumbo_hold_size ))
++                    {
++                        uintptr_t hbase = ios_jumbo_hold_base;
++                        size_t hsize = ios_jumbo_hold_size;
++                        void *pick2 = NULL;
++                        SIZE_T csz = *size_ptr;
++                        unsigned int st3;
++
++                        munmap( (void *)hbase, hsize );
++                        ios_jumbo_hold_base = 0;
++                        ios_jumbo_hold_size = 0;
++                        st3 = allocate_virtual_memory( &pick2, &csz, type, protect, 0, limit, 0, 0 );
++                        dprintf( 2, "[jumbo-hold] Dishnur: released the unused holdback 0x%llx +%llu MB "
++                                 "for a %llu MB request -> %p st=0x%x\n", (unsigned long long)hbase,
++                                 (unsigned long long)hsize >> 20, (unsigned long long)*size_ptr >> 20,
++                                 pick2, st3 );
++                        if (!st3)
++                        {
++                            *ret = pick2;
++                            *size_ptr = csz;
++                            return STATUS_SUCCESS;
++                        }
++                        if (anon_mmap_tryfixed( (void *)hbase, hsize, PROT_NONE, MAP_NORESERVE )
++                            == (void *)hbase)
++                        {
++                            ios_jumbo_hold_base = hbase;
++                            ios_jumbo_hold_size = hsize;
++                            dprintf( 2, "[jumbo-hold] Dishnur: it still did not fit; the holdback is "
++                                     "held again\n" );
++                        }
++                    }
+                 }
+                 if (probed++ < 2)
+                 {

@@ -1,0 +1,81 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: The Playport authors <dev@playport.dev>
+Date: Sat, 7 Nov 2026 17:22:55 +0300
+Subject: [PATCH] ntdll: Search an XInput DLL WINEDLLOVERRIDES names native
+ first as any other.
+
+The XInput DLLs and ucrtbase.dll are always taken from system32 (0007,
+0026, 0034): Microsoft's XInput a game ships sees no pad in this process.
+A game mod's loader is often an xinput1_4.dll proxy beside the game,
+which hooks the game's file opens and loads the system XInput itself;
+its instructions turn it on with WINEDLLOVERRIDES="xinput1_4=n,b"
+(Trails in the Sky 1st Chapter's translation). With that override set,
+Playport still took system32's copy and the translation never loaded.
+
+A system-only name the process's WINEDLLOVERRIDES names native first
+("n" or "n,b") is now searched as any other DLL: the game's folder
+first. Without such an override nothing changes.
+
+Class: feature
+Evidence: Playport report app-3375780 20261107-171417 (XINPUT1_4.dll mapped from system32 with WINEDLLOVERRIDES=xinput1_4=n,b set)
+Offered-upstream: no; the system-only list is Playport's
+---
+ dlls/ntdll/loader.c | 38 ++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 38 insertions(+)
+
+diff --git a/dlls/ntdll/loader.c b/dlls/ntdll/loader.c
+index f18ebbb..ef02d81 100644
+--- a/dlls/ntdll/loader.c
++++ b/dlls/ntdll/loader.c
+@@ -4388,6 +4388,39 @@ done:
+     return status;
+ }
+ 
++/* Playport Dishnur: whether the process's WINEDLLOVERRIDES names `name` (with or
++ * without .dll, any case) native first ("n" or "n,b"), as a game mod's launch
++ * options do for its loader DLL (a translation's xinput1_4.dll proxy, which
++ * loads the system XInput itself). Such a name is searched as any other. */
++static BOOL native_first_override( const WCHAR *name )
++{
++    WCHAR buf[512], *entry, *next, *eq, *mod, *comma;
++    size_t len = wcslen( name );
++
++    if (len > 4 && !wcsicmp( name + len - 4, L".dll" )) len -= 4;
++    memset( buf, 0, sizeof(buf) );
++    if (!get_env( L"WINEDLLOVERRIDES", buf, sizeof(buf) - sizeof(WCHAR) )) return FALSE;
++    for (entry = buf; *entry; entry = next)
++    {
++        if ((next = wcschr( entry, ';' ))) *next++ = 0;
++        else next = entry + wcslen( entry );
++        if (!(eq = wcschr( entry, '=' ))) continue;
++        *eq = 0;
++        if (eq[1] != 'n' && eq[1] != 'N') continue;
++        for (mod = entry; *mod; mod = comma)
++        {
++            size_t mlen;
++            if ((comma = wcschr( mod, ',' ))) *comma++ = 0;
++            else comma = mod + wcslen( mod );
++            while (*mod == ' ') mod++;
++            mlen = wcslen( mod );
++            if (mlen > 4 && !wcsicmp( mod + mlen - 4, L".dll" )) mlen -= 4;
++            if (mlen == len && !wcsnicmp( mod, name, len )) return TRUE;
++        }
++    }
++    return FALSE;
++}
++
+ /* Playport: DLLs a game's own copy of cannot work in this process, so they are
+  * always taken from system32, as a KnownDLL would be. Microsoft's XInput (which
+  * Witcher 3 ships in bin\x64) looks for pads through SetupAPI and HID, and this
+@@ -4413,6 +4446,11 @@ static NTSTATUS open_system_only_dll( const WCHAR *name, UNICODE_STRING *nt_name
+ 
+     for (i = 0; i < ARRAY_SIZE(names); i++) if (!wcsicmp( name, names[i] )) break;
+     if (i == ARRAY_SIZE(names)) return STATUS_DLL_NOT_FOUND;
++    if (native_first_override( name ))
++    {
++        TRACE( "%s: WINEDLLOVERRIDES names it native first; searched as any DLL\n", debugstr_w(name) );
++        return STATUS_DLL_NOT_FOUND;
++    }
+     if (!(buf = RtlAllocateHeap( GetProcessHeap(), 0, (wcslen( sys32W ) + wcslen( name ) + 1) * sizeof(WCHAR) )))
+         return STATUS_NO_MEMORY;
+     wcscpy( buf, sys32W );

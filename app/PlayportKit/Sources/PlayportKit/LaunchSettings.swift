@@ -300,6 +300,9 @@ public struct LaunchSettings: Codable, Equatable, Sendable {
         public var upscaler: Upscaler
         /// FSR 1's sharpening, a percentage (LaunchSettings.rcasStops).
         public var sharpness: Int
+        /// Dishnur: the variables the launch arguments set Steam's way (`NAME=value %command%`,
+        /// LaunchSettings.launchOptions); kept in a release build, unlike graphicsEnvironment.
+        public var launchEnvironment: [String: String] = [:]
 
         public init(screen: String?, aspect: ScreenAspect = .phone, frameLimit: Int, graphics: GraphicsBackend = .default,
                     arguments: [String] = [], steamAPI: SteamAPISwap.Mode = .emulated,
@@ -362,14 +365,15 @@ public struct LaunchSettings: Codable, Equatable, Sendable {
         let screen = [game?.screen, global.screen, defaultScreen].lazy.compactMap { $0 }
             .first(where: LaunchPlan.validScreen)
         let limit = [game?.frameLimit, global.frameLimit].lazy.compactMap { $0 }.first { $0 >= 0 } ?? defaultFrameLimit
-        let dx12 = Direct3D12.requested(arguments: arguments + splitArguments(game?.arguments ?? ""),
+        let own = launchOptions(game?.arguments ?? "")
+        let dx12 = Direct3D12.requested(arguments: arguments + own.arguments,
                                        imported: importsDirect3D12)
         let graphics = game?.graphics ?? global.graphics ?? (dx12 || i386 ? .vulkan : .default)
         let aspect = [game?.aspect, global.aspect].lazy.compactMap { $0.flatMap(ScreenAspect.init(rawValue:)) }.first ?? .phone
         let sharpness = [game?.sharpness, global.sharpness].lazy.compactMap { $0 }.first { (0...100).contains($0) }
             ?? defaultSharpness
-        return Effective(screen: screen, aspect: aspect, frameLimit: limit, graphics: graphics,
-                         arguments: splitArguments(game?.arguments ?? ""), steamAPI: game?.steamAPI ?? .emulated,
+        var effective = Effective(screen: screen, aspect: aspect, frameLimit: limit, graphics: graphics,
+                         arguments: own.arguments, steamAPI: game?.steamAPI ?? .emulated,
                          ordering: game?.ordering ?? MemoryOrdering(),
                          maxInst: game?.maxInst.flatMap { FEXProfile.validBlockSize($0) ? $0 : nil },
                          x87Reduced: game?.x87Reduced, diskCache: game?.diskCache,
@@ -379,6 +383,25 @@ public struct LaunchSettings: Codable, Equatable, Sendable {
                          khronosVulkanLoader: game?.khronosVulkanLoader ?? false,
                          endLauncherAfterSignIn: game?.endLauncherAfterSignIn ?? false,
                          upscaler: game?.upscaler ?? global.upscaler ?? .default, sharpness: sharpness)
+        effective.launchEnvironment = own.environment
+        return effective
+    }
+
+    /// Dishnur: launch arguments as Steam's launch options read them. With `%command%`, the
+    /// `NAME=value` items before it are the game's variables (`WINEDLLOVERRIDES="xinput1_4=n,b"
+    /// %command%`, as a mod's Steam Deck instructions give it), any other item before it (a Linux
+    /// wrapper such as `gamemoderun`) is dropped, and the items after it are the arguments.
+    /// Without `%command%`, every item is an argument, as before.
+    public static func launchOptions(_ line: String) -> (environment: [String: String], arguments: [String]) {
+        let items = splitArguments(line)
+        guard let at = items.firstIndex(of: "%command%") else { return ([:], items) }
+        var env: [String: String] = [:]
+        for item in items[..<at] {
+            guard let eq = item.firstIndex(of: "="), eq != item.startIndex else { continue }
+            let name = String(item[..<eq])
+            if isVariableName(name) { env[name] = String(item[item.index(after: eq)...]) }
+        }
+        return (env, Array(items[items.index(after: at)...]))
     }
 
     /// The resolutions the pickers offer, the same in every aspect ratio, as screen specs;

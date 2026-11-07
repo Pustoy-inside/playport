@@ -736,6 +736,22 @@ final class LaunchSettingsTests: XCTestCase {
         XCTAssertNil(try JSONDecoder().decode(LaunchSettings.self, from: Data("{}".utf8)).cloudSync)
     }
 
+    /// Dishnur: Steam's `NAME=value %command% args` form.
+    func testLaunchOptionsReadLikeSteamsWithCommand() {
+        let mod = LaunchSettings.launchOptions(#"WINEDLLOVERRIDES="xinput1_4=n,b;winmm=n,b" %command%"#)
+        XCTAssertEqual(mod.environment, ["WINEDLLOVERRIDES": "xinput1_4=n,b;winmm=n,b"])
+        XCTAssertEqual(mod.arguments, [])
+        let both = LaunchSettings.launchOptions("gamemoderun DXVK_HUD=1 %command% -windowed -x")
+        XCTAssertEqual(both.environment, ["DXVK_HUD": "1"])
+        XCTAssertEqual(both.arguments, ["-windowed", "-x"])
+        XCTAssertEqual(LaunchSettings.launchOptions("-DX12 A=b").environment, [:])
+        XCTAssertEqual(LaunchSettings.launchOptions("-DX12 A=b").arguments, ["-DX12", "A=b"])
+        let e = LaunchSettings.resolve(game: LaunchSettings(arguments: "WINEDLLOVERRIDES=xinput1_4=n,b %command% -x"),
+                                       global: LaunchSettings())
+        XCTAssertEqual(e.arguments, ["-x"])
+        XCTAssertEqual(e.launchEnvironment, ["WINEDLLOVERRIDES": "xinput1_4=n,b"])
+    }
+
     func testArgumentsSplitLikeACommandLineAndArePerGame() {
         XCTAssertEqual(LaunchSettings.splitArguments(" -DX12  -window-mode \"exclusive full\" \"\" "),
                        ["-DX12", "-window-mode", "exclusive full", ""])

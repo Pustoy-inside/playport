@@ -322,6 +322,13 @@ final class LibraryModel: ObservableObject {
         #else
         var settings = LaunchSettingsStore.shared.effective(for: t)
         #endif
+        // Dishnur: variables the launch arguments set Steam's way (`NAME=value %command%`) reach the game
+        // in every build; a dev build's Graphics options win a name both set.
+        if !settings.launchEnvironment.isEmpty {
+            settings.graphicsEnvironment.merge(settings.launchEnvironment) { graphics, _ in graphics }
+            Self.log("launch options: environment " + settings.launchEnvironment.keys.sorted()
+                .map { "\($0)=\(settings.launchEnvironment[$0]!)" }.joined(separator: " "))
+        }
         // A Battle.net copy's client: Blizzard's x64 client through FEX (decision 0177) drawing with Direct3D 12
         // through vkd3d-proton on Vulkan, whatever the graphics settings say. Its Config.wtf first gets the install's
         // language and region where it names none (else WoW asks in a Win32 box), the intro cinematic marked seen

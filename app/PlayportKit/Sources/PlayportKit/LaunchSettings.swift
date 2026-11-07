@@ -301,7 +301,7 @@ public struct LaunchSettings: Codable, Equatable, Sendable {
         /// FSR 1's sharpening, a percentage (LaunchSettings.rcasStops).
         public var sharpness: Int
         /// Dishnur: the variables the launch arguments set Steam's way (`NAME=value %command%`,
-        /// LaunchSettings.launchOptions); kept in a release build, unlike graphicsEnvironment.
+        /// LaunchSettings.launchOptions); a launch makes them `env.NAME` runtime keys, in every build.
         public var launchEnvironment: [String: String] = [:]
 
         public init(screen: String?, aspect: ScreenAspect = .phone, frameLimit: Int, graphics: GraphicsBackend = .default,

@@ -323,9 +323,10 @@ final class LibraryModel: ObservableObject {
         var settings = LaunchSettingsStore.shared.effective(for: t)
         #endif
         // Dishnur: variables the launch arguments set Steam's way (`NAME=value %command%`) reach the game
-        // in every build; a dev build's Graphics options win a name both set.
+        // in every build, as `env.NAME` runtime keys: they are exported before the runtime starts, since
+        // Wine's unix side reads WINEDLLOVERRIDES and the like once, at its own start (madeira_cfg.h).
         if !settings.launchEnvironment.isEmpty {
-            settings.graphicsEnvironment.merge(settings.launchEnvironment) { graphics, _ in graphics }
+            for (name, value) in settings.launchEnvironment { settings.runtime["env." + name] = value }
             Self.log("launch options: environment " + settings.launchEnvironment.keys.sorted()
                 .map { "\($0)=\(settings.launchEnvironment[$0]!)" }.joined(separator: " "))
         }

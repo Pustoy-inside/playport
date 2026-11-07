@@ -383,6 +383,7 @@ private struct DownloadSettings: View {
     @ObservedObject private var network = NetworkPath.shared
     @AppStorage(DownloadPreferences.backgroundKey) private var background = false
     @ObservedObject private var drive = ExternalStorage.shared
+    @ObservedObject private var saveBackups = SaveBackups.shared
     @ObservedObject private var launchSettings = LaunchSettingsStore.shared
 
     var body: some View {
@@ -414,6 +415,18 @@ private struct DownloadSettings: View {
         }
         SettingsSwitchRow(id: "steamCloud", title: "Sync saves with Steam Cloud",
                           subtitle: "For every game that supports it", on: $steamCloud)
+        PadRow(id: "set:saveBackups", title: "Save backups",
+               subtitle: saveBackups.name.map { "Into \($0), a folder per game · after each play" }
+                   ?? "Choose a folder in Files for a copy of every game's saves",
+               value: saveBackups.name == nil ? "Choose" : "Change", accessory: .chevron, hint: "Choose",
+               reset: saveBackups.name == nil ? nil : { saveBackups.forget() }) { SaveBackups.requests.send() }
+        if saveBackups.name != nil {
+            PadRow(id: "set:saveBackupsNow", title: "Back up saves now",
+                   subtitle: saveBackups.running ? "Copying…" : saveBackups.last ?? "Every played Steam game",
+                   value: nil, accessory: .chevron, hint: "Back up") {
+                Task { await saveBackups.backUpPlayed(all: true) }
+            }
+        }
         SettingsNote(text: "With the drive connected, Install asks whether a new Steam game goes to the iPhone or the drive. "
                      + "A game on the external drive plays only while the drive is connected, and runs from it: "
                      + "a fast SSD keeps loading close to the phone's own. Y on External drive forgets the folder; "
@@ -422,7 +435,10 @@ private struct DownloadSettings: View {
                      + "pausing it; it stops when the downloads are done. iOS can still close Playport when the phone "
                      + "runs short of memory: the download then goes on when Playport opens again. "
                      + "A game's saves come from Steam Cloud when its page opens, and go back after a play. "
-                     + "A game's options can turn Steam Cloud off for that game alone.")
+                     + "A game's options can turn Steam Cloud off for that game alone. "
+                     + "Save backups copies each played Steam game's saves into the folder you choose, one folder "
+                     + "per game, after it is played; each copy replaces the last. Y on Save backups forgets the folder; "
+                     + "the copies stay there.")
     }
 }
 

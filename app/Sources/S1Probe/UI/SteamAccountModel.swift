@@ -152,6 +152,8 @@ final class SteamAccountModel: ObservableObject {
         for t in LibraryModel.shared.catalog.titles where t.lastPlayed != nil {
             if let app = t.appID { await syncCloud(app) }
         }
+        // Dishnur: then a copy of the played games' saves in the player's backup folder.
+        await SaveBackups.shared.backUpPlayed()
     }
 
     /// Brings the game's Steam Cloud saves and the phone's together

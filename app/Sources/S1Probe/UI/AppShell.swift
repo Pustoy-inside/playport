@@ -49,6 +49,8 @@ struct AppShell: View {
     @State private var importingMod: GameMods.Pick?
     /// Settings' Choose the external drive's folder (ExternalStorage).
     @State private var importingDrive = false
+    /// Settings' Save backups folder (SaveBackups, Dishnur).
+    @State private var importingBackups = false
     @ObservedObject private var gog = GOGAccount.shared
     @ObservedObject private var epic = EpicAccount.shared
     @ObservedObject private var layoutEditor = LayoutEditorSession.shared
@@ -118,9 +120,12 @@ struct AppShell: View {
         // game to import (Library › Add a game): touch only, as Files is. One picker for both:
         // SwiftUI presents only one fileImporter per hierarchy reliably.
         .fileImporter(isPresented: $importing,
-                      allowedContentTypes: importingDrive ? [.folder] : importingMod?.contentTypes
+                      allowedContentTypes: importingDrive || importingBackups ? [.folder] : importingMod?.contentTypes
                           ?? (importingGame ? GameImports.contentTypes : [.propertyList, .xml, .data])) { result in
-            if importingDrive {
+            if importingBackups {
+                importingBackups = false
+                if case let .success(url) = result { SaveBackups.shared.picked(url) }
+            } else if importingDrive {
                 importingDrive = false
                 if case let .success(url) = result { ExternalStorage.shared.picked(url) }
             } else if let pick = importingMod {
@@ -140,6 +145,7 @@ struct AppShell: View {
             }
         }
         .onReceive(SettingsImport.requests) {
+            importingBackups = false
             importingDrive = false
             importingMod = nil
             importingGame = false
@@ -148,12 +154,21 @@ struct AppShell: View {
         // GOG's and Epic's sign-in pages (touch: a web page, as iOS draws it; decision 0058).
         .sheet(isPresented: $gog.signingIn) { GOGSignInSheet() }
         .sheet(isPresented: $epic.signingIn) { EpicSignInSheet() }
+        .onReceive(SaveBackups.requests) {
+            importingMod = nil
+            importingDrive = false
+            importingGame = false
+            importingBackups = true
+            importing = true
+        }
         .onReceive(ExternalStorage.requests) {
+            importingBackups = false
             importingMod = nil
             importingDrive = true
             importing = true
         }
         .onReceive(GameMods.requests) { pick in
+            importingBackups = false
             importingDrive = false
             importingMod = pick
             importing = true

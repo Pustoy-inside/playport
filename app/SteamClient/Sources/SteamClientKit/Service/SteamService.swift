@@ -827,6 +827,16 @@ public actor SteamService {
         var at: Date
     }
 
+    /// Dishnur: the game's save files on the phone by Steam's name for each (PICS `ufs/savefiles`,
+    /// Cloud.localFiles), for a copy in the player's backup folder (SaveBackups); [:] for a game
+    /// without cloud saves, nil when Steam's rules for it cannot be read now.
+    public func saveFiles(appID: UInt32, roots: Cloud.Roots) async -> [String: URL]? {
+        guard let stored = try? await backend.storedSession(),
+              let records = try? await backend.appRecords([appID]) else { return nil }
+        let rules = records[appID].map(Cloud.rules) ?? []
+        return rules.isEmpty ? [:] : Cloud.localFiles(rules: rules, roots: roots, steamID: stored.steamID)
+    }
+
     /// Brings the game's cloud files on Steam and on the phone together
     /// (Cloud.plan), settling conflicts the player chose in `resolve`. What a
     /// download or a choice replaces goes to `backups/<appid>/<time>/` first.

@@ -12,6 +12,10 @@
       "settings": {"runtime": "short-reserve-mb=6144"},
       "reason": "The current build reserves 64 GB and 32 GB of address space at start, more than an iPhone app has, so it gets the first 6 GB of each and is told it got all of it."
     },
+    "app-3375780": {
+      "settings": {"runtime": "jumbo-mb=25600"},
+      "reason": "Dishnur: the game reserves 25,600 MB of address space in one piece at its start, more than every game's 8,960 MB hold, so the runtime holds a gap of exactly that size for it."
+    },
     "bnet-wow": {
       "settings": {"runtime": "env.FEX_HOSTFEATURES=disableafp,disableavx"},
       "reason": "The game's x86-64 client runs without AVX and takes its SSE paths: its start handles many exceptions, and the emulator does not keep the AVX registers' upper halves in an exception's context, so AVX code could resume with wrong values."

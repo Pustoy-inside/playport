@@ -7,7 +7,7 @@
 //   D-pad   move between keys (sideways wraps)     A   type the key
 //   B       delete (close when there is nothing)   X   space
 //   Y       Shift                                   LB/RB  move the caret
-//   ≡       Done
+//   ≡       Done                                    ⧉   paste (Dishnur)
 //
 // Every close keeps the text: the modal's `done` gets it. A password's
 // keyboard draws dots and keeps its text out of the driver's log
@@ -16,6 +16,7 @@
 import HostIOKit
 import PlayportKit
 import SwiftUI
+import UIKit
 
 @MainActor
 final class PadKeyboardSession: ObservableObject {
@@ -55,7 +56,8 @@ final class PadKeyboardSession: ObservableObject {
         case .lb: state.moveCaret(by: -1)
         case .rb: state.moveCaret(by: 1)
         case .menu: finish()
-        case .view, .lt, .rt: break
+        case .view: paste()
+        case .lt, .rt: break
         }
     }
 
@@ -63,6 +65,18 @@ final class PadKeyboardSession: ObservableObject {
     func key(_ k: PadKey) {
         if state.press(k) == .done { return finish() }
         report()
+    }
+
+    /// Dishnur: the clipboard's text typed at the caret, on one line, curly quotes made straight (a
+    /// launch options line copied from a mod's instructions). iOS asks the player once whether Playport may paste.
+    func paste() {
+        guard let text = UIPasteboard.general.string, !text.isEmpty else { return }
+        edit { s in
+            for c in text {
+                // Notes and Messages turn " into “ ”, which the arguments' quotes are not.
+                s.insert(c.isNewline || c == "\t" ? " " : "“”„«»".contains(c) ? "\"" : c)
+            }
+        }
     }
 
     func tap(row: Int, column: Int) {
@@ -216,6 +230,7 @@ struct PadKeyboardView: View {
             PadModalHint(button: .b, label: session.state.text.isEmpty ? "Close" : "Delete") { session.press(.b) }
             PadModalHint(button: .x, label: "Space") { session.press(.x) }
             PadModalHint(button: .y, label: "Shift") { session.press(.y) }
+            PadModalHint(button: .view, label: "Paste") { session.paste() }
             PadModalHint(button: .menu, label: "Done") { session.press(.menu) }
         }
         .padding(.horizontal, 20)

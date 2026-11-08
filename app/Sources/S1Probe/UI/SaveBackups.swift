@@ -100,7 +100,6 @@ final class SaveBackups: ObservableObject {
     /// now (Steam not signed in yet: tried again later).
     private func backUp(_ t: InstalledTitle, into root: URL) async -> Int? {
         guard let app = t.appID else { return nil }
-        let fm = FileManager.default
         let game = root.appendingPathComponent(SaveBackupLayout.folderName(t.displayName ?? t.name), isDirectory: true)
         var cloud: [String: URL] = [:]
         if let service = SteamAccountModel.current?.service {
@@ -115,16 +114,26 @@ final class SaveBackups: ObservableObject {
             if copy(src, to: game.appendingPathComponent(rel)) { copied += 1 }
         }
         let emulator = EmulatorStats.folder(LibraryModel.emulatorSaves, appID: app)
-        if let walk = fm.enumerator(at: emulator, includingPropertiesForKeys: [.isRegularFileKey]) {
-            for case let src as URL in walk where (try? src.resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile == true {
-                let rel = String(src.standardizedFileURL.path.dropFirst(emulator.standardizedFileURL.path.count))
-                    .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-                if copy(src, to: game.appendingPathComponent(SaveBackupLayout.emulatorFolder, isDirectory: true)
-                    .appendingPathComponent(rel)) { copied += 1 }
-            }
+        for (src, rel) in Self.files(under: emulator) {
+            if copy(src, to: game.appendingPathComponent(SaveBackupLayout.emulatorFolder, isDirectory: true)
+                .appendingPathComponent(rel)) { copied += 1 }
         }
         Self.log("\(t.name): \(copied) file(s) to \(game.lastPathComponent)")
         return copied
+    }
+
+    /// Every file under `dir`, with its path below it.
+    private nonisolated static func files(under dir: URL) -> [(URL, String)] {
+        guard let walk = FileManager.default.enumerator(at: dir, includingPropertiesForKeys: [.isRegularFileKey]) else { return [] }
+        let base = dir.standardizedFileURL.path
+        var out: [(URL, String)] = []
+        while let src = walk.nextObject() as? URL {
+            guard (try? src.resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile == true else { continue }
+            let rel = String(src.standardizedFileURL.path.dropFirst(base.count))
+                .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            if !rel.isEmpty { out.append((src, rel)) }
+        }
+        return out
     }
 
     private func copy(_ src: URL, to dest: URL) -> Bool {

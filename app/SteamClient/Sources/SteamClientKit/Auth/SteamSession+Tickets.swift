@@ -86,11 +86,19 @@ extension SteamSession {
         try await requireCM().send(.clientAuthList, list)
     }
 
+    /// Dishnur: the app's setting for setting the account Online for a play.
+    public static let showPlayingKey = "steam.showPlaying"
+
     /// Tells Steam which games the session is in (an empty list: none), taking
     /// its turn with the calls that set it for themselves (oneStatsCallAtATime).
     public func setGamesPlayed(_ appIDs: [UInt32]) async throws {
         guard case .loggedOn(anonymous: false) = state else { throw SteamError.notLoggedOn }
         let cm = try requireCM()
+        // Dishnur: friends see the game only while the account is Online (Settings › Steam ›
+        // Show what I play, on by default); the status stays as Steam then keeps it.
+        if !appIDs.isEmpty, UserDefaults.standard.object(forKey: Self.showPlayingKey) as? Bool ?? true {
+            try? await cm.send(.clientChangeStatus, CMsgClientChangeStatus(personaState: 1))
+        }
         try await oneStatsCallAtATime { try await cm.send(.clientGamesPlayed, CMsgClientGamesPlayed(gameIDs: appIDs.map(UInt64.init))) }
     }
 }

@@ -31,6 +31,7 @@ public enum EMsg: UInt32, Sendable {
     case serviceMethodSendToClient = 152
     case clientHeartBeat = 703
     case clientLogOff = 706
+    case clientChangeStatus = 716
     case clientGamesPlayed = 742
     case clientLogOnResponse = 751
     case clientLoggedOff = 757
@@ -368,6 +369,22 @@ public struct CMsgClientGamesPlayed: ProtoMessage {
             w.bytes(1, m.bytes)
         }
         w.uint32(2, clientOSType)
+        return w.bytes
+    }
+}
+
+/// CMsgClientChangeStatus (steammessages_clientserver_friends.proto), Dishnur: the account's
+/// persona state as friends see it. A session that never sets one stays offline to them, and
+/// with it the game it plays.
+public struct CMsgClientChangeStatus: ProtoMessage {
+    /// EPersonaState: Online = 1.
+    public var personaState: UInt32 = 1     // 1
+    public var personaSetByUser = true      // 5
+    public init(personaState: UInt32 = 1) { self.personaState = personaState }
+    public func encode() -> [UInt8] {
+        var w = ProtoWriter()
+        w.uint32(1, personaState)
+        w.bool(5, personaSetByUser)
         return w.bytes
     }
 }

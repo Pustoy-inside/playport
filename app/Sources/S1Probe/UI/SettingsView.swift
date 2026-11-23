@@ -380,6 +380,7 @@ private struct DownloadSettings: View {
     @AppStorage(DownloadPreferences.cellularKey) private var cellular = false
     @AppStorage(DownloadPreferences.dimKey) private var dim = true
     @AppStorage(SteamAccountModel.cloudKey) private var steamCloud = true
+    @AppStorage(SteamSession.showPlayingKey) private var showPlaying = true
     @ObservedObject private var network = NetworkPath.shared
     @AppStorage(DownloadPreferences.backgroundKey) private var background = false
     @AppStorage(DownloadIsland.enabledKey) private var liveActivity = true
@@ -418,6 +419,8 @@ private struct DownloadSettings: View {
         }
         SettingsSwitchRow(id: "steamCloud", title: "Sync saves with Steam Cloud",
                           subtitle: "For every game that supports it", on: $steamCloud)
+        SettingsSwitchRow(id: "showPlaying", title: "Show what I play to Steam friends",
+                          subtitle: "Sets you Online in Steam when a game starts", on: $showPlaying)
         PadRow(id: "set:saveBackups", title: "Save backups",
                subtitle: saveBackups.name.map { "Into \($0), a folder per game · after each play" }
                    ?? "Choose a folder in Files for a copy of every game's saves",

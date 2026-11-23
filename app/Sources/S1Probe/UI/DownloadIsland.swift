@@ -74,8 +74,9 @@ final class DownloadIsland {
                 || Date().timeIntervalSince(shownAt) > 15 else { return }
         shown = state
         shownAt = Date()
-        let a = activity
-        Task { await a?.update(.init(state: state, staleDate: nil)) }
+        guard let a = activity else { return }
+        let box = ActivityBox(activity: a)
+        Task { await box.activity.update(.init(state: state, staleDate: nil)) }
     }
 
     /// The queue is done (`last` shows it a few minutes), or the setting is off.
@@ -85,9 +86,16 @@ final class DownloadIsland {
         guard let a = activity else { return }
         activity = nil
         Self.log(immediately ? "ended" : "done")
+        let box = ActivityBox(activity: a)
         Task {
-            await a.end(last.map { .init(state: $0, staleDate: nil) },
+            await box.activity.end(last.map { .init(state: $0, staleDate: nil) },
                         dismissalPolicy: immediately ? .immediate : .after(Date().addingTimeInterval(300)))
         }
     }
+}
+
+/// ActivityKit's Activity isn't Sendable on this SDK; it is safe to update and end
+/// from any task, so the box carries it to one.
+private struct ActivityBox: @unchecked Sendable {
+    let activity: Activity<PlayportDownloadAttributes>
 }

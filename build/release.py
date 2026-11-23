@@ -43,7 +43,7 @@ import zipfile
 from pathlib import Path, PurePosixPath
 
 REPO = Path(__file__).resolve().parent.parent
-PLISTS = ("app/Info.plist", "app/PlayportJIT-Info.plist")
+PLISTS = ("app/Info.plist", "app/PlayportJIT-Info.plist", "app/PlayportWidgets-Info.plist")
 INSTRUCTIONS = ("docs/DISTRIBUTION.md", "docs/BUILDING.md", "docs/DEVICE.md",
                 "docs/LICENSING.md", "docs/NOTICES.md")
 spec = importlib.util.spec_from_file_location("release_source_bundle", REPO / "build/source-bundle.py")

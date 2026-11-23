@@ -377,9 +377,19 @@ def unsigned_checks(app, info, m):
 
 def jit_helper_checks(app, info, signed, profile=True):
     plugins = sorted(p.name for p in (app / "PlugIns").iterdir()) if (app / "PlugIns").is_dir() else []
-    check(plugins == ["PlayportJIT.appex"], f"jit-helper: PlugIns/ holds only PlayportJIT.appex ({plugins})")
-    if plugins != ["PlayportJIT.appex"]:
+    want = ["PlayportJIT.appex", "PlayportWidgets.appex"]
+    check(plugins == want, f"jit-helper: PlugIns/ holds PlayportJIT.appex and (Dishnur) PlayportWidgets.appex ({plugins})")
+    if plugins != want:
         return
+    widgets = app / "PlugIns/PlayportWidgets.appex"
+    winfo = plistlib.loads((widgets / "Info.plist").read_bytes())
+    check(winfo.get("NSExtension", {}).get("NSExtensionPointIdentifier") == "com.apple.widgetkit-extension"
+          and winfo.get("CFBundleIdentifier") == info["CFBundleIdentifier"] + ".PlayportWidgets"
+          and info.get("NSSupportsLiveActivities") is True,
+          "live-activity: PlayportWidgets.appex is a WidgetKit extension, <app>.PlayportWidgets; the app supports Live Activities")
+    wm = macho(widgets / winfo["CFBundleExecutable"])
+    check(wm["cpu"] == 0x0100000c and wm["ftype"] == 2,
+          "live-activity: the widget extension's executable is arm64 MH_EXECUTE")
     ext = app / "PlugIns/PlayportJIT.appex"
     einfo = plistlib.loads((ext / "Info.plist").read_bytes())
     nse = einfo.get("NSExtension", {})

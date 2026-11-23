@@ -49,6 +49,7 @@ final class BackgroundDownloads {
     }
 
     private func check() {
+        DownloadIsland.shared.update(installs)   // Dishnur: the Dynamic Island's progress
         let wanted = DownloadPreferences.current.background && installs?.isBusy == true
             && UIApplication.shared.applicationState != .active && !TitleLaunch.shared.running
             && !AppRestart.shared.restarting

@@ -20,6 +20,9 @@
 	</array>
 	<!-- The pairing code's picture-in-picture window over Settings (PairingCodeWindow.swift);
 	     picture in picture requires this mode. The app plays no audio of its own there. -->
+	<!-- Dishnur: the download Live Activity (DownloadIsland, PlayportWidgets.appex). -->
+	<key>NSSupportsLiveActivities</key>
+	<true/>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>audio</string>

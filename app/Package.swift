@@ -49,6 +49,11 @@ let package = Package(
             name: "PlayportJIT",
             targets: ["PlayportJIT"]
         ),
+        // Dishnur: the download Live Activity's widget extension (xtool.yml extensions).
+        .library(
+            name: "PlayportWidgets",
+            targets: ["PlayportWidgets"]
+        ),
     ],
     dependencies: [
         // The host I/O decisions (key map, pads, lifecycle order), tested on the Linux host.
@@ -163,6 +168,12 @@ let package = Package(
         .target(name: "JITHelperXPC", dependencies: ["SharedMemory"],
                 swiftSettings: release ? [.define("PLAYPORT_RELEASE")] : []),
         .target(name: "PlayportJITEntry"),
+        // Dishnur: the download Live Activity: its data (both sides), the widget extension's
+        // entry and its views.
+        .target(name: "DownloadActivity", swiftSettings: [.swiftLanguageMode(.v5)]),
+        .target(name: "PlayportWidgetsEntry"),
+        .target(name: "PlayportWidgets", dependencies: ["DownloadActivity", "PlayportWidgetsEntry"],
+                swiftSettings: [.swiftLanguageMode(.v5)]),
         .target(
             name: "PlayportJIT",
             dependencies: ["StikJIT", "JITHelperXPC", "PlayportJITEntry", "SharedMemory"],
@@ -176,7 +187,7 @@ let package = Package(
         ),
         .target(
             name: app,
-            dependencies: ["WineHost", "WinIOS", "HostIO", "Upscale", "JITHelperXPC", "KosmicKrisp", "MesaEGL", "MesaGallium",
+            dependencies: ["WineHost", "WinIOS", "HostIO", "Upscale", "JITHelperXPC", "DownloadActivity", "KosmicKrisp", "MesaEGL", "MesaGallium",
                            .product(name: "HostIOKit", package: "HostIOKit"),
                            .product(name: "SteamClientKit", package: "SteamClient"),
                            .product(name: "GOGClientKit", package: "GOGClient"),

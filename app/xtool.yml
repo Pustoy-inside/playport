@@ -16,6 +16,10 @@ extensions:
     infoPath: PlayportJIT-Info.plist
     resources:
       - PlayportJIT/playport-universal.js
+  # Dishnur: the download Live Activity (PlugIns/PlayportWidgets.appex,
+  # dev.playport.app.PlayportWidgets): its progress in the Dynamic Island.
+  - product: PlayportWidgets
+    infoPath: PlayportWidgets-Info.plist
 infoPath: Info.plist
 # The home-screen icon (app/Icon/AppIcon.svg, rendered by app/Icon/render.sh):
 # xtool copies it to the app root and names it CFBundleIconFile. The dev app's

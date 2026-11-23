@@ -382,6 +382,7 @@ private struct DownloadSettings: View {
     @AppStorage(SteamAccountModel.cloudKey) private var steamCloud = true
     @ObservedObject private var network = NetworkPath.shared
     @AppStorage(DownloadPreferences.backgroundKey) private var background = false
+    @AppStorage(DownloadIsland.enabledKey) private var liveActivity = true
     @ObservedObject private var drive = ExternalStorage.shared
     @ObservedObject private var saveBackups = SaveBackups.shared
     @ObservedObject private var launchSettings = LaunchSettingsStore.shared
@@ -396,6 +397,8 @@ private struct DownloadSettings: View {
                           subtitle: "After a minute without input", on: $dim)
         SettingsSwitchRow(id: "background", title: "Download in the background",
                           subtitle: "Keeps going with Playport closed or the phone locked", on: $background)
+        SettingsSwitchRow(id: "liveActivity", title: "Progress in the Dynamic Island",
+                          subtitle: "And on the Lock Screen, while a game downloads", on: $liveActivity)
         PadRow(id: "set:drive", title: "External drive (experimental)",
                subtitle: drive.name.map { drive.root == nil ? "\($0): not connected" : "\($0), connected" }
                    ?? "Choose a folder on a USB-C drive in Files",

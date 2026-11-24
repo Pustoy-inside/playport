@@ -68,3 +68,4 @@
 0069-kernelbase-Wait-for-a-new-thread-to-start-before-ret.patch
 0070-dsound-Keep-six-device-periods-queued-not-three.patch
 0071-ntdll-Search-an-XInput-DLL-WINEDLLOVERRIDES-names-na.patch
+0072-msvcrt-Find-the-base-of-a-builtin-s-C-types-in-its-J.patch

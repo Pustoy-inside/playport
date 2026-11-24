@@ -1,0 +1,171 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: The Playport authors <dev@playport.dev>
+Date: Tue, 24 Nov 2026 20:24:55 +0300
+Subject: [PATCH] msvcrt: Find the base of a builtin's C++ types in its
+ JIT-pool copy.
+
+An ARM64EC builtin's code runs from its JIT-pool copy, and the C++
+exception and RTTI types it throws are addressed PC-relatively there:
+the copy's, which no loader entry covers. RtlPcToFileHeader found no
+module for them, _CxxThrowException recorded image base 0, and the
+catching frame handler read the type's RVAs as absolute addresses: an
+access violation in vcruntime140_1's __CxxFrameHandler4 (CloverPit's
+R66_core.dll, every launch, 7-11 s in).
+
+ntdll's new private wine_ios_pool_image_base gives a pool copy's base,
+the image's base as the copy sees it, and cxx_rva_base (msvcrt's and
+msvcp90's cxx.h) and get_obj_locator_base use it when
+RtlPcToFileHeader finds nothing. The first 16 uses log
+"[pool-base]".
+
+Class: upstream-bug
+Evidence: Playport report app-3314790 20261124-225618 (AV READ of 0x924c in VCRUNTIME140_1.dll find_catch_block4, exception image base 0)
+Offered-upstream: no; the JIT-pool copy is Playport's
+---
+ dlls/msvcp90/cxx.h    | 24 +++++++++++++++++++++++-
+ dlls/msvcrt/cpp.c     |  3 +--
+ dlls/msvcrt/cxx.h     | 24 +++++++++++++++++++++++-
+ dlls/ntdll/loader.c   | 32 ++++++++++++++++++++++++++++++++
+ dlls/ntdll/ntdll.spec |  1 +
+ 5 files changed, 80 insertions(+), 4 deletions(-)
+
+diff --git a/dlls/msvcp90/cxx.h b/dlls/msvcp90/cxx.h
+index 8887217..f3e0a9b 100644
+--- a/dlls/msvcp90/cxx.h
++++ b/dlls/msvcp90/cxx.h
+@@ -389,7 +389,29 @@ extern const vtable_ptr type_info_vtable;
+ static inline uintptr_t cxx_rva_base( const void *ptr )
+ {
+     void *base;
+-    return (uintptr_t)RtlPcToFileHeader( (void *)ptr, &base );
++    uintptr_t ret = (uintptr_t)RtlPcToFileHeader( (void *)ptr, &base );
++#ifdef __arm64ec__
++    /* iOS: a builtin's types live in its JIT-pool copy, which no loader entry
++     * covers; ntdll's wine_ios_pool_image_base gives that copy's base. */
++    if (!ret)
++    {
++        static void * (WINAPI *pool_base)( void * );
++        static BOOL looked;
++        if (!looked)
++        {
++            UNICODE_STRING name;
++            ANSI_STRING proc;
++            HMODULE ntdll;
++            RtlInitUnicodeString( &name, L"ntdll.dll" );
++            RtlInitAnsiString( &proc, "wine_ios_pool_image_base" );
++            if (!LdrGetDllHandle( NULL, 0, &name, &ntdll ))
++                LdrGetProcedureAddress( ntdll, &proc, 0, (void **)&pool_base );
++            looked = TRUE;
++        }
++        if (pool_base) ret = (uintptr_t)pool_base( (void *)ptr );
++    }
++#endif
++    return ret;
+ }
+ 
+ static inline void *cxx_rva( unsigned int rva, uintptr_t base )
+diff --git a/dlls/msvcrt/cpp.c b/dlls/msvcrt/cpp.c
+index c8537bd..aa2c19e 100644
+--- a/dlls/msvcrt/cpp.c
++++ b/dlls/msvcrt/cpp.c
+@@ -80,9 +80,8 @@ static inline const rtti_object_locator *get_obj_locator( void *cppobj )
+ static uintptr_t get_obj_locator_base( const rtti_object_locator *ptr )
+ {
+ #ifdef RTTI_USE_RVA
+-    void *base;
+     if (ptr->signature) return (uintptr_t)ptr - ptr->object_locator;
+-    return (uintptr_t)RtlPcToFileHeader( (void *)ptr, &base );
++    return cxx_rva_base( ptr );
+ #else
+     return 0;
+ #endif
+diff --git a/dlls/msvcrt/cxx.h b/dlls/msvcrt/cxx.h
+index 8887217..f3e0a9b 100644
+--- a/dlls/msvcrt/cxx.h
++++ b/dlls/msvcrt/cxx.h
+@@ -389,7 +389,29 @@ extern const vtable_ptr type_info_vtable;
+ static inline uintptr_t cxx_rva_base( const void *ptr )
+ {
+     void *base;
+-    return (uintptr_t)RtlPcToFileHeader( (void *)ptr, &base );
++    uintptr_t ret = (uintptr_t)RtlPcToFileHeader( (void *)ptr, &base );
++#ifdef __arm64ec__
++    /* iOS: a builtin's types live in its JIT-pool copy, which no loader entry
++     * covers; ntdll's wine_ios_pool_image_base gives that copy's base. */
++    if (!ret)
++    {
++        static void * (WINAPI *pool_base)( void * );
++        static BOOL looked;
++        if (!looked)
++        {
++            UNICODE_STRING name;
++            ANSI_STRING proc;
++            HMODULE ntdll;
++            RtlInitUnicodeString( &name, L"ntdll.dll" );
++            RtlInitAnsiString( &proc, "wine_ios_pool_image_base" );
++            if (!LdrGetDllHandle( NULL, 0, &name, &ntdll ))
++                LdrGetProcedureAddress( ntdll, &proc, 0, (void **)&pool_base );
++            looked = TRUE;
++        }
++        if (pool_base) ret = (uintptr_t)pool_base( (void *)ptr );
++    }
++#endif
++    return ret;
+ }
+ 
+ static inline void *cxx_rva( unsigned int rva, uintptr_t base )
+diff --git a/dlls/ntdll/loader.c b/dlls/ntdll/loader.c
+index ef02d81..d28825d 100644
+--- a/dlls/ntdll/loader.c
++++ b/dlls/ntdll/loader.c
+@@ -6614,6 +6614,38 @@ PVOID WINAPI RtlPcToFileHeader( PVOID pc, PVOID *address )
+ }
+ 
+ 
++#ifdef __arm64ec__
++/***********************************************************************
++ *           wine_ios_pool_image_base   (NTDLL.@)
++ *
++ * iOS: an ARM64EC module's code runs from its JIT-pool copy, and the data it
++ * addresses PC-relatively (a builtin's C++ exception and RTTI types) is the
++ * copy's, which no loader entry covers: RtlPcToFileHeader finds no module for
++ * it. This gives the base of that copy, the image's base as the copy sees it,
++ * so an RVA the image's data holds resolves in the same copy. NULL for an
++ * address in no pool copy.
++ */
++PVOID WINAPI wine_ios_pool_image_base( PVOID pc )
++{
++    extern void *xlate_ios_jit_rev( void *ptr );
++    LDR_DATA_TABLE_ENTRY *module;
++    char *pe = xlate_ios_jit_rev( pc );
++    PVOID ret = NULL;
++
++    if (!pe || pe == (char *)pc) return NULL;
++    RtlEnterCriticalSection( &loader_section );
++    if (!LdrFindEntryForAddress( pe, &module ))
++        ret = (char *)pc - (pe - (char *)module->DllBase);
++    RtlLeaveCriticalSection( &loader_section );
++    {
++        static int n;
++        if (n++ < 16) ERR( "[pool-base] %p (PE %p) -> copy base %p\n", pc, pe, ret );
++    }
++    return ret;
++}
++#endif
++
++
+ /****************************************************************************
+  *		LdrGetDllDirectory  (NTDLL.@)
+  */
+diff --git a/dlls/ntdll/ntdll.spec b/dlls/ntdll/ntdll.spec
+index 08d3293..3e355f4 100644
+--- a/dlls/ntdll/ntdll.spec
++++ b/dlls/ntdll/ntdll.spec
+@@ -935,6 +935,7 @@
+ @ stdcall -arch=win64 RtlOpenCrossProcessEmulatorWorkConnection(long ptr ptr)
+ @ stdcall RtlOpenCurrentUser(long ptr)
+ @ stdcall RtlPcToFileHeader(ptr ptr)
++@ stdcall -private -arch=arm64ec wine_ios_pool_image_base(ptr)
+ @ stdcall RtlPinAtomInAtomTable(ptr long)
+ @ stdcall RtlPopFrame(ptr)
+ @ stdcall RtlPrefixString(ptr ptr long)

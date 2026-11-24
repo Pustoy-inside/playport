@@ -15,6 +15,37 @@ public func ppWidgetsMain() {
 struct PlayportWidgets: WidgetBundle {
     var body: some Widget {
         DownloadLiveActivity()
+        PlayportCheckWidget()
+    }
+}
+
+// Dishnur 22.1: a plain home-screen widget. When "Playport" is in the widget
+// gallery, iOS has this extension and runs it (the Live Activity's check).
+struct PlayportCheckEntry: TimelineEntry { let date: Date }
+
+struct PlayportCheckProvider: TimelineProvider {
+    func placeholder(in context: Context) -> PlayportCheckEntry { .init(date: Date()) }
+    func getSnapshot(in context: Context, completion: @escaping (PlayportCheckEntry) -> Void) {
+        completion(.init(date: Date()))
+    }
+    func getTimeline(in context: Context, completion: @escaping (Timeline<PlayportCheckEntry>) -> Void) {
+        completion(Timeline(entries: [.init(date: Date())], policy: .never))
+    }
+}
+
+struct PlayportCheckWidget: Widget {
+    var body: some WidgetConfiguration {
+        StaticConfiguration(kind: "PlayportCheck", provider: PlayportCheckProvider()) { _ in
+            VStack(spacing: 6) {
+                Image(systemName: "gamecontroller.fill").font(.title)
+                Text("Playport").font(.headline)
+            }
+            .containerBackground(Color.black, for: .widget)
+            .foregroundStyle(.white)
+        }
+        .configurationDisplayName("Playport")
+        .description("Shows that Playport's widgets work.")
+        .supportedFamilies([.systemSmall])
     }
 }
 

@@ -31,6 +31,34 @@ final class DownloadIsland {
     private init() {
         // One left from an earlier run of Playport is this run's to update or end.
         activity = Activity<PlayportDownloadAttributes>.activities.first
+        Self.logSetup()
+        if let a = activity { watch(a) }
+    }
+
+    /// Dishnur 22.1: what the Live Activity needs, in the log once per run.
+    private static func logSetup() {
+        let plugins = Bundle.main.builtInPlugInsURL.flatMap {
+            try? FileManager.default.contentsOfDirectory(atPath: $0.path)
+        } ?? []
+        let widget = Bundle.main.builtInPlugInsURL.map { $0.appendingPathComponent("PlayportWidgets.appex") }
+        let widgetID = widget.flatMap { Bundle(url: $0)?.bundleIdentifier } ?? "none"
+        let info = ActivityAuthorizationInfo()
+        let running = Activity<PlayportDownloadAttributes>.activities.map { a in "\(a.id) \(a.activityState)" }
+        log("setup: app \(Bundle.main.bundleIdentifier ?? "?"), plugins \(plugins.sorted()), widget id \(widgetID), "
+            + "enabled \(info.areActivitiesEnabled), frequent \(info.frequentPushesEnabled), "
+            + "running \(running)")
+    }
+
+    /// Dishnur 22.1: iOS's view of the activity (active, dismissed, ended, stale).
+    private func watch(_ a: Activity<PlayportDownloadAttributes>) {
+        let box = ActivityBox(activity: a)
+        Task.detached {
+            let id = box.activity.id
+            for await state in box.activity.activityStateUpdates {
+                let line = "state \(id): \(state)"
+                await MainActor.run { DownloadIsland.log(line) }
+            }
+        }
     }
 
     /// From BackgroundDownloads' clock, every few seconds, and when the setting changes.
@@ -62,7 +90,8 @@ final class DownloadIsland {
                                                 content: .init(state: state, staleDate: nil), pushType: nil)
                 shown = state
                 shownAt = Date()
-                Self.log("started for \(job.name)")
+                Self.log("started for \(job.name): \(activity!.id) \(activity!.activityState)")
+                watch(activity!)
             } catch {
                 Self.log("not started: \(error)")
             }
